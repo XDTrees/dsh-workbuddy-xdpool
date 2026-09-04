@@ -6,6 +6,14 @@ Merge **every WorkBuddy account** you have ever signed into on this machine into
 
 > Unlike single-account connectors (e.g. `dsh-workbuddy-connect`), XD Pool treats multi-account as the norm — it never picks or imports an account by hand. It scans every historical sign-in snapshot left by the WorkBuddy desktop app, merges them all into one shared pool, and exposes them as a single `workbuddy-xdpool` provider group whose requests auto-fail-over across members.
 
+**Settings card (Settings → Plugins → DSH WorkBuddy XD Pool)**
+
+![WorkBuddy pool settings card: pool health, per-account panels, credit packages, totals](assets/settings-card.png)
+
+**Model picker (rate multiplier baked into model.name; DSH 0.1.2 composer only reads name)**
+
+![Model picker shows the rate and promo badge next to each model name](assets/model-picker.png)
+
 ## Features
 
 - **Zero-config**: install, enable, done. Every account signed into the WorkBuddy desktop app is auto-discovered into the rotation pool on first use.

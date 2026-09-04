@@ -6,6 +6,14 @@
 
 > 与单账号连接插件（如 dsh-workbuddy-connect）的区别：**XD Pool 把多账号当成常态**——它不挑账号、不做手动导入，而是把本机 WorkBuddy 桌面 App 的所有历史登录快照全部纳入一个共享池，用一个 `workbuddy-xdpool` provider 分组对外暴露，模型请求在池内自动 failover。
 
+**插件配置卡片（设置 → 插件 → DSH WorkBuddy XD Pool）**
+
+![WorkBuddy 池设置卡片：池健康状态、账号面板、积分包、合计](assets/settings-card.png)
+
+**模型选择器（倍率直接拼进 model.name：DSH 0.1.2 composer 只读 name）**
+
+![模型选择器每个模型名后显示倍率与促销标签](assets/model-picker.png)
+
 ## 功能
 
 - **零配置开箱即用**：安装并启用后，WorkBuddy 桌面 App 里每个已登录账号都会在第一次被请求时自动发现、进入池中轮换。无需在插件里手动录入账号。
