@@ -100,6 +100,17 @@ function writeOpenAIError(res: ServerResponse, status: number, kind: string, mes
   writeJson(res, status, { error: { message, type: kind, code: kind } })
 }
 
+/** True when an upstream failure body means the request overran the model's
+ *  context window (OpenAI `context_length_exceeded`, WorkBuddy code 11115 /
+ *  "input length too long"). Surfaced as a friendly hint, never auto-truncated. */
+function isContextTooLong(body: string): boolean {
+  if (body.includes('context_length_exceeded')) return true
+  if (body.includes('input length too long')) return true
+  if (body.includes('"code":11115')) return true
+  if (/exceeds?\s+(the\s+)?(model\s+)?context\s+(window|limit)/iu.test(body)) return true
+  return false
+}
+
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -309,6 +320,23 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
     if (last === undefined) {
       writeOpenAIError(res, 500, 'internal', 'chat request exhausted without a result')
+      return
+    }
+    // A context-window overrun is a clear, actionable condition — surface a
+    // friendly hint instead of a bare upstream echo. The provider must NOT
+    // silently truncate or summarise the user's conversation (that drops
+    // context and can answer wrongly); the right move is telling the user.
+    if (isContextTooLong(last.message)) {
+      const subject = modelId === undefined
+        ? 'the conversation exceeds this model\'s context window'
+        : `the conversation exceeds ${modelId}'s context window`
+      writeOpenAIError(
+        res,
+        400,
+        'context_length_exceeded',
+        `${subject}. Shorten the conversation, start a new chat, or pick a model with a larger window ` +
+          `(e.g. hy4-preview).`,
+      )
       return
     }
     writeOpenAIError(
