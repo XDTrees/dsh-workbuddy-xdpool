@@ -20,8 +20,12 @@ export interface AccountStatus {
   domain: string
   /** ISO timestamp when the access token expires. */
   expiresAt?: string
+  /** Account-wide cooldown (every model blocked). */
   cooling: boolean
   cooldownUntil?: string
+  /** Per-model cooldowns active right now (modelId → ISO until); the account
+   *  itself is not `cooling` while only some models are limited. */
+  modelCooldowns?: readonly { modelId: string; until: string }[]
   rateLimitHits: number
   /** Read-only aggregated credit summary for the account. */
   credits?: WorkBuddyCredits
@@ -56,6 +60,10 @@ export async function buildStatus(options: StatusOptions): Promise<WorkBuddyStat
 
   const rows: AccountStatus[] = []
   for (const account of accounts) {
+    const modelCooldowns = Object.entries(account.modelCooldowns)
+      .filter(([, until]) => until > now)
+      .sort((a, b) => a[1] - b[1])
+      .map(([modelId, until]) => ({ modelId, until: new Date(until).toISOString() }))
     const row: AccountStatus = {
       id: account.id,
       label: account.label,
@@ -68,6 +76,7 @@ export async function buildStatus(options: StatusOptions): Promise<WorkBuddyStat
       ...account.cooldownUntilMs > now
         ? { cooldownUntil: new Date(account.cooldownUntilMs).toISOString() }
         : {},
+      ...modelCooldowns.length === 0 ? {} : { modelCooldowns },
       rateLimitHits: account.rateLimitHits,
       sourcePath: account.credential.sourcePath,
     }
@@ -126,6 +135,11 @@ export function formatStatus(status: WorkBuddyStatus): string {
     if (account.creditsError !== undefined) lines.push(`    credits   : query failed — ${account.creditsError}`)
     if (account.cooling && account.cooldownUntil !== undefined) {
       lines.push(`    cooldown  : until ${account.cooldownUntil} (hits ${account.rateLimitHits})`)
+    }
+    if (account.modelCooldowns !== undefined && account.modelCooldowns.length > 0) {
+      for (const mc of account.modelCooldowns) {
+        lines.push(`    model-cool: ${mc.modelId} until ${mc.until}`)
+      }
     }
     lines.push(`    source    : ${account.sourcePath}`)
     lines.push('')

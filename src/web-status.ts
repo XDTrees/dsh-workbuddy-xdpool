@@ -71,6 +71,10 @@ function loopbackOrigin(req: IncomingMessage): boolean {
 function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
   const now = Date.now()
   const cooling = account.cooldownUntilMs > now
+  const modelCooldowns = Object.entries(account.modelCooldowns)
+    .filter(([, until]) => until > now)
+    .sort((a, b) => a[1] - b[1])
+    .map(([modelId, until]) => ({ modelId, until: new Date(until).toISOString() }))
   return {
     id: account.id,
     label: account.label,
@@ -81,6 +85,7 @@ function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
       : { expiresAt: new Date(account.credential.expiresAtMs).toISOString() },
     cooling,
     ...cooling ? { cooldownUntil: new Date(account.cooldownUntilMs).toISOString() } : {},
+    ...modelCooldowns.length === 0 ? {} : { modelCooldowns },
     rateLimitHits: account.rateLimitHits,
   }
 }

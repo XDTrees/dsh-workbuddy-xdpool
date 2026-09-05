@@ -26,9 +26,17 @@ export interface PoolWebAccount {
   domain: string
   /** ISO timestamp; absent when the credential carries no expiry. */
   expiresAt?: string
+  /** Account-wide cooldown (every model blocked); only after a no-model penalize. */
   cooling: boolean
-  /** ISO timestamp when the 429 cooldown lifts; only while cooling. */
+  /** ISO timestamp when the account-wide 429 cooldown lifts; only while cooling. */
   cooldownUntil?: string
+  /**
+   * Per-model cooldowns currently active. The account is NOT `cooling` while a
+   * model is limited — its other models still serve — but each entry tells the
+   * card which model is out until when (e.g. `hy4-preview` cooling to 10:14,
+   * `hy3` normal).
+   */
+  modelCooldowns?: ReadonlyArray<{ modelId: string; until: string }>
   rateLimitHits: number
   /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
   lastUsedAt?: string

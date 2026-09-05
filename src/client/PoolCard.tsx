@@ -343,7 +343,11 @@ function AccountBlock({
   const isActive = account.id === activeAccountId
   const isCooling = account.cooling === true
   const cooldownUntil = account.cooldownUntil !== undefined ? Date.parse(account.cooldownUntil) : undefined
+  const modelCooldowns = account.modelCooldowns ?? []
 
+  // A whole-account cooldown shows the "Cooling" tag; per-model cooldowns do
+  // NOT mark the account cooling (its other models still serve) — they render
+  // as small per-model chips instead, e.g. "hy4-preview cooling to 10:14".
   const tag = isActive
     ? { text: t?.('row.accountNext') ?? 'Next up', cls: 'dsm-workbuddy-xdpool-account-tag' }
     : isCooling
@@ -371,6 +375,16 @@ function AccountBlock({
               {t?.('row.cooldownHits', { hits: account.rateLimitHits ?? 0 })
                 ?? `${account.rateLimitHits ?? 0} hit(s)`}
             </span>
+          : null}
+        {modelCooldowns.length > 0
+          ? <div className="dsm-workbuddy-xdpool-account-modelcool">
+              {modelCooldowns.map(mc => (
+                <span key={mc.modelId} className="dsm-workbuddy-xdpool-account-modelcool-chip">
+                  {t?.('row.modelCooling', { model: mc.modelId, time: formatDateTime(mc.until) })
+                    ?? `${mc.modelId} cooling to ${formatDateTime(mc.until)}`}
+                </span>
+              ))}
+            </div>
           : null}
       </div>
       {account.credits === undefined && account.creditsError === undefined ? null

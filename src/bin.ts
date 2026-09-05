@@ -84,17 +84,24 @@ async function commandStatus(args: string[]): Promise<number> {
 
   const status = {
     ok: accounts.length > 0,
-    accounts: accounts.map(account => ({
-      id: account.id,
-      label: account.label,
-      domain: account.credential.domain,
-      ...account.credential.expiresAtMs === 0
-        ? {}
-        : { expiresAt: new Date(account.credential.expiresAtMs).toISOString() },
-      cooling: account.cooldownUntilMs > Date.now(),
-      rateLimitHits: account.rateLimitHits,
-      sourcePath: account.credential.sourcePath,
-    })),
+    accounts: accounts.map(account => {
+      const now = Date.now()
+      const modelCooling = Object.entries(account.modelCooldowns)
+        .filter(([, until]) => until > now)
+        .map(([modelId, until]) => ({ modelId, until: new Date(until).toISOString() }))
+      return {
+        id: account.id,
+        label: account.label,
+        domain: account.credential.domain,
+        ...account.credential.expiresAtMs === 0
+          ? {}
+          : { expiresAt: new Date(account.credential.expiresAtMs).toISOString() },
+        cooling: account.cooldownUntilMs > now,
+        ...modelCooling.length === 0 ? {} : { modelCooldowns: modelCooling },
+        rateLimitHits: account.rateLimitHits,
+        sourcePath: account.credential.sourcePath,
+      }
+    }),
     cooling: accounts.filter(account => account.cooldownUntilMs > Date.now()).length,
     models: core.catalog.current().map(model => ({ id: model.id, name: model.name, multiplier: model.multiplier })),
     shim: { running: false },
@@ -109,7 +116,10 @@ async function commandStatus(args: string[]): Promise<number> {
           .map(account => {
             const flag = account.cooling ? '⏸ ' : '▶ '
             const hits = account.rateLimitHits > 0 ? ` (hits ${account.rateLimitHits})` : ''
-            return `${flag}${account.label}  [${account.domain || 'cn'}]${hits}\n    ${account.sourcePath}`
+            const modelCooling = (account.modelCooldowns ?? [])
+              .map(mc => `\n    model-cool: ${mc.modelId} until ${mc.until}`)
+              .join('')
+            return `${flag}${account.label}  [${account.domain || 'cn'}]${hits}\n    ${account.sourcePath}${modelCooling}`
           })
           .join('\n'),
     )
