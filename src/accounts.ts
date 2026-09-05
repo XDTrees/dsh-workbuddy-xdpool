@@ -56,8 +56,20 @@ export interface WorkBuddyAccount {
   /** Short human label, e.g. `青楫渡` or `青楫渡#29890334`. */
   label: string
   credential: WorkBuddyCredential
-  /** Epoch ms until which this account is skipped after a rate limit. */
+  /**
+   * Epoch ms until which this account is skipped for EVERY model. Only set by
+   * account-wide cooldowns (callers that penalize without a model id). The
+   * upstream rate limit is actually per-model ("可切换其他模型继续使用"), so
+   * routine 429s are tracked in {@link modelCooldowns} instead and never ban a
+   * whole account.
+   */
   cooldownUntilMs: number
+  /**
+   * Per-model cooldowns, keyed by upstream model id → epoch ms until that model
+   * on THIS account is skipped. A 429 on `hy4-preview` cools only that model
+   * here; `hy3`/`glm-*` on the same account keep serving.
+   */
+  modelCooldowns: Record<string, number>
   /** Consecutive rate-limit hits, for diagnostics. */
   rateLimitHits: number
 }
@@ -288,6 +300,7 @@ export class WorkBuddyAccountPool {
           label: accountLabel(credential),
           credential,
           cooldownUntilMs: 0,
+          modelCooldowns: {},
           rateLimitHits: 0,
         })
         continue
@@ -308,24 +321,37 @@ export class WorkBuddyAccountPool {
     return this.accounts
   }
 
-  /** Accounts currently eligible to serve a request. */
-  private available(now = Date.now()): WorkBuddyAccount[] {
-    return this.accounts.filter(account => account.cooldownUntilMs <= now)
+  /**
+   * Accounts currently eligible to serve a request.
+   *
+   * With a `modelId`, an account is eligible when it is not account-wide cooled
+   * AND that model is not cooling on it — so a 429 on `hy4-preview` only keeps
+   * that model out while `hy3` on the same account stays usable. Without a
+   * model id the legacy account-wide check applies (callers that cannot name a
+   * model, e.g. CLI diagnostics).
+   */
+  private available(now: number, modelId?: string): WorkBuddyAccount[] {
+    return this.accounts.filter(account => {
+      if (account.cooldownUntilMs > now) return false
+      if (modelId !== undefined && (account.modelCooldowns[modelId] ?? 0) > now) return false
+      return true
+    })
   }
 
   /**
-   * Pick the next usable account. Scans on first use, and rescans when every
-   * known account is cooling down — a fresh desktop login is the usual way out
-   * of an exhausted pool. A preferred (user-selected) account that is healthy
-   * is tried first; otherwise the cursor round-robins so consecutive requests
-   * spread across accounts and a still-cooling preferred account is skipped.
+   * Pick the next usable account for an optional model. Scans on first use,
+   * and rescans when every known account is cooling down — a fresh desktop
+   * login is the usual way out of an exhausted pool. A preferred
+   * (user-selected) account that is healthy is tried first; otherwise the
+   * cursor round-robins so consecutive requests spread across accounts and a
+   * still-cooling preferred account is skipped.
    */
-  async acquire(): Promise<WorkBuddyAccount | undefined> {
+  async acquire(modelId?: string): Promise<WorkBuddyAccount | undefined> {
     if (this.accounts.length === 0) await this.scan()
-    let pool = this.available()
+    let pool = this.available(Date.now(), modelId)
     if (pool.length === 0) {
       await this.scan()
-      pool = this.available()
+      pool = this.available(Date.now(), modelId)
     }
     if (pool.length === 0) return undefined
 
@@ -411,29 +437,43 @@ export class WorkBuddyAccountPool {
   }
 
   /**
-   * Mark an account rate-limited. Pool-wide exhaustion shortens the cooldown
-   * so the pool recovers as soon as any account's window resets.
+   * Mark an account (or one of its models) rate-limited.
+   *
+   * With `modelId`, only that model on the account is cooled — the account's
+   * other models stay in rotation, matching the upstream's per-model rate
+   * limit ("可切换其他模型继续使用"). Without a model id the whole account is
+   * cooled, which callers should reserve for limits that truly span every model.
    */
-  penalize(accountId: string, resetAtMs?: number): void {
+  penalize(accountId: string, resetAtMs?: number, modelId?: string): void {
     const account = this.accounts.find(item => item.id === accountId)
     if (account === undefined) return
     account.rateLimitHits += 1
     const until = resetAtMs ?? Date.now() + this.cooldownMs
+    if (modelId !== undefined && modelId !== '') {
+      account.modelCooldowns[modelId] = Math.max(account.modelCooldowns[modelId] ?? 0, until)
+      this.logger?.warn(
+        `dsh-workbuddy-xdpool: ${account.label} rate-limited on model ${modelId}; ` +
+          `cooling that model until ${new Date(until).toISOString()}`,
+      )
+      return
+    }
     account.cooldownUntilMs = Math.max(account.cooldownUntilMs, until)
     this.logger?.warn(
       `dsh-workbuddy-xdpool: account ${account.label} rate-limited; cooling until ${new Date(until).toISOString()}`,
     )
   }
 
-  /** Clear cooldowns, e.g. from a `doctor --reset` command. */
+  /** Clear all cooldowns (account-wide and per-model), e.g. from a reset command. */
   resetCooldowns(): void {
     for (const account of this.accounts) {
       account.cooldownUntilMs = 0
+      account.modelCooldowns = {}
       account.rateLimitHits = 0
     }
   }
 
-  /** Diagnostics snapshot. */
+  /** Diagnostics snapshot. Account-wide cooling count (per-model cooling excluded:
+   *  the account as a whole stays usable when only one model is limited). */
   status(): { count: number; cooling: number; lastScanAtMs: number } {
     const now = Date.now()
     return {

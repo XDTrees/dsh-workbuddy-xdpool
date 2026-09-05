@@ -217,6 +217,17 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     const controller = new AbortController()
     req.on('close', () => controller.abort())
 
+    // The request's target model. The upstream rate limit is per-model ("可切换
+    // 其他模型继续使用"), so cooldowns are keyed by (account, model): a 429 on
+    // `hy4-preview` only cools that model on the account, never the whole one.
+    let modelId: string | undefined
+    try {
+      const parsed = JSON.parse(raw) as { model?: unknown }
+      modelId = typeof parsed.model === 'string' && parsed.model !== '' ? parsed.model : undefined
+    } catch {
+      modelId = undefined
+    }
+
     const tried: string[] = []
     let last: { kind: UpstreamErrorKind; status: number; message: string } | undefined
     let exhaustedByRateLimit = false
@@ -224,16 +235,19 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (controller.signal.aborted) return
 
-      const account = await pool.acquire()
+      const account = await pool.acquire(modelId)
       if (account === undefined) {
         // Distinguish "never signed in" from "every account is rate-limited":
         // they need opposite remedies, so they must not share a status code.
         if (exhaustedByRateLimit && last !== undefined) {
+          const subject = modelId === undefined
+            ? 'every WorkBuddy account is rate-limited'
+            : `every account is rate-limited for model ${modelId}`
           writeOpenAIError(
             res,
             KIND_STATUS[last.kind],
             last.kind,
-            `every WorkBuddy account is rate-limited (tried ${tried.length}: ${tried.join(', ')}); ` +
+            `${subject} (tried ${tried.length}: ${tried.join(', ')}); ` +
               `resets at the upstream window — ${last.message.slice(0, 200)}`,
           )
           return
@@ -284,9 +298,12 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       if (result.kind !== 'soft_rate') break
 
       exhaustedByRateLimit = true
-      pool.penalize(account.id, parseRateLimitReset(result.message))
+      // Cool only this model on this account; the account's other models stay
+      // usable (the upstream explicitly allows switching to another model).
+      pool.penalize(account.id, parseRateLimitReset(result.message), modelId)
       logger?.warn(
-        `dsh-workbuddy-xdpool: ${account.label} rate-limited (attempt ${attempt + 1}/${maxAttempts}); rotating`,
+        `dsh-workbuddy-xdpool: ${account.label} rate-limited on ${modelId ?? '(no model)'} ` +
+          `(attempt ${attempt + 1}/${maxAttempts}); rotating`,
       )
     }
 
