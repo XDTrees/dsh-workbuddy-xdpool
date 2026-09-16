@@ -21,6 +21,10 @@ Merge **every WorkBuddy account** you have ever signed into on this machine into
 
 ![Model picker shows the rate and promo badge next to each model name](assets/model-picker.png)
 
+**Domestic / international dual suppliers (each with its own accounts, credits and models, usable at the same time)**
+
+![Switching between the domestic and international tabs: the side with no sign-in lists the steps for that region](assets/region-tabs.png)
+
 ## Features
 
 - **Zero-config**: install, enable, done. Every account signed into the WorkBuddy desktop app is auto-discovered into the rotation pool on first use.

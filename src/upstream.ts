@@ -121,9 +121,16 @@ const HARD_CREDIT_MARKERS = [
 const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153']
 
 /** Region for a login domain; an empty domain means CN (matching upstream tooling). */
+/** The two gateways WorkBuddy serves: the domestic one and the international one. */
+export type WorkBuddyRegion = 'cn' | 'global'
+
 export function regionOf(domain: string): 'cn' | 'global' {
   const lowered = domain.trim().toLowerCase()
-  if (lowered === 'workbuddy.ai' || lowered.endsWith('.workbuddy.ai')) return 'global'
+  // The desktop client treats both .ai and .cc as the international gateway
+  // (see its isInternationalHost list), so a login that landed on either
+  // must route to the global base rather than back to the CN one.
+  if (lowered.endsWith('.workbuddy.ai') || lowered.endsWith('.workbuddy.cc')) return 'global'
+  if (lowered === 'workbuddy.ai' || lowered === 'workbuddy.cc') return 'global'
   return 'cn'
 }
 

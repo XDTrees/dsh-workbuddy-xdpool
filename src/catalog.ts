@@ -44,22 +44,60 @@ export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
 export class WorkBuddyCatalog {
   private models: readonly WorkBuddyModelInfo[] = FALLBACK_WORKBUDDY_MODELS
   private listeners = new Set<() => void>()
+  /** User's model selection. Empty object = follow the catalog unfiltered. */
+  private selection: ModelSelection = {}
 
   current(): readonly WorkBuddyModelInfo[] {
     return this.models
+  }
+
+  /**
+   * The models DSH should actually offer, after applying the user's selection:
+   * disabled models are dropped, an explicit image list overrides the upstream
+   * capability flag, and a per-model budget caps the advertised window.
+   *
+   * An absent `enabledModelIds` means "everything" — a fresh install with no
+   * saved selection must not present an empty picker.
+   */
+  visible(): readonly WorkBuddyModelInfo[] {
+    const enabled = this.selection.enabledModelIds
+    const allow = enabled === undefined ? undefined : new Set(enabled)
+    const images = this.selection.imageModelIds
+    const imageSet = images === undefined ? undefined : new Set(images)
+    const budgets = this.selection.contextBudgets
+    return this.models
+      .filter(model => allow === undefined || allow.has(model.id))
+      .map(model => {
+        const next = { ...model }
+        if (imageSet !== undefined) next.supportsImages = imageSet.has(model.id)
+        const budget = budgets?.[model.id]
+        if (budget !== undefined && budget > 0 && budget < next.contextWindow) next.contextWindow = budget
+        return next
+      })
   }
 
   /** Replace the catalog and notify the adapter to rebuild its model list. */
   update(models: readonly WorkBuddyModelInfo[]): void {
     if (models.length === 0) return
     this.models = models
-    for (const listener of this.listeners) listener()
+    this.notify()
   }
 
   /** Restore the static fallback, e.g. when the upstream stops answering. */
   reset(): void {
     this.models = FALLBACK_WORKBUDDY_MODELS
-    for (const listener of this.listeners) listener()
+    this.notify()
+  }
+
+  /** Replace the user's selection; the adapter rebuilds from `visible()`. */
+  applySelection(selection: ModelSelection): void {
+    this.selection = selection
+    this.notify()
+  }
+
+  /** The selection currently in force, for the card's save round-trip. */
+  currentSelection(): ModelSelection {
+    return this.selection
   }
 
   onChange(listener: () => void): () => void {
@@ -75,6 +113,20 @@ export class WorkBuddyCatalog {
   updateFromUpstream(models: readonly WorkBuddyUpstreamModel[]): void {
     this.update(catalogFromUpstream(models))
   }
+
+  private notify(): void {
+    for (const listener of this.listeners) listener()
+  }
+}
+
+/** The user's model selection, as stored in the settings section. */
+export interface ModelSelection {
+  /** Absent = every model in the catalog is offered. */
+  enabledModelIds?: readonly string[]
+  /** Absent = each model follows its upstream image capability. */
+  imageModelIds?: readonly string[]
+  /** Per-model context-window cap, keyed by model id. */
+  contextBudgets?: Readonly<Record<string, number>>
 }
 
 /** Convert one upstream catalog entry into the plugin's model-info shape. */

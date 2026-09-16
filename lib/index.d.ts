@@ -3,18 +3,134 @@ import { Api, Model } from "@earendil-works/pi-ai";
 import { PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
 import { Context } from "@deepseek-ai/cordis";
 import { SettingsNamespace } from "@deepseek-ai/dsh-settings";
-//#region src/accounts.d.ts
+//#region src/upstream.d.ts
+/** Upstream failure classes the shim maps onto distinct HTTP answers. */
+type UpstreamErrorKind = 'hard_credit' | 'soft_rate' | 'session_dead' | 'not_found' | 'server' | 'client';
+/** Token-refresh answer; fields the upstream omits stay absent. */
+interface WorkBuddyRefreshOutcome {
+  accessToken: string;
+  refreshToken?: string;
+  expiresInSec?: number;
+  domain?: string;
+}
+/** One CLI-usable model, carrying what the plugin card displays. */
+interface WorkBuddyUpstreamModel {
+  id: string;
+  name: string;
+  contextWindow: number;
+  maxTokens: number;
+  creditMultiplier?: number;
+  multimodal?: boolean;
+  reasoning?: {
+    supportedEfforts?: readonly string[];
+    defaultEffort?: string;
+    canDisableThinking?: boolean;
+  };
+  descriptionZh?: string;
+  descriptionEn?: string;
+  supportsToolCall?: boolean;
+}
+/** One billing package, already normalised. */
+interface WorkBuddyCreditPackage {
+  packageName: string;
+  remain: number;
+  size: number;
+  monthly: boolean;
+  refreshAtMs?: number;
+  expiresAtMs?: number;
+}
+/** Aggregated credit answer for one credential. */
+interface WorkBuddyCredits {
+  total: number;
+  packages: readonly WorkBuddyCreditPackage[];
+  expiringSoon: number;
+  nearestExpiryMs?: number;
+}
+/** Daily check-in activity state. */
+interface WorkBuddyCheckinStatus {
+  active: boolean;
+  todayCheckedIn: boolean;
+  streakDays: number;
+  dailyCredit: number;
+  todayCredit: number;
+  isStreakDay: boolean;
+  nextStreakDay: number;
+  streakBonusDays: number;
+  streakBonusCredit: number;
+  /** Upstream-supplied button label; the card falls back to its own copy. */
+  claimButtonText?: string;
+}
+/** Daily check-in claim result. */
+interface WorkBuddyCheckinClaim {
+  credit: number;
+  streakDays: number;
+  isStreakDay: boolean;
+}
+/** Result of one upstream chat attempt. */
+type ChatStreamResult = {
+  ok: true;
+  response: Response;
+} | {
+  ok: false;
+  kind: UpstreamErrorKind;
+  status: number;
+  message: string;
+};
+interface UpstreamClientOptions {
+  /** Injectable fetch, primarily for tests. */
+  fetchImpl?: typeof fetch;
+  /** Client version string sent to the upstream. */
+  clientVersion?: string;
+}
+/** Region for a login domain; an empty domain means CN (matching upstream tooling). */
+/** The two gateways WorkBuddy serves: the domestic one and the international one. */
+type WorkBuddyRegion = 'cn' | 'global';
 /**
- * Account pool: discovers every WorkBuddy credential snapshot the desktop app
- * has left on this machine and hands out one healthy account per request,
- * rotating away from any account the upstream has rate-limited.
- *
- * Discovery is read-only: the desktop app's files are never written. Each
- * account is keyed by its billing identity (`uin`, falling back to `uid`), so
- * re-logging the same account refreshes in place instead of creating a duplicate.
- *
- * @module dsh-workbuddy-xdpool/accounts
+ * Classify an upstream failure from its HTTP status and body excerpt.
+ * Body markers win over status, because the upstream reuses 400/200 for
+ * several distinct conditions.
  */
+export declare function classifyUpstreamError(status: number, body: string): UpstreamErrorKind;
+/**
+ * Parse the reset time the upstream reports for a rate limit, when present.
+ * Recognises an epoch-millisecond field and the Chinese-localised sentence
+ * form, so the pool can resume exactly when the window reopens.
+ */
+export declare function parseRateLimitReset(body: string): number | undefined;
+export declare class WorkBuddyUpstreamClient {
+  private readonly fetchImpl;
+  private readonly clientVersion;
+  constructor(options?: UpstreamClientOptions);
+  /**
+   * Normalize an OpenAI chat-completions body for the WorkBuddy upstream:
+   * force `stream: true` (the upstream rejects non-streaming), convert the
+   * DSH `developer` role into `system` (upstream rejects `developer` with
+   * business code 11128), and flatten `tool_choice` into its string form.
+   */
+  prepareChatBody(raw: string): string;
+  /** Forward one chat completion. Never throws for upstream failures. */
+  chatStream(credential: WorkBuddyCredential, prepared: string, signal?: AbortSignal): Promise<ChatStreamResult>;
+  /** POST the token-refresh endpoint; the caller merges the outcome. */
+  refreshToken(credential: WorkBuddyCredential): Promise<WorkBuddyRefreshOutcome>;
+  /** GET the personal model catalog, keeping the `cli` agent's models only. */
+  fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]>;
+  /** Read-only credits query, aggregated by package. Does not consume credits. */
+  fetchCredits(credential: WorkBuddyCredential): Promise<WorkBuddyCredits>;
+  /** Query today's check-in status without changing account state. */
+  fetchCheckinStatus(credential: WorkBuddyCredential): Promise<WorkBuddyCheckinStatus>;
+  /** Claim today's check-in reward. The browser route guards this mutation. */
+  claimDailyCheckin(credential: WorkBuddyCredential): Promise<WorkBuddyCheckinClaim>;
+  /** Legacy thin wrapper kept for `status`/`doctor`: returns raw envelope data. */
+  credits(credential: WorkBuddyCredential): Promise<{
+    ok: true;
+    data: unknown;
+  } | {
+    ok: false;
+    message: string;
+  }>;
+}
+//#endregion
+//#region src/accounts.d.ts
 /** Minimal upstream surface the pool needs to refresh a token (no circular import). */
 interface TokenRefresher {
   refreshToken(credential: WorkBuddyCredential): Promise<{
@@ -129,7 +245,7 @@ export declare class WorkBuddyAccountPool {
   /** Rescan the auth directories and merge newly discovered accounts. */
   scan(): Promise<WorkBuddyAccount[]>;
   /** All accounts, cooldown state included. */
-  list(): readonly WorkBuddyAccount[];
+  list(region?: WorkBuddyRegion): readonly WorkBuddyAccount[];
   /**
    * Accounts currently eligible to serve a request.
    *
@@ -148,7 +264,7 @@ export declare class WorkBuddyAccountPool {
    * cursor round-robins so consecutive requests spread across accounts and a
    * still-cooling preferred account is skipped.
    */
-  acquire(modelId?: string): Promise<WorkBuddyAccount | undefined>;
+  acquire(modelId?: string, region?: WorkBuddyRegion): Promise<WorkBuddyAccount | undefined>;
   /** Pin the account the plugin card should prefer; tokens stay out of settings. */
   prefer(accountId: string | undefined): void;
   /** Best-effort refresh of one account after a session-dead upstream answer. */
@@ -180,130 +296,6 @@ export declare class WorkBuddyAccountPool {
   };
 }
 //#endregion
-//#region src/upstream.d.ts
-/** Upstream failure classes the shim maps onto distinct HTTP answers. */
-type UpstreamErrorKind = 'hard_credit' | 'soft_rate' | 'session_dead' | 'not_found' | 'server' | 'client';
-/** Token-refresh answer; fields the upstream omits stay absent. */
-interface WorkBuddyRefreshOutcome {
-  accessToken: string;
-  refreshToken?: string;
-  expiresInSec?: number;
-  domain?: string;
-}
-/** One CLI-usable model, carrying what the plugin card displays. */
-interface WorkBuddyUpstreamModel {
-  id: string;
-  name: string;
-  contextWindow: number;
-  maxTokens: number;
-  creditMultiplier?: number;
-  multimodal?: boolean;
-  reasoning?: {
-    supportedEfforts?: readonly string[];
-    defaultEffort?: string;
-    canDisableThinking?: boolean;
-  };
-  descriptionZh?: string;
-  descriptionEn?: string;
-  supportsToolCall?: boolean;
-}
-/** One billing package, already normalised. */
-interface WorkBuddyCreditPackage {
-  packageName: string;
-  remain: number;
-  size: number;
-  monthly: boolean;
-  refreshAtMs?: number;
-  expiresAtMs?: number;
-}
-/** Aggregated credit answer for one credential. */
-interface WorkBuddyCredits {
-  total: number;
-  packages: readonly WorkBuddyCreditPackage[];
-  expiringSoon: number;
-  nearestExpiryMs?: number;
-}
-/** Daily check-in activity state. */
-interface WorkBuddyCheckinStatus {
-  active: boolean;
-  todayCheckedIn: boolean;
-  streakDays: number;
-  dailyCredit: number;
-  todayCredit: number;
-  isStreakDay: boolean;
-  nextStreakDay: number;
-  streakBonusDays: number;
-  streakBonusCredit: number;
-  /** Upstream-supplied button label; the card falls back to its own copy. */
-  claimButtonText?: string;
-}
-/** Daily check-in claim result. */
-interface WorkBuddyCheckinClaim {
-  credit: number;
-  streakDays: number;
-  isStreakDay: boolean;
-}
-/** Result of one upstream chat attempt. */
-type ChatStreamResult = {
-  ok: true;
-  response: Response;
-} | {
-  ok: false;
-  kind: UpstreamErrorKind;
-  status: number;
-  message: string;
-};
-interface UpstreamClientOptions {
-  /** Injectable fetch, primarily for tests. */
-  fetchImpl?: typeof fetch;
-  /** Client version string sent to the upstream. */
-  clientVersion?: string;
-}
-/**
- * Classify an upstream failure from its HTTP status and body excerpt.
- * Body markers win over status, because the upstream reuses 400/200 for
- * several distinct conditions.
- */
-export declare function classifyUpstreamError(status: number, body: string): UpstreamErrorKind;
-/**
- * Parse the reset time the upstream reports for a rate limit, when present.
- * Recognises an epoch-millisecond field and the Chinese-localised sentence
- * form, so the pool can resume exactly when the window reopens.
- */
-export declare function parseRateLimitReset(body: string): number | undefined;
-export declare class WorkBuddyUpstreamClient {
-  private readonly fetchImpl;
-  private readonly clientVersion;
-  constructor(options?: UpstreamClientOptions);
-  /**
-   * Normalize an OpenAI chat-completions body for the WorkBuddy upstream:
-   * force `stream: true` (the upstream rejects non-streaming), convert the
-   * DSH `developer` role into `system` (upstream rejects `developer` with
-   * business code 11128), and flatten `tool_choice` into its string form.
-   */
-  prepareChatBody(raw: string): string;
-  /** Forward one chat completion. Never throws for upstream failures. */
-  chatStream(credential: WorkBuddyCredential, prepared: string, signal?: AbortSignal): Promise<ChatStreamResult>;
-  /** POST the token-refresh endpoint; the caller merges the outcome. */
-  refreshToken(credential: WorkBuddyCredential): Promise<WorkBuddyRefreshOutcome>;
-  /** GET the personal model catalog, keeping the `cli` agent's models only. */
-  fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]>;
-  /** Read-only credits query, aggregated by package. Does not consume credits. */
-  fetchCredits(credential: WorkBuddyCredential): Promise<WorkBuddyCredits>;
-  /** Query today's check-in status without changing account state. */
-  fetchCheckinStatus(credential: WorkBuddyCredential): Promise<WorkBuddyCheckinStatus>;
-  /** Claim today's check-in reward. The browser route guards this mutation. */
-  claimDailyCheckin(credential: WorkBuddyCredential): Promise<WorkBuddyCheckinClaim>;
-  /** Legacy thin wrapper kept for `status`/`doctor`: returns raw envelope data. */
-  credits(credential: WorkBuddyCredential): Promise<{
-    ok: true;
-    data: unknown;
-  } | {
-    ok: false;
-    message: string;
-  }>;
-}
-//#endregion
 //#region src/catalog.d.ts
 /** One model the provider exposes. */
 interface WorkBuddyModelInfo {
@@ -326,15 +318,40 @@ export declare const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[];
 export declare class WorkBuddyCatalog {
   private models;
   private listeners;
+  /** User's model selection. Empty object = follow the catalog unfiltered. */
+  private selection;
   current(): readonly WorkBuddyModelInfo[];
+  /**
+   * The models DSH should actually offer, after applying the user's selection:
+   * disabled models are dropped, an explicit image list overrides the upstream
+   * capability flag, and a per-model budget caps the advertised window.
+   *
+   * An absent `enabledModelIds` means "everything" — a fresh install with no
+   * saved selection must not present an empty picker.
+   */
+  visible(): readonly WorkBuddyModelInfo[];
   /** Replace the catalog and notify the adapter to rebuild its model list. */
   update(models: readonly WorkBuddyModelInfo[]): void;
   /** Restore the static fallback, e.g. when the upstream stops answering. */
   reset(): void;
+  /** Replace the user's selection; the adapter rebuilds from `visible()`. */
+  applySelection(selection: ModelSelection): void;
+  /** The selection currently in force, for the card's save round-trip. */
+  currentSelection(): ModelSelection;
   onChange(listener: () => void): () => void;
   find(id: string): WorkBuddyModelInfo | undefined;
   /** Replace the catalog from the live upstream list; keeps the fallback if empty. */
   updateFromUpstream(models: readonly WorkBuddyUpstreamModel[]): void;
+  private notify;
+}
+/** The user's model selection, as stored in the settings section. */
+interface ModelSelection {
+  /** Absent = every model in the catalog is offered. */
+  enabledModelIds?: readonly string[];
+  /** Absent = each model follows its upstream image capability. */
+  imageModelIds?: readonly string[];
+  /** Per-model context-window cap, keyed by model id. */
+  contextBudgets?: Readonly<Record<string, number>>;
 }
 //#endregion
 //#region src/shim.d.ts
@@ -354,6 +371,12 @@ interface WorkBuddyShimOptions {
   client: WorkBuddyUpstreamClient;
   catalog: WorkBuddyCatalog;
   logger?: ShimLogger;
+  /**
+   * Restrict this shim to one gateway. Two shims run side by side — one
+   * per region — and each must only ever draw accounts that belong to its
+   * own gateway. Absent means "every account" (a single-region deployment).
+   */
+  region?: WorkBuddyRegion;
   /** Max accounts to try per request before giving up. */
   maxAttempts?: number;
 }
@@ -361,6 +384,7 @@ export declare function createWorkBuddyShim(options: WorkBuddyShimOptions): Work
 //#endregion
 //#region src/adapter.d.ts
 /** Provider route this bundle owns. */
+/** Provider route this bundle owns for the domestic (CN) gateway. */
 export declare const WORKBUDDY_POOL_PROVIDER = "workbuddy-xdpool";
 interface WorkBuddyAdapterOptions {
   shim: WorkBuddyShim;
@@ -465,6 +489,8 @@ export declare const POOL_RESCAN_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/
 export declare const POOL_RESET_COOLDOWN_PATH = "/plugins/dsh-workbuddy-xdpool/cooldowns/reset";
 /** Plugin-owned daily check-in action endpoint (claim today's reward). */
 export declare const POOL_CHECKIN_PATH = "/plugins/dsh-workbuddy-xdpool/checkin";
+/** Plugin-owned model-selection save endpoint (writes the settings section). */
+export declare const POOL_MODELS_SAVE_PATH = "/plugins/dsh-workbuddy-xdpool/models/save";
 /** One pool account's row, token-free. */
 interface PoolWebAccount {
   id: string;
@@ -559,8 +585,27 @@ interface PoolWebModel {
   multiplier?: number;
   /** Upstream tags: free / limited-free / night-discount. */
   tags?: readonly string[];
+  /** Effective image support after the user's per-model toggle. */
   supportsImages: boolean;
+  /** Effective context window after the user's budget cap. */
   contextWindow: number;
+  /** The window the upstream advertises, before any cap. */
+  nativeContextWindow: number;
+  /** Upstream output ceiling, so the card can show both limits. */
+  maxOutputTokens: number;
+  /** Thinking levels the upstream declares, when it declares any. */
+  supportedEfforts?: readonly string[];
+  /** Whether this model is currently enabled in the picker. */
+  enabled: boolean;
+}
+/** The user's saved model selection, echoed back so the card can diff a draft. */
+interface PoolWebModelSelection {
+  /** Absent = every model is enabled. */
+  enabledModelIds?: readonly string[];
+  /** Absent = each model follows its upstream image capability. */
+  imageModelIds?: readonly string[];
+  /** Per-model context-window cap, keyed by model id. */
+  contextBudgets?: Readonly<Record<string, number>>;
 }
 /** The JSON document the pool card renders. */
 interface PoolWebStatus {
@@ -570,11 +615,23 @@ interface PoolWebStatus {
   activeAccountId?: string;
   cooling: number;
   models: readonly PoolWebModel[];
+  /** The saved selection the card diffs its draft against. */
+  selection: PoolWebModelSelection;
+  /** Which region this document describes. */
+  region: PoolRegion;
+  /** Every region holding at least one account, in display order. */
+  regions: readonly PoolRegion[];
   shim: {
     running: boolean;
     baseUrl?: string;
   };
 }
+/**
+ * The two gateways, matching the provider ids the host registers. `cn` is the
+ * domestic gateway (`copilot.tencent.com` / `codebuddy.cn`); `global` is the
+ * international one (`workbuddy.ai`).
+ */
+type PoolRegion = 'cn' | 'global';
 //#endregion
 //#region src/index.d.ts
 /** Stable Cordis plugin name. */
@@ -594,7 +651,34 @@ export interface Config {
   authFile?: string;
   /** Rate-limit cooldown per account, milliseconds. */
   cooldownMs?: number;
+  /**
+   * Model ids enabled in the picker. Absent means "every model the catalog
+   * advertises" — an unconfigured install should never present an empty model
+   * list just because the key is missing.
+   */
+  enabledModelIds?: readonly string[];
+  /**
+   * Model ids that additionally accept image input. Absent means "follow the
+   * upstream capability flag"; an explicit list is authoritative for the models
+   * it mentions and leaves the rest to the catalog.
+   */
+  imageModelIds?: readonly string[];
+  /**
+   * Per-model context-window override, keyed by model id. The upstream can
+   * advertise more than DSH wants to hand a single turn, so the card lets the
+   * user cap a model without touching the catalog.
+   */
+  contextBudgets?: Record<string, number>;
 }
+/** Upper bound the card offers as the "default" context window, in tokens. */
+export declare const DEFAULT_CONTEXT_BUDGET = 200000;
+/**
+ * Plugin configuration schema.
+ *
+ * `contextBudgets` uses an open object schema rather than a dictionary
+ * helper: the helper infers a cosmokit `Dict` type that the generated .d.ts
+ * cannot name without leaking that dependency to consumers.
+ */
 export declare const Config: z<Config>;
 /** Everything the CLI needs from a live plugin instance. */
 export interface WorkBuddyPoolApi {
@@ -626,4 +710,4 @@ export declare function createCore(logger?: {
  */
 export declare function apply(ctx: Context, config?: Config): void;
 //#endregion
-export type { AccountStatus, Context, PoolWebCheckin, PoolWebCheckinClaim, PoolWebStatus, UpstreamErrorKind, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };
+export type { AccountStatus, Context, ModelSelection, PoolWebCheckin, PoolWebCheckinClaim, PoolWebModel, PoolWebModelSelection, PoolWebStatus, UpstreamErrorKind, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };

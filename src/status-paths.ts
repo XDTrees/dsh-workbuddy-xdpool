@@ -19,6 +19,8 @@ export const POOL_RESCAN_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/rescan'
 export const POOL_RESET_COOLDOWN_PATH = '/plugins/dsh-workbuddy-xdpool/cooldowns/reset'
 /** Plugin-owned daily check-in action endpoint (claim today's reward). */
 export const POOL_CHECKIN_PATH = '/plugins/dsh-workbuddy-xdpool/checkin'
+/** Plugin-owned model-selection save endpoint (writes the settings section). */
+export const POOL_MODELS_SAVE_PATH = '/plugins/dsh-workbuddy-xdpool/models/save'
 
 /** One pool account's row, token-free. */
 export interface PoolWebAccount {
@@ -116,8 +118,28 @@ export interface PoolWebModel {
   multiplier?: number
   /** Upstream tags: free / limited-free / night-discount. */
   tags?: readonly string[]
+  /** Effective image support after the user's per-model toggle. */
   supportsImages: boolean
+  /** Effective context window after the user's budget cap. */
   contextWindow: number
+  /** The window the upstream advertises, before any cap. */
+  nativeContextWindow: number
+  /** Upstream output ceiling, so the card can show both limits. */
+  maxOutputTokens: number
+  /** Thinking levels the upstream declares, when it declares any. */
+  supportedEfforts?: readonly string[]
+  /** Whether this model is currently enabled in the picker. */
+  enabled: boolean
+}
+
+/** The user's saved model selection, echoed back so the card can diff a draft. */
+export interface PoolWebModelSelection {
+  /** Absent = every model is enabled. */
+  enabledModelIds?: readonly string[]
+  /** Absent = each model follows its upstream image capability. */
+  imageModelIds?: readonly string[]
+  /** Per-model context-window cap, keyed by model id. */
+  contextBudgets?: Readonly<Record<string, number>>
 }
 
 /** The JSON document the pool card renders. */
@@ -128,5 +150,18 @@ export interface PoolWebStatus {
   activeAccountId?: string
   cooling: number
   models: readonly PoolWebModel[]
+  /** The saved selection the card diffs its draft against. */
+  selection: PoolWebModelSelection
+  /** Which region this document describes. */
+  region: PoolRegion
+  /** Every region holding at least one account, in display order. */
+  regions: readonly PoolRegion[]
   shim: { running: boolean; baseUrl?: string }
 }
+
+/**
+ * The two gateways, matching the provider ids the host registers. `cn` is the
+ * domestic gateway (`copilot.tencent.com` / `codebuddy.cn`); `global` is the
+ * international one (`workbuddy.ai`).
+ */
+export type PoolRegion = 'cn' | 'global'

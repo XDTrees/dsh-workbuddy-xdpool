@@ -21,29 +21,38 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
-import type { WorkBuddyUpstreamClient } from './upstream.ts'
+import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import {
   POOL_CHECKIN_PATH,
+  POOL_MODELS_SAVE_PATH,
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
   POOL_STATUS_PATH,
   type PoolWebAccount,
   type PoolWebCheckin,
   type PoolWebModel,
+  type PoolWebModelSelection,
   type PoolWebStatus,
+  type PoolRegion,
 } from './status-paths.ts'
 
-export { POOL_CHECKIN_PATH, POOL_RESET_COOLDOWN_PATH, POOL_RESCAN_PATH, POOL_STATUS_PATH }
+export { POOL_CHECKIN_PATH, POOL_MODELS_SAVE_PATH, POOL_RESET_COOLDOWN_PATH, POOL_RESCAN_PATH, POOL_STATUS_PATH }
 export type { PoolWebStatus }
 
-/** Constructor dependencies — a narrow read-only slice of the pool runtime. */
+/** Constructor dependencies — a narrow slice of the pool runtime. */
 export interface PoolStatusRouteOptions {
   pool: WorkBuddyAccountPool
   catalog: WorkBuddyCatalog
   client: WorkBuddyUpstreamClient
   /** Lazily resolve the running loopback shim, when it has bound a port. */
   shim?: () => { running: boolean; baseUrl?: string }
+  /**
+   * Persist the user's model selection. Provided by the host half, which owns
+   * the settings section; absent when the plugin runs without a settings
+   * service (the save route then reports 503 rather than pretending to work).
+   */
+  saveSelection?: (selection: PoolWebModelSelection) => Promise<void> | void
 }
 
 /** Redact token-like content before it crosses to the browser. */
@@ -107,6 +116,41 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
+/**
+ * Validate an untrusted selection payload.
+ *
+ * Returns undefined for anything malformed so the route answers 400 instead of
+ * writing a partial selection into the settings file. An empty array is
+ * meaningful (`enabledModelIds: []` disables every model, and the card blocks
+ * saving that state) so it is preserved rather than treated as absent.
+ */
+function parseSelection(body: Record<string, unknown>): PoolWebModelSelection | undefined {
+  const out: { enabledModelIds?: string[]; imageModelIds?: string[]; contextBudgets?: Record<string, number> } = {}
+  for (const key of ['enabledModelIds', 'imageModelIds'] as const) {
+    const value = body[key]
+    if (value === undefined) continue
+    if (!Array.isArray(value)) return undefined
+    const ids: string[] = []
+    for (const entry of value) {
+      if (typeof entry !== 'string' || entry === '') return undefined
+      ids.push(entry)
+    }
+    out[key] = ids
+  }
+  const budgets = body['contextBudgets']
+  if (budgets !== undefined) {
+    if (typeof budgets !== 'object' || budgets === null || Array.isArray(budgets)) return undefined
+    const map: Record<string, number> = {}
+    for (const [id, raw] of Object.entries(budgets as Record<string, unknown>)) {
+      if (id === '') return undefined
+      if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1000) return undefined
+      map[id] = raw
+    }
+    out.contextBudgets = map
+  }
+  return out
+}
+
 function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
   const now = Date.now()
   const cooling = account.cooldownUntilMs > now
@@ -129,21 +173,36 @@ function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
   }
 }
 
-function toWebModel(model: {
-  id: string
-  name: string
-  contextWindow: number
-  multiplier?: number
-  supportsImages: boolean
-  tags?: readonly string[]
-}): PoolWebModel {
+function toWebModel(
+  model: {
+    id: string
+    name: string
+    contextWindow: number
+    maxOutputTokens: number
+    nativeContextWindow: number
+    multiplier?: number
+    supportsImages: boolean
+    tags?: readonly string[]
+    supportedEfforts?: readonly string[]
+  },
+  selection: PoolWebModelSelection,
+): PoolWebModel {
+  const enabled = selection.enabledModelIds
+  const budget = selection.contextBudgets?.[model.id]
+  const capped = budget !== undefined && budget > 0 && budget < model.nativeContextWindow
   return {
     id: model.id,
     name: model.name,
     ...model.multiplier === undefined ? {} : { multiplier: model.multiplier },
     ...model.tags === undefined ? {} : { tags: model.tags },
+    ...model.supportedEfforts === undefined || model.supportedEfforts.length === 0
+      ? {}
+      : { supportedEfforts: model.supportedEfforts },
     supportsImages: model.supportsImages,
-    contextWindow: model.contextWindow,
+    contextWindow: capped ? budget : model.nativeContextWindow,
+    nativeContextWindow: model.nativeContextWindow,
+    maxOutputTokens: model.maxOutputTokens,
+    enabled: enabled === undefined || enabled.includes(model.id),
   }
 }
 
@@ -152,10 +211,23 @@ function toWebModel(model: {
  * are queried live; a failing query degrades to `creditsError` / `checkinError`
  * rather than failing the whole document. Never throws.
  */
-export async function poolWebStatus(deps: PoolStatusRouteOptions): Promise<PoolWebStatus> {
-  const accounts = deps.pool.list()
-  const now = Date.now()
+export async function poolWebStatus(
+  deps: PoolStatusRouteOptions,
+  region: PoolRegion = 'cn',
+): Promise<PoolWebStatus> {
+  // Only this region's accounts: the two gateways are separate providers, and
+  // a card tab must never show the other region's credits or accounts.
+  const accounts = deps.pool.list(region)
+  // The tab strip always offers both gateways, matching how the plugin
+  // registers its two providers: an empty region reads as "no accounts signed
+  // in here yet", which is information the user wants, rather than a tab that
+  // only appears after they have already done the work.
+  const regions: readonly PoolRegion[] = ['cn', 'global']
+  // The selection the card diffs its draft against. Sourced from the
+  // catalog, which is where the settings section pushes it.
+  const selection: PoolWebModelSelection = deps.catalog.currentSelection()
   const rows: PoolWebAccount[] = []
+  const now = Date.now()
 
   for (const account of accounts) {
     const row = toWebAccount(account)
@@ -210,7 +282,23 @@ export async function poolWebStatus(deps: PoolStatusRouteOptions): Promise<PoolW
     accounts: rows,
     ...firstUsable === undefined ? {} : { activeAccountId: firstUsable.id },
     cooling,
-    models: deps.catalog.current().map(toWebModel),
+    // The card edits the *user-visible* list, so it gets the selection-applied
+    // view: disabled models arrive flagged rather than dropped, which is what
+    // lets the row render a checkbox in its real state.
+    models: deps.catalog.current().map(model => toWebModel({
+      id: model.id,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      maxOutputTokens: model.maxOutputTokens,
+      nativeContextWindow: model.contextWindow,
+      ...model.multiplier === undefined ? {} : { multiplier: model.multiplier },
+      ...model.tags === undefined ? {} : { tags: model.tags },
+      ...model.supportedEfforts === undefined ? {} : { supportedEfforts: model.supportedEfforts },
+      supportsImages: model.supportsImages,
+    }, selection)),
+    selection,
+    region,
+    regions,
     shim,
   }
 }
@@ -229,7 +317,12 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
         if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
         try {
-          json(res, 200, await poolWebStatus(deps))
+          // The card asks for one region at a time; an unknown value falls back
+          // to cn rather than 400-ing, because the tab strip is not the source
+          // of truth and a typo should not blank the card.
+          const requested = new URL(req.url ?? '/', 'http://localhost').searchParams.get('region')
+          const region: PoolRegion = requested === 'global' ? 'global' : 'cn'
+          json(res, 200, await poolWebStatus(deps, region))
         } catch (error: unknown) {
           json(res, 500, { error: safeMessage(error) })
         }
@@ -293,8 +386,34 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
       },
     })
 
+
+    // Model selection is the second mutating route. It only ever writes the
+    // plugin's own settings namespace, and it validates the shape here rather
+    // than trusting the browser: ids must be strings and budgets must be
+    // positive integers, so a malformed body cannot poison the settings file.
+    const disposeModelsSave = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_MODELS_SAVE_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.saveSelection === undefined) {
+          return json(res, 503, { error: 'settings service unavailable; model selection cannot be saved' })
+        }
+        try {
+          const body = await readJsonBody(req)
+          const selection = parseSelection(body)
+          if (selection === undefined) return json(res, 400, { error: 'invalid selection payload' })
+          await deps.saveSelection(selection)
+          json(res, 200, { ok: true, selection })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
     return () => {
       disposeCheckin()
+      disposeModelsSave()
       disposeReset()
       disposeRescan()
       disposeStatus()

@@ -21,7 +21,20 @@ import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
 import type { WorkBuddyShim } from './shim.ts'
 
 /** Provider route this bundle owns. */
+/** Provider route this bundle owns for the domestic (CN) gateway. */
 export const WORKBUDDY_POOL_PROVIDER = 'workbuddy-xdpool'
+/** Provider route this bundle owns for the international gateway. */
+export const WORKBUDDY_GLOBAL_POOL_PROVIDER = 'workbuddy-xdpool-global'
+/** The provider id each region registers as. */
+export const POOL_PROVIDER_BY_REGION = {
+  cn: WORKBUDDY_POOL_PROVIDER,
+  global: WORKBUDDY_GLOBAL_POOL_PROVIDER,
+} as const
+/** Display name each region registers under, so the picker can group them. */
+export const POOL_NAME_BY_REGION = {
+  cn: 'WorkBuddy XD Pool（国内版）',
+  global: 'WorkBuddy XD Pool（国际版）',
+} as const
 
 /** Provider idle ceiling while one stream read is outstanding. */
 export const WORKBUDDY_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -159,7 +172,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
 
   const buildModels = (): Model<Api>[] => {
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => toPiModel(info, baseUrl, providerId))
+    return catalog.visible().map(info => toPiModel(info, baseUrl, providerId))
   }
 
   const base = createProvider({

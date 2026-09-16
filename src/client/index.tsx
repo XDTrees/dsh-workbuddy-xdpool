@@ -30,7 +30,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** Stable browser-plugin name. */
 export const name = 'dsh-workbuddy-xdpool-client'
 /** Client services required by the Plugin configuration contribution. */
-export const inject = ['slots', 'locale']
+export const inject = ['slots', 'locale', 'settingsScope']
 
 /** Register card copy and the pool card under Plugin configuration. */
 export function apply(ctx: ClientContext): void {
@@ -38,11 +38,15 @@ export function apply(ctx: ClientContext): void {
     const namespace = 'settings.workbuddy-xdpool'
     ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-workbuddy-xdpool: settings copy')
     const t = ctx.locale.bind(namespace) as PoolCardInjected['t']
+    // The model-selection controls write through this scope, so the card
+    // must hold the same settings section the host installed. Without it the
+    // rows would render read-only even when the profile is writable.
+    const settingsScope = ctx.settingsScope.bind({ namespace: 'workbuddy-xdpool' }) as NonNullable<PoolCardInjected['settingsScope']>
     ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
       name: 'settings.plugin.item',
       key: 'workbuddy-xdpool',
       priority: 30,
-      inject: (): PoolCardInjected => ({ t }),
+      inject: (): PoolCardInjected => ({ t, settingsScope }),
     }, PoolCard))
   } catch (error: unknown) {
     // Degrade silently on the page: the pool provider still serves models.

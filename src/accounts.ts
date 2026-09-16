@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
+import { regionOf, type WorkBuddyRegion } from './upstream.ts'
 
 /** Minimal upstream surface the pool needs to refresh a token (no circular import). */
 export interface TokenRefresher {
@@ -317,7 +318,9 @@ export class WorkBuddyAccountPool {
   }
 
   /** All accounts, cooldown state included. */
-  list(): readonly WorkBuddyAccount[] {
+  list(region?: WorkBuddyRegion): readonly WorkBuddyAccount[] {
+    if (region === undefined) return this.accounts
+    return this.accounts.filter(account => regionOf(account.credential.domain) === region)
     return this.accounts
   }
 
@@ -330,10 +333,13 @@ export class WorkBuddyAccountPool {
    * model id the legacy account-wide check applies (callers that cannot name a
    * model, e.g. CLI diagnostics).
    */
-  private available(now: number, modelId?: string): WorkBuddyAccount[] {
+  private available(now: number, modelId?: string, region?: WorkBuddyRegion): WorkBuddyAccount[] {
     return this.accounts.filter(account => {
       if (account.cooldownUntilMs > now) return false
       if (modelId !== undefined && (account.modelCooldowns[modelId] ?? 0) > now) return false
+      // A region-scoped caller (one of the two providers) must never pick
+      // an account that talks to the other region gateway.
+      if (region !== undefined && regionOf(account.credential.domain) !== region) return false
       return true
     })
   }
@@ -346,12 +352,12 @@ export class WorkBuddyAccountPool {
    * cursor round-robins so consecutive requests spread across accounts and a
    * still-cooling preferred account is skipped.
    */
-  async acquire(modelId?: string): Promise<WorkBuddyAccount | undefined> {
+  async acquire(modelId?: string, region?: WorkBuddyRegion): Promise<WorkBuddyAccount | undefined> {
     if (this.accounts.length === 0) await this.scan()
-    let pool = this.available(Date.now(), modelId)
+    let pool = this.available(Date.now(), modelId, region)
     if (pool.length === 0) {
       await this.scan()
-      pool = this.available(Date.now(), modelId)
+      pool = this.available(Date.now(), modelId, region)
     }
     if (pool.length === 0) return undefined
 

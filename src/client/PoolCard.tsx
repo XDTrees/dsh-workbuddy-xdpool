@@ -26,6 +26,7 @@ import {
   type PoolWebAccount,
   type PoolWebModel,
   type PoolWebStatus,
+  type PoolRegion,
 } from '../status-paths.ts'
 import { POOL_PLUGIN_ICON } from './icon.ts'
 import { POOL_CARD_CSS } from './styles.ts'
@@ -34,10 +35,41 @@ import type { WorkBuddyPoolSettingsKey } from './locales.ts'
 /** Localized copy injected by the browser-plugin registration. */
 export interface PoolCardInjected {
   t: (key: WorkBuddyPoolSettingsKey, params?: Record<string, unknown>) => string
+  /**
+   * The plugin settings section the card reads and writes. Model selection
+   * lives here, which is what makes it apply to the whole pool rather than to
+   * whichever account is currently serving.
+   */
+  settingsScope: PoolCardSettingsScope
+}
+
+/** The settings scope the slot hands the card, narrowed to what it uses. */
+export interface PoolCardSettingsScope {
+  getSnapshot(): { writable?: boolean; value?: unknown }
+  subscribe?(listener: () => void): () => void
+  /** Write one field of the plugin settings section. */
+  set?(field: string, value: unknown): Promise<void> | void
 }
 
 /** Props delivered by the Plugin configuration item slot. */
-export type PoolCardProps = PropsRuntime<'settings.plugin.item'> & Partial<PoolCardInjected>
+/**
+ * Props delivered by the Plugin configuration item slot.
+ *
+ * `settingsScope` is supplied at runtime by the settings-plugins slot for
+ * cards that declare a settings section. `PropsRuntime` does not type it, so
+ * it is declared here as optional — every use site guards for its absence and
+ * falls back to a read-only card.
+ */
+export type PoolCardProps = PropsRuntime<'settings.plugin.item'>
+  & Partial<PoolCardInjected>
+  & { settingsScope?: PoolCardSettingsScope }
+
+/**
+ * Default context window the card offers as the "capped" choice, in tokens.
+ * Mirrors the host-side DEFAULT_CONTEXT_BUDGET; declared here rather than
+ * imported, because the browser bundle must not pull in the host entry.
+ */
+const DEFAULT_CONTEXT_BUDGET = 200_000
 
 const POLL_INTERVAL_MS = 30_000
 
@@ -92,6 +124,53 @@ function formatCapacity(value: number | undefined): string {
 }
 
 /** Pick the right promotion chip for a model. */
+/** One model's draft state while the card holds unsaved edits. */
+interface ModelDraftEntry {
+  enabled: boolean
+  images: boolean
+  /** Context budget, or undefined to follow the model's native window. */
+  budget?: number
+}
+
+/** Build the draft from the server's selection + catalog flags. */
+function draftFromStatus(status: PoolWebStatus): Record<string, ModelDraftEntry> {
+  const selection = status.selection
+  const enabled = selection.enabledModelIds
+  const images = selection.imageModelIds
+  const budgets = selection.contextBudgets
+  const out: Record<string, ModelDraftEntry> = {}
+  for (const model of status.models) {
+    const entry: ModelDraftEntry = {
+      enabled: enabled === undefined || enabled.includes(model.id),
+      images: images === undefined ? model.supportsImages : images.includes(model.id),
+    }
+    const budget = budgets?.[model.id]
+    if (budget !== undefined) entry.budget = budget
+    out[model.id] = entry
+  }
+  return out
+}
+
+/** True when the draft differs from what the server last reported. */
+function draftIsDirty(status: PoolWebStatus, draft: Record<string, ModelDraftEntry>): boolean {
+  const selection = status.selection
+  const enabled = new Set(selection.enabledModelIds ?? status.models.filter(m => m.enabled).map(m => m.id))
+  const images = new Set(
+    selection.imageModelIds ?? status.models.filter(m => m.supportsImages).map(m => m.id),
+  )
+  const budgets = selection.contextBudgets ?? {}
+  for (const model of status.models) {
+    const entry = draft[model.id]
+    if (entry === undefined) continue
+    if (entry.enabled !== enabled.has(model.id)) return true
+    if (entry.images !== images.has(model.id)) return true
+    const saved = budgets[model.id] ?? model.nativeContextWindow
+    const next = entry.budget ?? model.nativeContextWindow
+    if (saved !== next) return true
+  }
+  return false
+}
+
 function tagFor(model: PoolWebModel): 'free' | 'limited' | 'night' | undefined {
   const tags = model.tags ?? []
   if (tags.includes('free')) return 'free'
@@ -101,15 +180,37 @@ function tagFor(model: PoolWebModel): 'free' | 'limited' | 'night' | undefined {
 }
 
 /** Render pool health, per-account credits/cooldown, and the model directory. */
-export function PoolCard({ t }: PoolCardProps) {
+export function PoolCard({ t, settingsScope }: PoolCardProps) {
+  // The slot tells us whether the settings document is writable; a
+  // read-only scope (locked profile) renders the model rows disabled.
+  const settingsWritable = settingsScope?.getSnapshot().writable === true
+  /** Which region tab is showing. A CN-only install never leaves this. */
+  const [activeRegion, setActiveRegion] = useState<'cn' | 'global'>('cn')
   const [open, setOpen] = useState(false)
-  const [status, setStatus] = useState<PoolWebStatus | undefined>(undefined)
+  /**
+   * Last-known status per region. Kept per region (not a single slot) so
+   * switching tabs shows the other side's last answer immediately instead of
+   * a blank frame, and the tab dots stay meaningful while a tab is hidden.
+   */
+  const [statusByRegion, setStatusByRegion] = useState<
+    Partial<Record<PoolRegion, PoolWebStatus>>
+  >({})
+
+  /** The document for the tab on screen; undefined until its first answer. */
+  const status = statusByRegion[activeRegion]
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [cooldownBusy, setCooldownBusy] = useState(false)
   const [flash, setFlash] = useState<string | undefined>(undefined)
   /** Account id whose daily claim is currently in flight. */
   const [checkinBusyId, setCheckinBusyId] = useState<string | undefined>(undefined)
+  /**
+   * Draft model selection. `undefined` means "no local edits"; once a checkbox
+   * is touched the draft takes over and is what the Save button posts. Discard
+   * drops it back to the copy the server last reported.
+   */
+  const [draft, setDraft] = useState<Record<string, ModelDraftEntry> | undefined>(undefined)
+  const [savingModels, setSavingModels] = useState(false)
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -117,9 +218,15 @@ export function PoolCard({ t }: PoolCardProps) {
     return () => { mounted.current = false }
   }, [])
 
-  const refresh = useCallback(async (signal?: AbortSignal): Promise<void> => {
+  /**
+   * Fetch one region's status. `region` is a parameter rather than a closure
+   * read so the callback identity does not change with the tab: the polling
+   * effect can key off it without restarting on every switch, and each region's
+   * last answer stays in its own slot (see `statusByRegion`).
+   */
+  const refresh = useCallback(async (region: PoolRegion, signal?: AbortSignal): Promise<void> => {
     try {
-      const response = await fetch(`${POOL_STATUS_PATH}`, {
+      const response = await fetch(`${POOL_STATUS_PATH}?region=${region}`, {
         headers: { accept: 'application/json' },
         credentials: 'same-origin',
         ...signal === undefined ? {} : { signal },
@@ -127,7 +234,7 @@ export function PoolCard({ t }: PoolCardProps) {
       const value: unknown = await response.json().catch(() => undefined)
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       if (mounted.current && signal?.aborted !== true) {
-        setStatus(value as PoolWebStatus)
+        setStatusByRegion(prev => ({ ...prev, [region]: value as PoolWebStatus }))
         setError(undefined)
       }
     } catch (cause: unknown) {
@@ -140,13 +247,13 @@ export function PoolCard({ t }: PoolCardProps) {
   useEffect(() => {
     if (!open) return
     const controller = new AbortController()
-    void refresh(controller.signal)
-    const timer = window.setInterval(() => { void refresh(controller.signal) }, POLL_INTERVAL_MS)
+    void refresh(activeRegion, controller.signal)
+    const timer = window.setInterval(() => { void refresh(activeRegion, controller.signal) }, POLL_INTERVAL_MS)
     return () => {
       window.clearInterval(timer)
       controller.abort()
     }
-  }, [open, refresh])
+  }, [open, refresh, activeRegion])
 
   const rescan = async (): Promise<void> => {
     setBusy(true)
@@ -157,7 +264,7 @@ export function PoolCard({ t }: PoolCardProps) {
       })
       const body = await response.json() as { accounts?: number; error?: string }
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
-      await refresh()
+      await refresh(activeRegion)
       if (mounted.current) setFlash(t?.('row.accountsRescanned', { count: body.accounts ?? 0 }) ?? '')
     } catch (cause: unknown) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
@@ -174,7 +281,7 @@ export function PoolCard({ t }: PoolCardProps) {
         method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin',
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      await refresh()
+      await refresh(activeRegion)
       if (mounted.current) setFlash(t?.('row.resetCooldownsDone') ?? '')
     } catch (cause: unknown) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
@@ -203,7 +310,7 @@ export function PoolCard({ t }: PoolCardProps) {
         | { claim?: { credit?: number }; error?: string }
         | undefined
       if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
-      await refresh()
+      await refresh(activeRegion)
       const credit = body?.claim?.credit ?? 0
       if (mounted.current) {
         setFlash(t?.('row.checkinClaimedReward', { credit: formatNumber(credit) })
@@ -216,6 +323,97 @@ export function PoolCard({ t }: PoolCardProps) {
     }
   }
 
+  /** Keep the draft in step with the server copy while nothing is dirty. */
+  const modelDraft = draft ?? (status === undefined ? {} : draftFromStatus(status))
+  /** Model edits need a writable settings scope; otherwise the rows are read-only. */
+  const modelsEditable = settingsWritable
+  const modelsDirty = draft !== undefined && status !== undefined && draftIsDirty(status, draft)
+  const enabledCount = Object.values(modelDraft).filter(entry => entry.enabled).length
+
+  const toggleModel = (id: string): void => {
+    if (status === undefined) return
+    const base = draft ?? draftFromStatus(status)
+    const entry = base[id]
+    if (entry === undefined) return
+    setDraft({ ...base, [id]: { ...entry, enabled: !entry.enabled } })
+  }
+
+  const toggleModelImage = (id: string): void => {
+    if (status === undefined) return
+    const base = draft ?? draftFromStatus(status)
+    const entry = base[id]
+    if (entry === undefined) return
+    setDraft({ ...base, [id]: { ...entry, images: !entry.images } })
+  }
+
+  const setModelBudget = (id: string, budget: number): void => {
+    if (status === undefined) return
+    const base = draft ?? draftFromStatus(status)
+    const entry = base[id]
+    if (entry === undefined) return
+    setDraft({ ...base, [id]: { ...entry, budget } })
+  }
+
+  const discardModels = (): void => {
+    setDraft(undefined)
+    setFlash(undefined)
+  }
+
+  /**
+   * Persist the draft. The route validates the payload again on the host side,
+   * so a malformed draft is rejected there rather than silently stored. The
+   * card refuses to save an empty enable-list: that would leave the picker
+   * with nothing to offer and no obvious way back.
+   */
+  /**
+   * Persist the draft into the plugin settings section.
+   *
+   * The write goes through `settingsScope` rather than a bespoke route: that is
+   * the same document the model picker reads, so one save covers every account
+   * and survives account rotation — the selection is a property of the pool,
+   * not of whichever account happens to be serving right now.
+   *
+   * The card refuses an empty enable-list: saving one would leave the picker
+   * with nothing to offer and no obvious way back.
+   */
+  const saveModels = async (): Promise<void> => {
+    if (draft === undefined || status === undefined) return
+    if (enabledCount === 0) {
+      setError(t?.('row.modelsEmpty') ?? 'No model enabled')
+      return
+    }
+    const write = settingsScope?.set
+    if (write === undefined) {
+      setError(t?.('row.modelsSaveError', { message: 'settings scope is read-only' })
+        ?? 'settings scope is read-only')
+      return
+    }
+    setSavingModels(true)
+    setFlash(undefined)
+    try {
+      // Every id the catalog knows about, so a model added upstream while the
+      // card sat open is not silently dropped by an unrelated save.
+      const enabledModelIds = Object.entries(draft).filter(([, e]) => e.enabled).map(([id]) => id)
+      const imageModelIds = Object.entries(draft).filter(([, e]) => e.images).map(([id]) => id)
+      const contextBudgets: Record<string, number> = {}
+      for (const [id, entry] of Object.entries(draft)) {
+        if (entry.budget !== undefined) contextBudgets[id] = entry.budget
+      }
+      await write.call(settingsScope, 'enabledModelIds', enabledModelIds)
+      await write.call(settingsScope, 'imageModelIds', imageModelIds)
+      await write.call(settingsScope, 'contextBudgets', contextBudgets)
+      setDraft(undefined)
+      if (mounted.current) setFlash(t?.('row.modelsSaved') ?? 'Saved')
+    } catch (cause: unknown) {
+      if (mounted.current) {
+        setError(t?.('row.modelsSaveError', { message: cause instanceof Error ? cause.message : String(cause) })
+          ?? String(cause))
+      }
+    } finally {
+      if (mounted.current) setSavingModels(false)
+    }
+  }
+
   const title = t?.('row.title') ?? 'WorkBuddy XD Pool'
   const description = t?.('row.desc') ?? ''
   const accountCount = status?.accounts.length ?? 0
@@ -225,10 +423,15 @@ export function PoolCard({ t }: PoolCardProps) {
   const state: 'ok' | 'error' | 'idle' = error !== undefined
     ? 'error'
     : (idle ? 'idle' : (hasHealthy ? 'ok' : 'idle'))
+  /** Human label for the active tab, used inside the empty-state copy. */
+  const regionLabel = activeRegion === 'cn'
+    ? (t?.('row.tabCn') ?? 'CN')
+    : (t?.('row.tabGlobal') ?? 'Global')
+
   const stateLabel = error !== undefined
     ? (t?.('row.requestFailed') ?? 'Request failed')
     : accountCount === 0
-      ? (t?.('row.poolEmpty') ?? 'No account yet')
+      ? (t?.('row.regionEmpty') ?? t?.('row.poolEmpty') ?? 'No account yet')
       : state === 'ok'
         ? (t?.('row.ok') ?? 'Healthy')
         : (t?.('row.allCooling') ?? 'All cooling')
@@ -263,6 +466,26 @@ export function PoolCard({ t }: PoolCardProps) {
       {open
         ? <div className="dsm-plugin-card-body">
             <div className="dsm-workbuddy-xdpool-usage">
+              {/* Region tabs: one supplier per tab. Both are always offered, so an
+                  empty side reads as "not signed in here yet" rather than the tab
+                  appearing only after the user has already signed in. */}
+              <div className="dsm-workbuddy-xdpool-tabs" role="tablist">
+                    {status?.regions.map(region => (
+                      <button
+                        key={region}
+                        type="button"
+                        role="tab"
+                        aria-selected={region === activeRegion}
+                        className={`dsm-workbuddy-xdpool-tab${region === activeRegion ? ' dsm-workbuddy-xdpool-tab-active' : ''}`}
+                        onClick={() => { setActiveRegion(region) }}
+                      >
+                        <span className="dsm-workbuddy-xdpool-tab-dot" data-state={state} />
+                        {region === 'cn'
+                          ? (t?.('row.tabCn') ?? 'CN')
+                          : (t?.('row.tabGlobal') ?? 'Global')}
+                      </button>
+                    ))}
+                  </div>
               <div className="dsm-workbuddy-xdpool-usage-head">
                 <div className="dsm-workbuddy-xdpool-usage-copy" role="status">
                   <div className="dsm-workbuddy-xdpool-usage-status">
@@ -316,7 +539,27 @@ export function PoolCard({ t }: PoolCardProps) {
                   </p>}
 
               {accountCount === 0 && error === undefined
-                ? <p className="dsm-workbuddy-xdpool-note">{t?.('row.poolEmptyHint') ?? ''}</p>
+                ? <section className="dsm-workbuddy-xdpool-empty">
+                    <p className="dsm-workbuddy-xdpool-empty-title">
+                      {t?.('row.regionEmptyTitle', { region: regionLabel })
+                        ?? t?.('row.regionEmpty') ?? 'No account yet'}
+                    </p>
+                    <div className="dsm-workbuddy-xdpool-empty-steps">
+                      <p className="dsm-workbuddy-xdpool-empty-steps-title">
+                        {t?.('row.regionHowToTitle', { region: regionLabel })
+                          ?? `How to sign in to the ${regionLabel} version`}
+                      </p>
+                      <ol className="dsm-workbuddy-xdpool-empty-list">
+                        <li>{t?.('row.regionHowTo1') ?? ''}</li>
+                        <li>{t?.('row.regionHowTo2') ?? ''}</li>
+                        <li>{t?.('row.regionHowTo3') ?? ''}</li>
+                        <li>{t?.('row.regionHowTo4') ?? ''}</li>
+                      </ol>
+                    </div>
+                    <p className="dsm-workbuddy-xdpool-empty-note">
+                      {t?.('row.regionHowToNote') ?? ''}
+                    </p>
+                  </section>
                 : null}
 
               {accountCount > 0
@@ -346,17 +589,50 @@ export function PoolCard({ t }: PoolCardProps) {
               {(status?.models.length ?? 0) > 0
                 ? <section className="dsm-workbuddy-xdpool-models" aria-label={t?.('row.modelsTitle') ?? 'Models'}>
                     <div className="dsm-workbuddy-xdpool-models-head">
-                      <h3 className="dsm-workbuddy-xdpool-models-title">
-                        {t?.('row.modelsTitle') ?? 'Models'}
-                      </h3>
-                      <p className="dsm-workbuddy-xdpool-models-summary">
-                        {t?.('row.modelsSummary', { count: status?.models.length ?? 0 })
-                          ?? `${status?.models.length ?? 0} model(s) in the live catalog`}
-                      </p>
+                      <div className="dsm-workbuddy-xdpool-models-heading">
+                        <h3 className="dsm-workbuddy-xdpool-models-title">
+                          {t?.('row.modelsTitle') ?? 'Models'}
+                        </h3>
+                        <p className="dsm-workbuddy-xdpool-models-summary">
+                          {t?.('row.modelsEnabledCount', {
+                            enabled: enabledCount,
+                            total: status?.models.length ?? 0,
+                          }) ?? `${enabledCount} / ${status?.models.length ?? 0} enabled`}
+                        </p>
+                      </div>
+                      <div className="dsm-workbuddy-xdpool-models-actions">
+                        <button
+                          type="button"
+                          className="dsm-btn dsm-btn-outline"
+                          disabled={!modelsDirty || savingModels}
+                          onClick={discardModels}
+                        >
+                          {t?.('row.modelsDiscard') ?? 'Discard'}
+                        </button>
+                        <button
+                          type="button"
+                          className="dsm-btn dsm-btn-primary"
+                          disabled={!modelsDirty || savingModels || enabledCount === 0}
+                          onClick={() => { void saveModels() }}
+                        >
+                          {savingModels
+                            ? (t?.('row.modelsSaving') ?? 'Saving…')
+                            : (t?.('row.modelsSave') ?? 'Save')}
+                        </button>
+                      </div>
                     </div>
                     <div className="dsm-workbuddy-xdpool-model-list">
                       {status?.models.map(model => (
-                        <ModelRow key={model.id} model={model} t={t} />
+                        <ModelRow
+                          key={model.id}
+                          model={model}
+                          t={t}
+                          draft={modelDraft[model.id] ?? { enabled: model.enabled, images: model.supportsImages }}
+                          editable={modelsEditable}
+                          onToggle={toggleModel}
+                          onToggleImage={toggleModelImage}
+                          onBudget={setModelBudget}
+                        />
                       ))}
                     </div>
                   </section>
@@ -430,15 +706,12 @@ function AccountBlock({
             </div>
           : null}
       </div>
-      {account.credits === undefined && account.creditsError === undefined ? null
-        : <AccountCredits account={account} t={t} />}
-      {account.checkin === undefined && account.checkinError === undefined ? null
-        : <AccountCheckin
-            account={account}
-            t={t}
-            busy={checkinBusyId === account.id}
-            onClaim={onClaimCheckin}
-          />}
+      <AccountStats
+        account={account}
+        t={t}
+        checkinBusy={checkinBusyId === account.id}
+        onClaim={onClaimCheckin}
+      />
     </div>
   )
 }
@@ -448,125 +721,144 @@ function AccountBlock({
  * Every account in the pool gets its own button, so a multi-account user can
  * collect each reward without switching the pool's preferred account first.
  */
-function AccountCheckin({
+/**
+ * Credit panels: package breakdown on the left, the big total on the right with
+ * the daily check-in action docked beneath it. Mirrors the two-column credit
+ * layout the LaoDing plugin family uses, so the numbers stay scannable and the
+ * claim button sits where the eye already is.
+ */
+function AccountStats({
   account,
   t,
-  busy,
+  checkinBusy,
   onClaim,
 }: {
   account: PoolWebAccount
   t?: PoolCardProps['t']
-  busy: boolean
+  checkinBusy: boolean
   onClaim: (accountId: string) => void
 }) {
-  if (account.checkinError !== undefined) {
-    return (
-      <p className="dsm-workbuddy-xdpool-account-error">
-        {t?.('row.checkinError', { message: account.checkinError }) ?? account.checkinError}
-      </p>
-    )
-  }
-  const checkin = account.checkin
-  if (checkin === undefined) return null
-
-  const claimable = checkin.active && !checkin.todayCheckedIn
-  const label = !checkin.active
-    ? (t?.('row.checkinInactive') ?? 'Check-in not available')
-    : checkin.todayCheckedIn
-      ? (t?.('row.checkinClaimed') ?? 'Checked in today')
-      : busy
-        ? (t?.('row.checkinClaiming') ?? 'Checking in…')
-        : (t?.('row.checkinClaim') ?? 'Check in')
-
-  return (
-    <div className="dsm-workbuddy-xdpool-checkin">
-      <div className="dsm-workbuddy-xdpool-checkin-copy">
-        <span className="dsm-workbuddy-xdpool-checkin-title">
-          {t?.('row.checkinTitle') ?? 'Daily check-in'}
-        </span>
-        <div className="dsm-workbuddy-xdpool-checkin-meta">
-          {checkin.streakDays > 0
-            ? <span className="dsm-workbuddy-xdpool-checkin-chip">
-                {t?.('row.checkinStreak', { days: checkin.streakDays }) ?? `${checkin.streakDays}-day streak`}
-              </span>
-            : null}
-          {checkin.dailyCredit > 0
-            ? <span className="dsm-workbuddy-xdpool-checkin-chip">
-                {t?.('row.checkinDaily', { credit: formatNumber(checkin.dailyCredit) })
-                  ?? `+${formatNumber(checkin.dailyCredit)}/day`}
-              </span>
-            : null}
-          {checkin.isStreakDay
-            ? <span className="dsm-workbuddy-xdpool-checkin-chip dsm-workbuddy-xdpool-checkin-chip-bonus">
-                {t?.('row.checkinStreakBonus', {
-                  days: formatNumber(checkin.nextStreakDay),
-                  credit: formatNumber(checkin.streakBonusCredit),
-                }) ?? `bonus +${formatNumber(checkin.streakBonusCredit)}`}
-              </span>
-            : null}
-        </div>
-      </div>
-      <button
-        type="button"
-        className="dsm-workbuddy-xdpool-checkin-btn"
-        disabled={!claimable || busy}
-        onClick={() => { onClaim(account.id) }}
-      >
-        {label}
-      </button>
-    </div>
-  )
-}
-
-/** Two-panel credit layout: package list on the left, big total on the right. */
-function AccountCredits({ account, t }: { account: PoolWebAccount; t?: PoolCardProps['t'] }) {
-  if (account.creditsError !== undefined) {
-    return (
-      <p className="dsm-workbuddy-xdpool-account-error">
-        {t?.('row.creditsError', { message: account.creditsError }) ?? account.creditsError}
-      </p>
-    )
-  }
   const credits = account.credits
-  if (credits === undefined) return null
-  const packages = credits.packages.filter(p => (p.size ?? 0) > 0).slice(0, 5)
+  const checkin = account.checkin
+  const hasCredits = credits !== undefined || account.creditsError !== undefined
+  const hasCheckin = checkin !== undefined || account.checkinError !== undefined
+  if (!hasCredits && !hasCheckin) return null
+
+  const packages = (credits?.packages ?? [])
+    .filter(p => (p.size ?? 0) > 0)
+    .slice(0, 6)
 
   return (
-    <div className="dsm-workbuddy-xdpool-credits-panels">
-      <div className="dsm-workbuddy-xdpool-credit-panel">
-        <span className="dsm-workbuddy-xdpool-credit-panel-title">
+    <div className="dsm-workbuddy-xdpool-stats">
+      <section className="dsm-workbuddy-xdpool-panel dsm-workbuddy-xdpool-panel-packages">
+        <span className="dsm-workbuddy-xdpool-panel-title">
           {t?.('row.creditsPackages') ?? 'Credit packages'}
         </span>
-        {packages.length === 0
-          ? <span className="dsm-workbuddy-xdpool-credit-panel-value">–</span>
-          : <ul className="dsm-workbuddy-xdpool-credit-packages">
-              {packages.map((pack, index) => (
-                <li key={`${pack.packageName}-${String(index)}`}>
-                  <span>{pack.packageName}</span>
-                  <span>
-                    {t?.('row.creditsPackage', { remain: formatNumber(pack.remain), size: formatNumber(pack.size) })
-                      ?? `${formatNumber(pack.remain)} / ${formatNumber(pack.size)}`}
+        {account.creditsError !== undefined
+          ? <span className="dsm-workbuddy-xdpool-panel-error">{account.creditsError}</span>
+          : packages.length === 0
+            ? <span className="dsm-workbuddy-xdpool-panel-empty">–</span>
+            : <ul className="dsm-workbuddy-xdpool-packages">
+                {packages.map((pack, index) => (
+                  <li key={`${pack.packageName}-${String(index)}`}>
+                    <span className="dsm-workbuddy-xdpool-packages-name">{pack.packageName}</span>
+                    <span className="dsm-workbuddy-xdpool-packages-value">
+                      {t?.('row.creditsPackage', { remain: formatNumber(pack.remain), size: formatNumber(pack.size) })
+                        ?? `${formatNumber(pack.remain)} / ${formatNumber(pack.size)}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>}
+        {credits?.expiringSoon !== undefined && credits.expiringSoon > 0
+          ? <div className="dsm-workbuddy-xdpool-panel-foot">
+              <span>{t?.('row.creditsSoon') ?? 'Expiring in 3 days'}</span>
+              <strong>{formatNumber(credits.expiringSoon)}</strong>
+            </div>
+          : null}
+      </section>
+
+      <section className="dsm-workbuddy-xdpool-panel dsm-workbuddy-xdpool-panel-total">
+        <span className="dsm-workbuddy-xdpool-panel-title">
+          {t?.('row.creditsTotal') ?? 'Total'}
+        </span>
+        <span className="dsm-workbuddy-xdpool-total-value">
+          {formatNumber(credits?.total)}
+        </span>
+        {hasCheckin
+          ? <div className="dsm-workbuddy-xdpool-checkin">
+              {account.checkinError !== undefined
+                ? <span className="dsm-workbuddy-xdpool-checkin-error">
+                    {account.checkinError}
                   </span>
-                </li>
-              ))}
-            </ul>}
-      </div>
-      <div className="dsm-workbuddy-xdpool-credit-panel dsm-workbuddy-xdpool-credit-panel-total">
-        <div className="dsm-workbuddy-xdpool-credit-total-body">
-          <span className="dsm-workbuddy-xdpool-credit-panel-title">
-            {t?.('row.creditsTotal') ?? 'Total'}
-          </span>
-          <span className="dsm-workbuddy-xdpool-credit-total-value">
-            {formatNumber(credits.total)}
-          </span>
-        </div>
-      </div>
+                : checkin === undefined
+                  ? null
+                  : <>
+                      <div className="dsm-workbuddy-xdpool-checkin-meta">
+                        <span className="dsm-workbuddy-xdpool-checkin-streak">
+                          {t?.('row.checkinStreak', { days: checkin.streakDays })
+                            ?? `${checkin.streakDays}-day streak`}
+                        </span>
+                        {checkin.dailyCredit > 0
+                          ? <span className="dsm-workbuddy-xdpool-checkin-daily">
+                              {t?.('row.checkinDaily', { credit: formatNumber(checkin.dailyCredit) })
+                                ?? `+${formatNumber(checkin.dailyCredit)}/day`}
+                            </span>
+                          : null}
+                      </div>
+                      {checkin.isStreakDay && checkin.streakBonusCredit > 0
+                        ? <span className="dsm-workbuddy-xdpool-checkin-bonus">
+                            {t?.('row.checkinStreakBonus', {
+                              days: formatNumber(checkin.nextStreakDay),
+                              credit: formatNumber(checkin.streakBonusCredit),
+                            }) ?? `bonus +${formatNumber(checkin.streakBonusCredit)}`}
+                          </span>
+                        : null}
+                      <button
+                        type="button"
+                        className="dsm-workbuddy-xdpool-checkin-btn"
+                        disabled={!checkin.active || checkin.todayCheckedIn || checkinBusy}
+                        onClick={() => { onClaim(account.id) }}
+                      >
+                        {!checkin.active
+                          ? (t?.('row.checkinInactive') ?? 'Unavailable')
+                          : checkin.todayCheckedIn
+                            ? (t?.('row.checkinClaimed') ?? 'Checked in')
+                            : checkinBusy
+                              ? (t?.('row.checkinClaiming') ?? 'Checking in…')
+                              : (t?.('row.checkinClaim') ?? 'Check in')}
+                      </button>
+                    </>}
+            </div>
+          : null}
+      </section>
     </div>
   )
 }
 
-/** One model row: name + rate + tag chip + image badge + context size. */
-function ModelRow({ model, t }: { model: PoolWebModel; t?: PoolCardProps['t'] }) {
+/**
+ * One model row.
+ *
+ * Read-only when the card has no writable settings scope: the checkbox and the
+ * context radios stay disabled rather than pretending an edit took hold. The
+ * draft lives in the parent, so this component only ever reports intent.
+ */
+function ModelRow({
+  model,
+  t,
+  draft,
+  editable,
+  onToggle,
+  onToggleImage,
+  onBudget,
+}: {
+  model: PoolWebModel
+  t?: PoolCardProps['t']
+  draft: ModelDraftEntry
+  editable: boolean
+  onToggle: (id: string) => void
+  onToggleImage: (id: string) => void
+  onBudget: (id: string, budget: number) => void
+}) {
   const tag = tagFor(model)
   const tagText = tag === 'free'
     ? (t?.('row.free') ?? 'free')
@@ -576,32 +868,79 @@ function ModelRow({ model, t }: { model: PoolWebModel; t?: PoolCardProps['t'] })
         ? (t?.('row.nightDiscount') ?? 'night')
         : null
 
+  const native = model.nativeContextWindow
+  const capped = native > DEFAULT_CONTEXT_BUDGET
+  const currentBudget = draft.budget ?? native
+
   return (
-    <div className="dsm-workbuddy-xdpool-model">
+    <div className={`dsm-workbuddy-xdpool-model${draft.enabled ? '' : ' dsm-workbuddy-xdpool-model-off'}`}>
       <div className="dsm-workbuddy-xdpool-model-head">
-        <div className="dsm-workbuddy-xdpool-model-copy">
-          <span className="dsm-workbuddy-xdpool-model-name">
-            <span>{model.name}</span>
-            {model.multiplier === undefined ? null
-              : <span className="dsm-workbuddy-xdpool-model-name-rate">
-                  {t?.('row.rate', { rate: model.multiplier.toFixed(2) }) ?? `${model.multiplier.toFixed(2)}x`}
-                </span>}
+        <label className="dsm-workbuddy-xdpool-model-check">
+          <input
+            type="checkbox"
+            checked={draft.enabled}
+            disabled={!editable}
+            onChange={() => { onToggle(model.id) }}
+          />
+          <span className="dsm-workbuddy-xdpool-model-copy">
+            <span className="dsm-workbuddy-xdpool-model-name">
+              <span>{model.name}</span>
+              {model.multiplier === undefined ? null
+                : <span className="dsm-workbuddy-xdpool-model-name-rate">
+                    {t?.('row.rate', { rate: model.multiplier.toFixed(2) }) ?? `${model.multiplier.toFixed(2)}x`}
+                  </span>}
+            </span>
+            <span className="dsm-workbuddy-xdpool-model-id">{model.id}</span>
           </span>
-          <span className="dsm-workbuddy-xdpool-model-id">{model.id}</span>
-        </div>
-        <div className="dsm-workbuddy-xdpool-model-meta">
-          {tagText === null ? null
-            : <span className="dsm-workbuddy-xdpool-model-meta-tag">{tagText}</span>}
-          {model.supportsImages === true
-            ? <span className="dsm-workbuddy-xdpool-model-meta-tag">
-                {t?.('row.imageCapable') ?? 'image'}
-              </span>
+        </label>
+        <div className="dsm-workbuddy-xdpool-model-controls">
+          <label className="dsm-workbuddy-xdpool-model-image" title={t?.('row.modelImage') ?? 'Image input'}>
+            <input
+              type="checkbox"
+              checked={draft.images}
+              disabled={!editable}
+              onChange={() => { onToggleImage(model.id) }}
+            />
+            <span>{t?.('row.modelImage') ?? 'Image'}</span>
+          </label>
+          {capped
+            ? <fieldset className="dsm-workbuddy-xdpool-model-budget" aria-label={t?.('row.modelContextBudget') ?? 'Context'}>
+                <label>
+                  <input
+                    type="radio"
+                    name={`budget-${model.id}`}
+                    checked={currentBudget === DEFAULT_CONTEXT_BUDGET}
+                    disabled={!editable}
+                    onChange={() => { onBudget(model.id, DEFAULT_CONTEXT_BUDGET) }}
+                  />
+                  <span>{formatCapacity(DEFAULT_CONTEXT_BUDGET)}</span>
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name={`budget-${model.id}`}
+                    checked={currentBudget === native}
+                    disabled={!editable}
+                    onChange={() => { onBudget(model.id, native) }}
+                  />
+                  <span>{formatCapacity(native)}</span>
+                </label>
+              </fieldset>
             : null}
-          {model.contextWindow === undefined ? null
-            : <span className="dsm-workbuddy-xdpool-model-cap">
-                {formatCapacity(model.contextWindow)}
-              </span>}
         </div>
+      </div>
+      <div className="dsm-workbuddy-xdpool-model-meta">
+        {tagText === null ? null
+          : <span className="dsm-workbuddy-xdpool-model-meta-tag">{tagText}</span>}
+        <span className="dsm-workbuddy-xdpool-model-cap">
+          {t?.('row.modelOutput', { size: formatCapacity(model.maxOutputTokens) })
+            ?? `out ${formatCapacity(model.maxOutputTokens)}`}
+        </span>
+        {model.supportedEfforts === undefined || model.supportedEfforts.length === 0 ? null
+          : <span className="dsm-workbuddy-xdpool-model-cap">
+              {t?.('row.modelReasoning', { efforts: model.supportedEfforts.join(' / ') })
+                ?? model.supportedEfforts.join(' / ')}
+            </span>}
       </div>
     </div>
   )

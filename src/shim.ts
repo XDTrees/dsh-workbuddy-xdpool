@@ -19,7 +19,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Readable } from 'node:stream'
 import type { WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
-import { parseRateLimitReset, WorkBuddyUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
+import { parseRateLimitReset, WorkBuddyUpstreamClient, type UpstreamErrorKind, type WorkBuddyRegion } from './upstream.ts'
 
 export interface ShimLogger {
   info?(...args: unknown[]): void
@@ -39,6 +39,12 @@ export interface WorkBuddyShimOptions {
   client: WorkBuddyUpstreamClient
   catalog: WorkBuddyCatalog
   logger?: ShimLogger
+  /**
+   * Restrict this shim to one gateway. Two shims run side by side — one
+   * per region — and each must only ever draw accounts that belong to its
+   * own gateway. Absent means "every account" (a single-region deployment).
+   */
+  region?: WorkBuddyRegion
   /** Max accounts to try per request before giving up. */
   maxAttempts?: number
 }
@@ -131,6 +137,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 
 export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShim {
   const { pool, client, catalog } = options
+  const region = options.region
   const logger = options.logger
   const maxAttempts = options.maxAttempts ?? 8
 
@@ -246,7 +253,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (controller.signal.aborted) return
 
-      const account = await pool.acquire(modelId)
+      const account = await pool.acquire(modelId, region)
       if (account === undefined) {
         // Distinguish "never signed in" from "every account is rate-limited":
         // they need opposite remedies, so they must not share a status code.
