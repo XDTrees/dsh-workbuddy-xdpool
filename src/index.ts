@@ -59,7 +59,7 @@ export type { ModelSelection } from './catalog.ts'
 export const name = 'llm-workbuddy-xdpool'
 
 /** The model registry required before the provider can register. */
-export const inject = ['llm']
+export const inject = ['llm', 'settings']
 
 /**
  * Settings namespace for the WorkBuddy XD Pool card. Registering a section here
@@ -80,19 +80,19 @@ export interface Config {
    * advertises" — an unconfigured install should never present an empty model
    * list just because the key is missing.
    */
-  enabledModelIds?: readonly string[]
+  enabledModelIds?: string[]
   /**
    * Model ids that additionally accept image input. Absent means "follow the
    * upstream capability flag"; an explicit list is authoritative for the models
    * it mentions and leaves the rest to the catalog.
    */
-  imageModelIds?: readonly string[]
+  imageModelIds?: string[]
   /**
    * Per-model context-window override, keyed by model id. The upstream can
    * advertise more than DSH wants to hand a single turn, so the card lets the
    * user cap a model without touching the catalog.
    */
-  contextBudgets?: Record<string, number>
+  contextBudgets?: Partial<Record<string, number>>
 }
 
 /** Upper bound the card offers as the "default" context window, in tokens. */
@@ -101,17 +101,20 @@ export const DEFAULT_CONTEXT_BUDGET = 200_000
 /**
  * Plugin configuration schema.
  *
- * `contextBudgets` uses an open object schema rather than a dictionary
- * helper: the helper infers a cosmokit `Dict` type that the generated .d.ts
- * cannot name without leaking that dependency to consumers.
+ * Mirrors the shape the settings section stores. Every field carries a default
+ * so a config that never touched the card still folds cleanly: a field whose
+ * schema declares no default is read as absent by the settings fold. That is
+ * also why `contextBudgets` is a real dictionary (`z.dict`) - an open object
+ * schema reads as "an object with no fields" and the fold then throws while
+ * the provider row is rendered.
  */
 export const Config: z<Config> = z.object({
-  authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app\'s own location)'),
-  cooldownMs: z.number().step(1).min(1000).description('Rate-limit cooldown per account, in milliseconds'),
-  enabledModelIds: z.array(z.string()).description('Model ids enabled in the picker (absent = all)'),
-  imageModelIds: z.array(z.string()).description('Model ids that accept image input (absent = upstream capability)'),
-  contextBudgets: z.object({}).description('Per-model context-window override, keyed by model id'),
-}) as unknown as z<Config>
+  authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app own location)'),
+  cooldownMs: z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds'),
+  enabledModelIds: z.array(z.string()).default([]).description('Model ids enabled in the picker (empty = all)'),
+  imageModelIds: z.array(z.string()).default([]).description('Model ids accepting image input (empty = follow upstream)'),
+  contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Per-model context-window override, keyed by model id'),
+})
 
 /** Everything the CLI needs from a live plugin instance. */
 export interface WorkBuddyPoolApi {
@@ -153,6 +156,21 @@ export function createCore(logger?: { warn(...args: unknown[]): void }) {
 export function apply(ctx: Context, config: Config = {}): void {
   const core = createCore(ctx.logger)
 
+  /**
+   * Invalidate the provider snapshot so the picker re-reads the catalog.
+   *
+   * Seeded with a no-op and reassigned once the adapters exist. The settings
+   * section calls its `onChange` hook SYNCHRONOUSLY from `installSection`,
+   * before registration has run, so a plain `let builtAdapter` declared later
+   * would be read from its temporal dead zone ("Cannot access `builtAdapter`
+   * before initialization") and abort the whole apply — which in turn leaves the
+   * providers undeclared and the settings page unable to render them.
+   */
+  /** The domestic adapter, published for the CLI after registration. */
+  let builtAdapter: WorkBuddyAdapter | undefined
+
+  let invalidateCatalog = (): void => {}
+
   // Effective config: the plugin config, then the settings-scope value once
   // the WorkBuddy XD Pool settings section joins (so edits made on the card's
   // Models settings page stay authoritative). A dedicated section is also what
@@ -179,35 +197,28 @@ export function apply(ctx: Context, config: Config = {}): void {
       ...imageModelIds === undefined ? {} : { imageModelIds },
       ...contextBudgets === undefined ? {} : { contextBudgets },
     })
-    builtAdapter?.invalidate()
+    invalidateCatalog()
   }
-  // The settings service is reached through inject() — cordis refuses bare
-  // property reads outside a declared dependency. DSH 0.1.2-rc.1 exposes the
-  // section installer on the settings service itself (`installSection`); the
-  // older free function no longer ships on this core.
-  // Captured so the card's save route can write the selection back into the
-  // same settings document the model picker reads. Absent when the host ships
-  // no settings service — the save route then answers 503 instead of silently
-  // dropping the write.
-  let settingsService: { set?: (key: string, value: unknown) => Promise<void> | void } | undefined
-  ctx.inject(['settings'], settingsCtx => {
-    const service = settingsCtx.settings as unknown as {
-      installSection?: (
-        owner: Context,
-        ns: SettingsNamespace,
-        schema: typeof Config,
-        entry: Config,
-        hooks: typeof sectionHooks,
-      ) => void
-      set?: (key: string, value: unknown) => Promise<void> | void
-    }
-    if (typeof service.installSection === 'function') {
-      service.installSection(ctx, WORKBUDDY_POOL_SETTINGS_NS, Config, config, sectionHooks)
-    } else {
-      ctx.logger.warn?.('dsh-workbuddy-xdpool: settings service has no installSection; card will not mount')
-    }
-    settingsService = typeof service.set === 'function' ? service : undefined
-  })
+  // `settings` is declared in this plugin top-level `inject`, so the service is
+  // available synchronously here. Calling `installSection` without that
+  // declaration leaves the host with no settings view for this namespace, and its
+  // provider list then reads `undefined` while rendering: the
+  // "Cannot read properties of undefined (reading get)" failure.
+  const settingsService = ctx.settings as unknown as {
+    installSection?: (
+      owner: Context,
+      ns: SettingsNamespace,
+      schema: typeof Config,
+      entry: Config,
+      hooks: typeof sectionHooks,
+    ) => void
+    set?: (key: string, value: unknown) => Promise<void> | void
+  }
+  if (typeof settingsService.installSection === 'function') {
+    settingsService.installSection(ctx, WORKBUDDY_POOL_SETTINGS_NS, Config, config, sectionHooks)
+  } else {
+    ctx.logger.warn?.('dsh-workbuddy-xdpool: settings service has no installSection; card will not mount')
+  }
 
   /**
    * Write one key of the plugin's own settings section. Only ever called with
@@ -245,7 +256,6 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   let stopped = false
-  let builtAdapter: WorkBuddyAdapter | undefined
   ctx.effect(() => () => {
     stopped = true
     void shims.cn.close()
@@ -298,46 +308,87 @@ export function apply(ctx: Context, config: Config = {}): void {
     .then(async () => {
       if (stopped) return
 
-      let releaseAdapter: (() => void) | undefined
-      let releaseDirectory: (() => void) | undefined
       try {
         // One adapter per region. Each provider is bound to its own account
         // slice of the pool (see the `region` argument on `pool.acquire`), so a
         // CN request can never be served by a global account and vice versa —
         // the two gateways are not interchangeable.
-        const built: WorkBuddyAdapter[] = []
-        const releases: (() => void)[] = []
+        const adaptersByRegion = {
+          cn: createWorkBuddyAdapter({
+            shim: shims.cn,
+            catalog: core.catalog,
+            providerId: POOL_PROVIDER_BY_REGION.cn,
+            displayName: POOL_NAME_BY_REGION.cn,
+          }),
+          global: createWorkBuddyAdapter({
+            shim: shims.global,
+            catalog: core.catalog,
+            providerId: POOL_PROVIDER_BY_REGION.global,
+            displayName: POOL_NAME_BY_REGION.global,
+          }),
+        } as const
+
+        let releaseAdapterCn: (() => void) | undefined
+        let releaseAdapterGlobal: (() => void) | undefined
+        let releaseDirectory: (() => void) | undefined
         try {
-          for (const region of ['cn', 'global'] as const) {
-            const provider = POOL_PROVIDER_BY_REGION[region]
-            const adapter = createWorkBuddyAdapter({
-              shim: shims[region],
-              catalog: core.catalog,
-              providerId: provider,
-              displayName: POOL_NAME_BY_REGION[region],
-            })
-            built.push(adapter)
-            releases.push(ctx.llm.registerAdapter([provider], adapter.adapter))
-            releases.push(ctx.llm.registerConfigurableProviders([{
-              provider,
-              displayName: POOL_NAME_BY_REGION[region],
+          releaseAdapterCn = ctx.llm.registerAdapter(
+            [POOL_PROVIDER_BY_REGION.cn],
+            adaptersByRegion.cn.adapter,
+          )
+          releaseAdapterGlobal = ctx.llm.registerAdapter(
+            [POOL_PROVIDER_BY_REGION.global],
+            adaptersByRegion.global.adapter,
+          )
+          // Both entries go in ONE call: the host mounts a single configuration
+          // form for the pair, sharing the plugin settings section. Registering
+          // them one at a time left the second call reading a registry entry the
+          // first had not finished creating (the `reading 'get'` failure).
+          releaseDirectory = ctx.llm.registerConfigurableProviders([
+            {
+              provider: POOL_PROVIDER_BY_REGION.cn,
+              displayName: POOL_NAME_BY_REGION.cn,
               settingsNs: WORKBUDDY_POOL_SETTINGS_NS,
               settingsPath: [],
               declared: false,
-            }]))
+            },
+            {
+              provider: POOL_PROVIDER_BY_REGION.global,
+              displayName: POOL_NAME_BY_REGION.global,
+              settingsNs: WORKBUDDY_POOL_SETTINGS_NS,
+              settingsPath: [],
+              declared: false,
+            },
+          ])
+        } finally {
+          // A throw part-way through leaves the earlier registrations live; undo
+          // them so a failed startup does not leave half a provider behind.
+          if (releaseAdapterCn === undefined || releaseAdapterGlobal === undefined || releaseDirectory === undefined) {
+            releaseAdapterCn?.()
+            releaseAdapterGlobal?.()
+            releaseDirectory?.()
           }
-          builtAdapter = built[0]
-        } catch (error: unknown) {
-          for (const release of releases) release()
-          throw error
         }
 
+        builtAdapter = adaptersByRegion.cn
+        // From here on a settings change can rebuild the picker. Until this line
+        // runs, `invalidateCatalog` is the no-op seeded at the top of apply.
+        invalidateCatalog = () => {
+          adaptersByRegion.cn.invalidate()
+          adaptersByRegion.global.invalidate()
+        }
+
+        /** Release everything the two providers registered, once. */
+        const releaseProviders = (): void => {
+          releaseAdapterCn?.()
+          releaseAdapterGlobal?.()
+          releaseDirectory?.()
+        }
         try {
-          ctx.effect(() => () => {
-            for (const release of releases) release()
-          })
+          ctx.effect(() => releaseProviders)
         } catch {
-          for (const release of releases) release()
+          // The plugin was disposed while registering; release immediately.
+          releaseProviders()
         }
 
         // The model picker asks the host for a provider's catalog; answering
@@ -386,7 +437,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           if (credential === undefined) return
           const models = await core.client.fetchModels(credential)
           core.catalog.updateFromUpstream(models)
-          builtAdapter?.invalidate()
+          invalidateCatalog()
           ctx.logger.info?.(`dsh-workbuddy-xdpool: live catalog seeded with ${models.length} model(s)`)
         } catch (error: unknown) {
           ctx.logger.warn('dsh-workbuddy-xdpool: live model catalog unavailable; using static fallback', error)

@@ -201,6 +201,11 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     streamIdleTimeoutMs: WORKBUDDY_STREAM_IDLE_TIMEOUT_MS,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-workbuddy-xdpool retryPolicy'),
     configuredMaxTokens: new Map(),
+    // Required by the host adapter: it reads `profile.modelErrors.get(model)`
+    // for every model it resolves. Leaving it out makes every model lookup
+    // throw "Cannot read properties of undefined (reading 'get')", which the
+    // catalog surfaces as "{provider} 加载失败".
+    modelErrors: new Map(),
     ...REQUEST_IMAGE_BUDGETS,
     piProvider: provider,
   }

@@ -656,28 +656,31 @@ export interface Config {
    * advertises" — an unconfigured install should never present an empty model
    * list just because the key is missing.
    */
-  enabledModelIds?: readonly string[];
+  enabledModelIds?: string[];
   /**
    * Model ids that additionally accept image input. Absent means "follow the
    * upstream capability flag"; an explicit list is authoritative for the models
    * it mentions and leaves the rest to the catalog.
    */
-  imageModelIds?: readonly string[];
+  imageModelIds?: string[];
   /**
    * Per-model context-window override, keyed by model id. The upstream can
    * advertise more than DSH wants to hand a single turn, so the card lets the
    * user cap a model without touching the catalog.
    */
-  contextBudgets?: Record<string, number>;
+  contextBudgets?: Partial<Record<string, number>>;
 }
 /** Upper bound the card offers as the "default" context window, in tokens. */
 export declare const DEFAULT_CONTEXT_BUDGET = 200000;
 /**
  * Plugin configuration schema.
  *
- * `contextBudgets` uses an open object schema rather than a dictionary
- * helper: the helper infers a cosmokit `Dict` type that the generated .d.ts
- * cannot name without leaking that dependency to consumers.
+ * Mirrors the shape the settings section stores. Every field carries a default
+ * so a config that never touched the card still folds cleanly: a field whose
+ * schema declares no default is read as absent by the settings fold. That is
+ * also why `contextBudgets` is a real dictionary (`z.dict`) - an open object
+ * schema reads as "an object with no fields" and the fold then throws while
+ * the provider row is rendered.
  */
 export declare const Config: z<Config>;
 /** Everything the CLI needs from a live plugin instance. */
