@@ -15,11 +15,11 @@
 
 **插件配置卡片（设置 → 插件 → DSH WorkBuddy XD Pool）**
 
-![WorkBuddy 池设置卡片：池健康状态、账号面板、积分包、合计](assets/settings-card.png)
+![WorkBuddy 池设置卡片：国内版 / 国际版切换栏、池健康状态、账号面板、积分包与合计、每账号每日签到、模型管理（启用勾选 / 图片输入 / 上下文窗口）](assets/settings-card.png)
 
-**模型选择器（倍率直接拼进 model.name：DSH 0.1.2 composer 只读 name）**
+**模型选择器（国内版 / 国际版 两个独立供应商分组；倍率直接拼进 model.name：DSH 0.1.2 composer 只读 name）**
 
-![模型选择器每个模型名后显示倍率与促销标签](assets/model-picker.png)
+![模型选择器：国内版与国际版各占一个分组，每个模型名后显示积分倍率与促销标签](assets/model-picker.png)
 
 **国内版 / 国际版 双供应商（各自独立账号、积分与模型，可同时使用）**
 

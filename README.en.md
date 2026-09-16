@@ -15,11 +15,11 @@ Merge **every WorkBuddy account** you have ever signed into on this machine into
 
 **Settings card (Settings → Plugins → DSH WorkBuddy XD Pool)**
 
-![WorkBuddy pool settings card: pool health, per-account panels, credit packages, totals](assets/settings-card.png)
+![WorkBuddy pool settings card: domestic/international tab strip, pool health, per-account panels, credit packages and totals, per-account daily check-in, and model management (enable, image input, context window)](assets/settings-card.png)
 
-**Model picker (rate multiplier baked into model.name; DSH 0.1.2 composer only reads name)**
+**Model picker (domestic and international appear as two separate supplier groups; the rate multiplier is baked into model.name because the DSH 0.1.2 composer only reads name)**
 
-![Model picker shows the rate and promo badge next to each model name](assets/model-picker.png)
+![Model picker: the domestic and international suppliers each form their own group, with the credit rate and promo badge shown next to every model name](assets/model-picker.png)
 
 **Domestic / international dual suppliers (each with its own accounts, credits and models, usable at the same time)**
 
