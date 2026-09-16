@@ -48,7 +48,7 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "prepare": "tsdown",
+    "prepublishOnly": "tsdown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit"

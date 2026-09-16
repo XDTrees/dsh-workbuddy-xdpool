@@ -61,14 +61,17 @@ dsh plugin --profile desktop add github:aosi526/dsh-workbuddy-xdpool
 
 ```sh
 pnpm install
-pnpm build        # 产出 lib/index.js + lib/bin.js + lib/client.js
+pnpm build        # 产出 lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
+pnpm test         # 26 项测试（自动容错轮换、按(账号,模型)冷却、签到守卫）
 pnpm typecheck    # 宿主侧
 pnpm typecheck:client   # 客户端
 ```
 
+> **构建产物已随仓库提交**（`lib/` 不再 gitignore）。因此从 GitHub 安装时不需要任何安装期脚本，不会触发 pnpm 的「构建脚本被拦截，请放行」提示。**改动 `src/` 后请重新 `pnpm build` 并把 `lib/` 一并提交**，否则用户拿到的是旧产物。
+
 > 注意：`pnpm install` 需用 pnpm 11（`npx pnpm@11`），必要时加 `--config.confirmModulesPurge=false --config.minimumReleaseAge=0`（pnpm 11 默认的 `minimumReleaseAge` 供应链年龄策略会拦截刚发布的 rc 包）。
 
-装好后：模型选择器里会出现 **WorkBuddy XD Pool** 分组；设置 → 插件 → **DSH WorkBuddy XD Pool** 卡片可查看池健康、各账号令牌/积分/冷却，以及「重新检测账号」「清除所有冷却」按钮。
+装好后：模型选择器里会出现 **WorkBuddy XD Pool** 分组；设置 → 插件 → **DSH WorkBuddy XD Pool** 卡片可查看池健康、各账号令牌/积分/签到/冷却，以及「重新检测账号」「清除所有冷却」按钮与每个账号的签到按钮。
 
 插件在 Web / TUI profile 下同样可用（`--profile web` / `--profile dsh-tui`）。
 
@@ -128,7 +131,7 @@ workbuddy-xdpool:
   - `web-status.ts` / `status-paths.ts` —— 卡片消费的同源状态文档与路由；签到是本插件唯一的写操作，按「POST + 回环来源 + 显式 accountId + 领取前二次确认」四重守卫。
   - `bin.ts` —— 上述 CLI。
 - **客户端**（`src/client/`，浏览器卡片，经 `dsh.client` 由宿主加载）：折叠卡片外壳沿用宿主内置卡的 `dsm-plugin-card*` 样式语言（`--dsw-alias-*` 主题变量），内容用 `dsm-workbuddy-xdpool-*` 前缀，绝不污染宿主其它卡片；命名空间 `settings.workbuddy-xdpool`。
-- **构建**：`tsdown` 产出 `lib/index.js`（宿主入口）+ `lib/bin.js`（CLI）+ `lib/client.js`（CJS，`window.__ModuleLoader__.load` 包裹的浏览器 bundle）。
+- **构建**：`tsdown` 产出 `lib/index.js`（宿主入口）+ `lib/index.d.ts`（类型）+ `lib/bin.js`（CLI）+ `lib/client.js`（CJS，`window.__ModuleLoader__.load` 包裹的浏览器 bundle）。四个产物均随仓库提交，因此安装时不需要任何构建脚本。
 
 ## 已知限制
 

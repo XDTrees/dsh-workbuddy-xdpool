@@ -1,6 +1,9 @@
 node_modules/
 .pnpm-store/
-lib/
+# NOTE: lib/ is intentionally tracked. Shipping the built output means a
+# `dsh plugin add github:...` install needs no install-time script: pnpm 11
+# blocks those by default, and a missing build leaves no lib/index.js to load.
+# Re-run `pnpm build` and commit lib/ alongside any src change.
 coverage/
 *.log
 .env

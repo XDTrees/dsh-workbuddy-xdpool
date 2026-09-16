@@ -25,7 +25,10 @@ export default defineConfig([
     format: 'esm',
     platform: 'node',
     target: 'node22',
-    dts: false,
+    // The host entry is the only half with published types (`package.json`
+    // `types` points at lib/index.d.ts). The CLI is an executable and the
+    // browser bundle is consumed by the host loader, so both stay untyped.
+    dts: true,
     outExtensions: () => ({ js: '.js' }),
     clean: true,
     sourcemap: false,

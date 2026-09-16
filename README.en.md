@@ -52,12 +52,17 @@ dsh plugin --profile desktop add github:aosi526/dsh-workbuddy-xdpool
 
 ```sh
 pnpm install
-pnpm build                  # outputs lib/index.js + lib/bin.js + lib/client.js
+pnpm build                  # outputs lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
+pnpm test                   # 26 tests (failover rotation, per-(account,model) cooldowns, check-in guards)
 pnpm typecheck              # host side
 pnpm typecheck:client       # client side
 ```
 
 > `pnpm install` needs pnpm 11 (`npx pnpm@11`); add `--config.confirmModulesPurge=false --config.minimumReleaseAge=0` if the supply-chain age policy blocks freshly published rc packages.
+
+> **The built output is committed** (`lib/` is no longer ignored). A GitHub install therefore runs
+> no install-time script and never hits pnpm's "build scripts are blocked" prompt. **After changing
+> `src/`, re-run `pnpm build` and commit `lib/` too**, or users would receive the old build.
 
 After install: a **WorkBuddy XD Pool** group appears in the model picker; Settings → Plugins → **DSH WorkBuddy XD Pool** card shows pool health, per-account tokens/credits/check-in/cooldowns, plus "Detect accounts again" and "Clear all cooldowns" buttons. Works on Web / TUI profiles too (`--profile web` / `--profile dsh-tui`).
 
@@ -108,7 +113,7 @@ workbuddy-xdpool:
 
 - **Host side** (`src/`): registers the `workbuddy-xdpool` provider, the `workbuddy-xdpool` settings section (`settings.installSection`), four same-origin routes (status / re-scan / clear cooldowns / check-in), and account discovery + catalog seeding. The upstream client picks the CN or global origin per credential from its login domain.
 - **Client** (`src/client/`): the browser card loaded via `dsh.client`; the collapsible shell reuses the host's `dsm-plugin-card*` style language (`--dsw-alias-*` theme tokens), with content classes namespaced `dsm-workbuddy-xdpool-*`. Check-in is the plugin's only mutating route: POST-only, loopback-origin-only, an explicit per-account `accountId`, and a pre-claim status re-check.
-- **Build**: `tsdown` produces `lib/index.js` (host entry) + `lib/bin.js` (CLI) + `lib/client.js` (CJS browser bundle wrapped in `window.__ModuleLoader__.load`).
+- **Build**: `tsdown` produces `lib/index.js` (host entry) + `lib/index.d.ts` (types) + `lib/bin.js` (CLI) + `lib/client.js` (CJS browser bundle wrapped in `window.__ModuleLoader__.load`). All four are committed, so an install needs no build-time script.
 
 ## Known limitations
 
