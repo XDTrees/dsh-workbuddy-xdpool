@@ -32,6 +32,8 @@
 
 ### 安装体验
 
+- **安装速度优化（约 140 秒 → 数秒）**：把 6 个由 DSH 宿主进程提供的运行时包（`@deepseek-ai/dsh-llm`、`dsh-llm-pi-ai`、`dsh-settings`、`cordis`、`schemastery`、`@earendil-works/pi-ai`）在 `peerDependenciesMeta` 中标记为 **optional**。插件自身从不拉取它们；此前未标记 optional，包管理器会自动解析并安装它们的整棵依赖树（含 AWS / Google / Anthropic / Mistral SDK 等），实测安装 112 个包、耗时约 140 秒 —— 现在只需约 1 个包、数秒完成。
+
 - **构建产物随仓库提交**：`lib/`（`index.js` + `index.d.ts` + `bin.js` + `client.js`）不再被忽略，直接从 GitHub 安装时**不需要任何安装期脚本**，因此不会再出现 pnpm 的「构建脚本被拦截，请放行后重试」提示，装完即用。
 - 相应地，`prepare` 脚本改为 `prepublishOnly`（发布到 npm 前仍会自动构建），安装路径上不再有脚本触发点。
 - 新增 `lib/index.d.ts` 类型声明（此前 `package.json` 的 `types` 指向该文件但构建未产出）。

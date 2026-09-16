@@ -38,18 +38,27 @@
 
 > 与 host 兼容 `0.1.1-rc.2` / `0.1.2` 系：设置节安装会按 host 能力自动选择 `settings.installSection`（0.1.2-rc.1+）或自由函数（更早）。
 
-**方式一：从 GitHub 安装（推荐）**
+**方式一：从 npm 安装（推荐）**
 
 ```sh
 # dsh 不在 PATH 时，用 node ~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js 代替 dsh
+dsh plugin --profile desktop add dsh-workbuddy-xdpool
+```
+
+> 推荐 npm 安装：pnpm / npm 需要拉取的依赖只有插件自身（**约 1 个包，数秒完成**）。
+> 从 GitHub 源码安装会连带安装开发依赖（构建器、测试框架等数百个包），明显更慢。
+
+**方式二：从 GitHub 源码安装**
+
+```sh
 dsh plugin --profile desktop add github:aosi526/dsh-workbuddy-xdpool
 ```
 
-**方式二：手动注册 bundle**
+**方式三：手动注册 bundle**
 
 ```sh
-# 1) 安装包
-dsh plugin --profile desktop add github:aosi526/dsh-workbuddy-xdpool
+# 1) 安装包（npm 或 GitHub 任选其一）
+dsh plugin --profile desktop add dsh-workbuddy-xdpool
 
 # 2) 注册 bundle：编辑 ~/.dsh/profiles/desktop/package.json，
 #    在 "dsh" → "profile" → "bundles" 数组末尾追加 "dsh-workbuddy-xdpool"

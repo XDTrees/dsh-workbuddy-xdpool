@@ -29,18 +29,27 @@ Merge **every WorkBuddy account** you have ever signed into on this machine into
 
 Prerequisite: WorkBuddy desktop app installed and signed in (the plugin reuses the app's sign-in state; adding accounts = signing in / switching accounts in the desktop app — each is absorbed into the pool automatically). Tested against DSH Desktop host `0.1.2`; compatible with `0.1.1-rc.2` / `0.1.2` (the settings-section install picks `settings.installSection` on `0.1.2-rc.1+`, or the older free function earlier).
 
-**Option A — install from GitHub (recommended)**
+**Option A — install from npm (recommended)**
 
 ```sh
 # if dsh is not on PATH, use node ~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js instead
+dsh plugin --profile desktop add dsh-workbuddy-xdpool
+```
+
+> npm is the fast path: the only dependency pulled in is the plugin itself (**roughly 1 package, a few seconds**).
+> Installing from GitHub source also installs the dev toolchain (bundler, test runner, hundreds of packages), which is markedly slower.
+
+**Option B — install from GitHub source**
+
+```sh
 dsh plugin --profile desktop add github:aosi526/dsh-workbuddy-xdpool
 ```
 
-**Option B — manual bundle registration**
+**Option C — manual bundle registration**
 
 ```sh
-# 1) install the package
-dsh plugin --profile desktop add github:aosi526/dsh-workbuddy-xdpool
+# 1) install the package (npm or GitHub)
+dsh plugin --profile desktop add dsh-workbuddy-xdpool
 
 # 2) register the bundle: edit ~/.dsh/profiles/desktop/package.json and append
 #    "dsh-workbuddy-xdpool" to the end of the "dsh" → "profile" → "bundles" array

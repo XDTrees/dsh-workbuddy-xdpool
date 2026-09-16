@@ -97,5 +97,13 @@
     "@earendil-works/pi-ai": ">=0.82.1 <0.85.0",
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
     "@deepseek-ai/dsh-settings": ">=0.1.1-rc.1 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-llm-pi-ai": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true },
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-settings": { "optional": true }
   }
 }
