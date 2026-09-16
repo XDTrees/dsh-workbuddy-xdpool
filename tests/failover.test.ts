@@ -165,8 +165,14 @@ describe('shim failover', () => {
 
     expect(response.status).toBe(200)
     expect(await response.text()).toContain('[DONE]')
-    // The two first accounts were cooled; the third served the request.
-    expect(pool.list().filter(a => a.cooldownUntilMs > Date.now())).toHaveLength(2)
+    // The first two accounts were rate-limited and the third served the request.
+    // A 429 cools per (account, model), so the penalty lands in `modelCooldowns`
+    // rather than in the account-wide `cooldownUntilMs`: the account itself
+    // stays usable for every other model.
+    const coolingForModel = pool.list()
+      .filter(a => (a.modelCooldowns['hy4-preview'] ?? 0) > Date.now())
+    expect(coolingForModel).toHaveLength(2)
+    expect(pool.list().every(a => a.cooldownUntilMs === 0)).toBe(true)
   })
 
   it('returns 429 only after every account is exhausted', async () => {
@@ -281,7 +287,7 @@ describe('adapter', () => {
     expect(models.length).toBeGreaterThan(0)
     for (const model of models) {
       expect((model as Record<string, unknown>)['baseUrl']).toBe(`${shim.baseUrl()}/v1`)
-      expect((model as Record<string, unknown>)['provider']).toBe('workbuddy-pool')
+      expect((model as Record<string, unknown>)['provider']).toBe('workbuddy-xdpool')
       expect(JSON.stringify(model)).not.toContain('token-')
     }
 

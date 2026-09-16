@@ -2,8 +2,10 @@
  * Same-origin routes backing the WorkBuddy XD Pool settings card.
  *
  * These answer loopback browser requests only and never carry token material
- * (no access/refresh tokens, no uin). The card is read-only with two actions:
- * rescan the desktop snapshots (`pool.scan`) and reset every 429 cooldown.
+ * (no access/refresh tokens, no uin). Read-only by default — the status route
+ * is a GET; the card's rescan and cooldown-reset actions are explicit POSTs.
+ * The one mutating route is the daily check-in claim, which is guarded by an
+ * explicit per-account `accountId` and a pre-claim status re-check.
  *
  * Mounted on the Host's `webServer` (same-origin as the DSH settings UI) via
  * `ctx.inject(['webServer'], ...)` in `apply`. Because `webServer` is an
@@ -22,15 +24,17 @@ import type { WorkBuddyCatalog } from './catalog.ts'
 import type { WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import {
+  POOL_CHECKIN_PATH,
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
   POOL_STATUS_PATH,
   type PoolWebAccount,
+  type PoolWebCheckin,
   type PoolWebModel,
   type PoolWebStatus,
 } from './status-paths.ts'
 
-export { POOL_RESET_COOLDOWN_PATH, POOL_RESCAN_PATH, POOL_STATUS_PATH }
+export { POOL_CHECKIN_PATH, POOL_RESET_COOLDOWN_PATH, POOL_RESCAN_PATH, POOL_STATUS_PATH }
 export type { PoolWebStatus }
 
 /** Constructor dependencies — a narrow read-only slice of the pool runtime. */
@@ -66,6 +70,41 @@ function loopbackOrigin(req: IncomingMessage): boolean {
   } catch {
     return false
   }
+}
+
+/** Smallest possible POST body reader, capped so a hung or oversized body
+ *  cannot pin memory on the Host. Returns `{}` for an empty body. */
+function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    const LIMIT = 64 * 1024
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > LIMIT) {
+        reject(new Error('request body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8').trim()
+      if (text === '') {
+        resolve({})
+        return
+      }
+      try {
+        const parsed: unknown = JSON.parse(text)
+        resolve(typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown>
+          : {})
+      } catch {
+        reject(new Error('invalid JSON body'))
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
@@ -109,9 +148,9 @@ function toWebModel(model: {
 }
 
 /**
- * Assemble the card's status document. Per-account credits are queried live;
- * a failing query degrades to `creditsError` rather than failing the whole
- * document. Never throws.
+ * Assemble the card's status document. Per-account credits and check-in state
+ * are queried live; a failing query degrades to `creditsError` / `checkinError`
+ * rather than failing the whole document. Never throws.
  */
 export async function poolWebStatus(deps: PoolStatusRouteOptions): Promise<PoolWebStatus> {
   const accounts = deps.pool.list()
@@ -131,6 +170,22 @@ export async function poolWebStatus(deps: PoolStatusRouteOptions): Promise<PoolW
         } })
       } catch (error: unknown) {
         Object.assign(row, { creditsError: safeMessage(error) })
+      }
+      try {
+        const checkin = await deps.client.fetchCheckinStatus(account.credential)
+        const web: PoolWebCheckin = {
+          active: checkin.active,
+          todayCheckedIn: checkin.todayCheckedIn,
+          streakDays: checkin.streakDays,
+          dailyCredit: checkin.dailyCredit,
+          todayCredit: checkin.todayCredit,
+          isStreakDay: checkin.isStreakDay,
+          nextStreakDay: checkin.nextStreakDay,
+          streakBonusCredit: checkin.streakBonusCredit,
+        }
+        Object.assign(row, { checkin: web })
+      } catch (error: unknown) {
+        Object.assign(row, { checkinError: safeMessage(error) })
       }
     }
     rows.push(row)
@@ -207,7 +262,39 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
       },
     })
 
+    // The only mutating route: it collects a daily reward, so it is guarded on
+    // three axes — POST only, loopback origin only, and an explicit `accountId`
+    // body field. An ambiguous request can never claim on the wrong account
+    // (and never on every account at once).
+    const disposeCheckin = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_CHECKIN_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        try {
+          const body = await readJsonBody(req)
+          const accountId = typeof body['accountId'] === 'string' ? body['accountId'] : ''
+          if (accountId === '') return json(res, 400, { error: 'accountId is required' })
+          const account = deps.pool.list().find(item => item.id === accountId)
+          if (account === undefined) return json(res, 404, { error: 'unknown account' })
+          const before = await deps.client.fetchCheckinStatus(account.credential)
+          // Second guard: never re-claim a reward the status already reports as
+          // collected. Protects against a double-click or a stale card.
+          if (!before.active) return json(res, 409, { error: 'check-in activity is not active' })
+          if (before.todayCheckedIn) {
+            return json(res, 200, { ok: true, alreadyCheckedIn: true, claim: { credit: 0, streakDays: before.streakDays, isStreakDay: before.isStreakDay } })
+          }
+          const claim = await deps.client.claimDailyCheckin(account.credential)
+          json(res, 200, { ok: true, claim })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+
     return () => {
+      disposeCheckin()
       disposeReset()
       disposeRescan()
       disposeStatus()

@@ -34,6 +34,15 @@ export {
 export { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, type WorkBuddyModelInfo } from './catalog.ts'
 export { WorkBuddyUpstreamClient, classifyUpstreamError, parseRateLimitReset, type UpstreamErrorKind } from './upstream.ts'
 export { buildStatus, formatStatus, formatRates, type WorkBuddyStatus, type AccountStatus } from './status.ts'
+export {
+  POOL_CHECKIN_PATH,
+  POOL_RESET_COOLDOWN_PATH,
+  POOL_RESCAN_PATH,
+  POOL_STATUS_PATH,
+  type PoolWebCheckin,
+  type PoolWebCheckinClaim,
+  type PoolWebStatus,
+} from './status-paths.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'llm-workbuddy-xdpool'

@@ -74,6 +74,8 @@ export interface WorkBuddyCheckinStatus {
   nextStreakDay: number
   streakBonusDays: number
   streakBonusCredit: number
+  /** Upstream-supplied button label; the card falls back to its own copy. */
+  claimButtonText?: string
 }
 
 /** Daily check-in claim result. */
@@ -578,6 +580,9 @@ export class WorkBuddyUpstreamClient {
       nextStreakDay: num('next_streak_day'),
       streakBonusDays: num('streak_bonus_days'),
       streakBonusCredit: num('streak_bonus_credit'),
+      ...typeof data['claim_button_text'] === 'string' && data['claim_button_text'] !== ''
+        ? { claimButtonText: data['claim_button_text'] }
+        : {},
     }
   }
 

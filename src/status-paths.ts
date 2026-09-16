@@ -17,6 +17,8 @@ export const POOL_STATUS_PATH = '/plugins/dsh-workbuddy-xdpool/status'
 export const POOL_RESCAN_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/rescan'
 /** Plugin-owned cooldown reset endpoint (clear all 429 cooldowns). */
 export const POOL_RESET_COOLDOWN_PATH = '/plugins/dsh-workbuddy-xdpool/cooldowns/reset'
+/** Plugin-owned daily check-in action endpoint (claim today's reward). */
+export const POOL_CHECKIN_PATH = '/plugins/dsh-workbuddy-xdpool/checkin'
 
 /** One pool account's row, token-free. */
 export interface PoolWebAccount {
@@ -43,6 +45,14 @@ export interface PoolWebAccount {
   /** Aggregated credit summary for the account, read-only. */
   credits?: PoolWebCredits
   creditsError?: string
+  /**
+   * Today's check-in state for this account, read-only. Present only when the
+   * per-account check-in probe succeeded and the program is active. The card
+   * renders one claim button per account, so a multi-account pool can collect
+   * every account's daily reward without switching accounts by hand.
+   */
+  checkin?: PoolWebCheckin
+  checkinError?: string
 }
 
 /** One credit package (as surfaced by the pool's upstream client), node-free. */
@@ -66,6 +76,36 @@ export interface PoolWebCredits {
   expiringSoon?: number
   /** When the nearest package expires, ms. */
   nearestExpiryMs?: number
+}
+
+/**
+ * Daily check-in state the card renders under one account's credits. Mirrors
+ * the upstream activity endpoint, minus anything the browser does not need.
+ */
+export interface PoolWebCheckin {
+  /** The activity is running; a claim button is offered only while true. */
+  active: boolean
+  /** Already collected today — the button renders as a done state. */
+  todayCheckedIn: boolean
+  /** Consecutive days checked in. */
+  streakDays: number
+  /** Credits a single day grants. */
+  dailyCredit: number
+  /** Credits collected today (0 before claiming). */
+  todayCredit: number
+  /** Today is a streak milestone day. */
+  isStreakDay: boolean
+  /** The day count the next milestone lands on. */
+  nextStreakDay: number
+  /** Bonus credits granted on a milestone day. */
+  streakBonusCredit: number
+}
+
+/** Result of one claim, so the card can confirm what was collected. */
+export interface PoolWebCheckinClaim {
+  credit: number
+  streakDays: number
+  isStreakDay: boolean
 }
 
 /** One model the pool exposes to DSH, with cost / free tags. */

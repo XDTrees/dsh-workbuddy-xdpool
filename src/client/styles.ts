@@ -95,6 +95,18 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-model-meta-tag{padding:1px 8px;border-radius:999px;font-size:11px;line-height:16px;background:rgba(174,179,187,.11);color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-xdpool-model-cap{color:var(--dsw-alias-label-tertiary,#999);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 
+/* Daily check-in block: streak chips on the left, one claim button per account. */
+.dsm-workbuddy-xdpool-checkin{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;background:var(--dsw-alias-bg-layer-2,#24262c);flex-wrap:wrap}
+.dsm-workbuddy-xdpool-checkin-copy{display:flex;flex-direction:column;gap:6px;min-width:0}
+.dsm-workbuddy-xdpool-checkin-title{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:13px;font-weight:600;line-height:19px}
+.dsm-workbuddy-xdpool-checkin-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dsm-workbuddy-xdpool-checkin-chip{padding:1px 8px;border-radius:999px;font-size:11px;line-height:18px;background:rgba(174,179,187,.11);color:var(--dsw-alias-label-secondary,#c6c9d0);font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-checkin-chip-bonus{background:var(--dsw-alias-state-success-subtle,rgba(51,160,107,.14));color:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-workbuddy-xdpool-checkin-btn{flex:none;padding:6px 16px;border-radius:9px;border:1px solid transparent;font-size:12px;font-weight:600;line-height:18px;cursor:pointer;background:var(--dsw-alias-state-success-primary,#22a06b);color:#fff;transition:opacity .16s,border-color .16s,background .16s}
+.dsm-workbuddy-xdpool-checkin-btn:hover:not(:disabled){opacity:.88}
+.dsm-workbuddy-xdpool-checkin-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-xdpool-checkin-btn:disabled{cursor:default;background:transparent;border-color:var(--dsw-alias-border-l2,#3a3d45);color:var(--dsw-alias-label-tertiary,#9aa0a8);opacity:1}
+
 /* Inline notes + error messages. */
 .dsm-workbuddy-xdpool-note{margin:0;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:13px;line-height:20px}
 .dsm-workbuddy-xdpool-error{margin:0;color:var(--dsw-alias-state-error-primary,#ef4444);font-size:13px;line-height:20px}
@@ -104,5 +116,7 @@ export const POOL_CARD_CSS = `
   .dsm-workbuddy-xdpool-credits-panels{grid-template-columns:1fr}
   .dsm-workbuddy-xdpool-credit-panel-total{align-items:flex-start;text-align:left}
   .dsm-workbuddy-xdpool-credit-total-body{align-items:flex-start}
+  .dsm-workbuddy-xdpool-checkin{align-items:stretch;flex-direction:column}
+  .dsm-workbuddy-xdpool-checkin-btn{width:100%}
 }
 `.trim()

@@ -50,6 +50,7 @@ function usage(): string {
     '  import <key>        Snapshot the current desktop login as <key> (add --force)',
     '  remove <key>        Delete one imported snapshot',
     '  login               Guide for adding another account (desktop app is single-sign-in)',
+    '  checkin [all|<acct>] Daily check-in: report status, or collect with `all` / a label',
     '  reset               Clear all rate-limit cooldowns immediately',
     '',
     'Options:',
@@ -140,6 +141,89 @@ async function commandStatus(args: string[]): Promise<number> {
     }
   }
   return status.ok ? 0 : 1
+}
+
+/**
+ * Daily check-in from the terminal.
+ *
+ * `checkin` with no argument reports every account's status; `checkin all`
+ * collects wherever a reward is still available, and `checkin <label>` targets
+ * one account. A collection is never attempted twice for the same account on
+ * the same day — the status is re-read first and an already-collected account
+ * is reported as such.
+ */
+async function commandCheckin(args: string[]): Promise<number> {
+  const asJson = args.includes('--json')
+  const target = args.find(arg => !arg.startsWith('--'))
+  const core = createCore()
+  const accounts = await core.pool.scan()
+  if (accounts.length === 0) {
+    console.error('No WorkBuddy account discovered. Sign in with the WorkBuddy desktop app first.')
+    return 1
+  }
+
+  const wanted = target === undefined || target === 'all'
+    ? core.pool.list()
+    : core.pool.list().filter(account => account.label === target || account.id === target || account.id.startsWith(target))
+  if (wanted.length === 0) {
+    console.error(`No account matches "${target}". Run \`accounts\` to list labels.`)
+    return 1
+  }
+
+  const rows: {
+    label: string
+    active: boolean
+    alreadyCheckedIn: boolean
+    streakDays: number
+    claimed?: number
+    error?: string
+  }[] = []
+
+  for (const account of wanted) {
+    const row = { label: account.label, active: false, alreadyCheckedIn: false, streakDays: 0 } as typeof rows[number]
+    try {
+      const status = await core.client.fetchCheckinStatus(account.credential)
+      row.active = status.active
+      row.alreadyCheckedIn = status.todayCheckedIn
+      row.streakDays = status.streakDays
+      const shouldClaim = target !== undefined && status.active && !status.todayCheckedIn
+      if (shouldClaim) {
+        const claim = await core.client.claimDailyCheckin(account.credential)
+        row.claimed = claim.credit
+        row.streakDays = claim.streakDays
+        row.alreadyCheckedIn = true
+      }
+    } catch (error: unknown) {
+      row.error = String(error).slice(0, 200)
+    }
+    rows.push(row)
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(rows, null, 2))
+    return rows.every(row => row.error === undefined) ? 0 : 1
+  }
+
+  console.log('Daily check-in:')
+  for (const row of rows) {
+    if (row.error !== undefined) {
+      console.log(`  ! ${row.label}: query failed — ${row.error}`)
+      continue
+    }
+    if (!row.active) {
+      console.log(`  – ${row.label}: no check-in activity`)
+      continue
+    }
+    if (row.claimed !== undefined) {
+      console.log(`  + ${row.label}: collected ${row.claimed} credit(s) (streak ${row.streakDays})`)
+      continue
+    }
+    console.log(row.alreadyCheckedIn
+      ? `  ✓ ${row.label}: already checked in today (streak ${row.streakDays})`
+      : `  · ${row.label}: not checked in today — run \`checkin all\` to collect`)
+  }
+  if (target === undefined) console.log('\nAdd `all` (or an account label) to collect.')
+  return rows.every(row => row.error === undefined) ? 0 : 1
 }
 
 async function commandDoctor(): Promise<number> {
@@ -353,6 +437,8 @@ export async function main(argv: string[]): Promise<number> {
       return commandRemove(['default', ...rest])
     case 'reset':
       return commandReset()
+    case 'checkin':
+      return commandCheckin(rest)
     default:
       console.error(`unknown command: ${command}\n\n${usage()}`)
       return 2

@@ -19,6 +19,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
+  POOL_CHECKIN_PATH,
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
   POOL_STATUS_PATH,
@@ -107,6 +108,8 @@ export function PoolCard({ t }: PoolCardProps) {
   const [busy, setBusy] = useState(false)
   const [cooldownBusy, setCooldownBusy] = useState(false)
   const [flash, setFlash] = useState<string | undefined>(undefined)
+  /** Account id whose daily claim is currently in flight. */
+  const [checkinBusyId, setCheckinBusyId] = useState<string | undefined>(undefined)
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -177,6 +180,39 @@ export function PoolCard({ t }: PoolCardProps) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (mounted.current) setCooldownBusy(false)
+    }
+  }
+
+  /**
+   * Claim one account's daily check-in. The account id travels in the body so
+   * the Host can never guess: a click on account B's button can only ever
+   * collect account B's reward. The status is re-read afterwards so the card
+   * reflects the new streak / total without waiting for the next poll.
+   */
+  const claimCheckin = async (accountId: string): Promise<void> => {
+    setCheckinBusyId(accountId)
+    setFlash(undefined)
+    try {
+      const response = await fetch(POOL_CHECKIN_PATH, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ accountId }),
+      })
+      const body = await response.json().catch(() => undefined) as
+        | { claim?: { credit?: number }; error?: string }
+        | undefined
+      if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
+      await refresh()
+      const credit = body?.claim?.credit ?? 0
+      if (mounted.current) {
+        setFlash(t?.('row.checkinClaimedReward', { credit: formatNumber(credit) })
+          ?? `Claimed +${formatNumber(credit)} credits`)
+      }
+    } catch (cause: unknown) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (mounted.current) setCheckinBusyId(undefined)
     }
   }
 
@@ -299,6 +335,8 @@ export function PoolCard({ t }: PoolCardProps) {
                         key={account.id}
                         account={account}
                         {...status.activeAccountId === undefined ? {} : { activeAccountId: status.activeAccountId }}
+                        {...checkinBusyId === undefined ? {} : { checkinBusyId }}
+                        onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
                         t={t}
                       />
                     ))}
@@ -335,10 +373,15 @@ function AccountBlock({
   account,
   activeAccountId,
   t,
+  checkinBusyId,
+  onClaimCheckin,
 }: {
   account: PoolWebAccount
   activeAccountId?: string
   t?: PoolCardProps['t']
+  /** Account id whose claim is in flight, if any. */
+  checkinBusyId?: string
+  onClaimCheckin: (accountId: string) => void
 }) {
   const isActive = account.id === activeAccountId
   const isCooling = account.cooling === true
@@ -389,6 +432,88 @@ function AccountBlock({
       </div>
       {account.credits === undefined && account.creditsError === undefined ? null
         : <AccountCredits account={account} t={t} />}
+      {account.checkin === undefined && account.checkinError === undefined ? null
+        : <AccountCheckin
+            account={account}
+            t={t}
+            busy={checkinBusyId === account.id}
+            onClaim={onClaimCheckin}
+          />}
+    </div>
+  )
+}
+
+/**
+ * Daily check-in block: streak summary plus one claim button for this account.
+ * Every account in the pool gets its own button, so a multi-account user can
+ * collect each reward without switching the pool's preferred account first.
+ */
+function AccountCheckin({
+  account,
+  t,
+  busy,
+  onClaim,
+}: {
+  account: PoolWebAccount
+  t?: PoolCardProps['t']
+  busy: boolean
+  onClaim: (accountId: string) => void
+}) {
+  if (account.checkinError !== undefined) {
+    return (
+      <p className="dsm-workbuddy-xdpool-account-error">
+        {t?.('row.checkinError', { message: account.checkinError }) ?? account.checkinError}
+      </p>
+    )
+  }
+  const checkin = account.checkin
+  if (checkin === undefined) return null
+
+  const claimable = checkin.active && !checkin.todayCheckedIn
+  const label = !checkin.active
+    ? (t?.('row.checkinInactive') ?? 'Check-in not available')
+    : checkin.todayCheckedIn
+      ? (t?.('row.checkinClaimed') ?? 'Checked in today')
+      : busy
+        ? (t?.('row.checkinClaiming') ?? 'Checking in…')
+        : (t?.('row.checkinClaim') ?? 'Check in')
+
+  return (
+    <div className="dsm-workbuddy-xdpool-checkin">
+      <div className="dsm-workbuddy-xdpool-checkin-copy">
+        <span className="dsm-workbuddy-xdpool-checkin-title">
+          {t?.('row.checkinTitle') ?? 'Daily check-in'}
+        </span>
+        <div className="dsm-workbuddy-xdpool-checkin-meta">
+          {checkin.streakDays > 0
+            ? <span className="dsm-workbuddy-xdpool-checkin-chip">
+                {t?.('row.checkinStreak', { days: checkin.streakDays }) ?? `${checkin.streakDays}-day streak`}
+              </span>
+            : null}
+          {checkin.dailyCredit > 0
+            ? <span className="dsm-workbuddy-xdpool-checkin-chip">
+                {t?.('row.checkinDaily', { credit: formatNumber(checkin.dailyCredit) })
+                  ?? `+${formatNumber(checkin.dailyCredit)}/day`}
+              </span>
+            : null}
+          {checkin.isStreakDay
+            ? <span className="dsm-workbuddy-xdpool-checkin-chip dsm-workbuddy-xdpool-checkin-chip-bonus">
+                {t?.('row.checkinStreakBonus', {
+                  days: formatNumber(checkin.nextStreakDay),
+                  credit: formatNumber(checkin.streakBonusCredit),
+                }) ?? `bonus +${formatNumber(checkin.streakBonusCredit)}`}
+              </span>
+            : null}
+        </div>
+      </div>
+      <button
+        type="button"
+        className="dsm-workbuddy-xdpool-checkin-btn"
+        disabled={!claimable || busy}
+        onClick={() => { onClaim(account.id) }}
+      >
+        {label}
+      </button>
     </div>
   )
 }
