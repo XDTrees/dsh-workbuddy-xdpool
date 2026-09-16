@@ -21,7 +21,9 @@ Merge **every WorkBuddy account** you have ever signed into on this machine into
 - **Pool health at a glance**: the settings card shows pool health (N accounts / X cooling, which account is next), each account's token expiry, and cooldown countdowns.
 - **Live remaining credits**: per-account credit packages (`package · remain / size`) and a big green total, refreshed from upstream in real time.
 - **Annotated model catalog**: the card lists pool models with their credit multiplier (e.g. `GLM-5.2 · x0.79`), free / limited-free / night-discount tags, image-input capability, and context window — kept live from upstream `credits` / `tags`.
-- **Two manual actions**: re-detect desktop sign-ins and clear all cooldowns, available both on the card and via the CLI.
+- **Daily check-in**: below each account's credits the card offers a check-in button showing the current streak, the per-day credit, and any milestone bonus. Collect an account's reward with one click — several accounts can be collected in turn, with no need to switch the pool's preferred account first. The status is re-read before claiming, so an account that already collected today is **never double-collected**. Also available as the `checkin` CLI command.
+- **CN / global region auto-detection**: the upstream origin is picked per account from its login domain — a global sign-in (`workbuddy.ai`) uses `www.workbuddy.ai`, while a CN sign-in (the default) uses `copilot.tencent.com` and `www.codebuddy.cn`. Both regions can coexist in one pool, each account talking to its own region, with rotation and failover working across both.
+- **Three manual actions**: re-detect desktop sign-ins, clear all cooldowns, and daily check-in — available both on the card and via the CLI.
 
 ## Install
 
@@ -57,7 +59,7 @@ pnpm typecheck:client       # client side
 
 > `pnpm install` needs pnpm 11 (`npx pnpm@11`); add `--config.confirmModulesPurge=false --config.minimumReleaseAge=0` if the supply-chain age policy blocks freshly published rc packages.
 
-After install: a **WorkBuddy XD Pool** group appears in the model picker; Settings → Plugins → **DSH WorkBuddy XD Pool** card shows pool health, per-account tokens/credits/cooldowns, plus "Detect accounts again" and "Clear all cooldowns" buttons. Works on Web / TUI profiles too (`--profile web` / `--profile dsh-tui`).
+After install: a **WorkBuddy XD Pool** group appears in the model picker; Settings → Plugins → **DSH WorkBuddy XD Pool** card shows pool health, per-account tokens/credits/check-in/cooldowns, plus "Detect accounts again" and "Clear all cooldowns" buttons. Works on Web / TUI profiles too (`--profile web` / `--profile dsh-tui`).
 
 ## CLI
 
@@ -66,6 +68,9 @@ dsh plugin --profile desktop exec dsh-workbuddy-xdpool status    # pool accounts
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool accounts  # discovered accounts (--json)
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool doctor    # diagnose discovery/cooldown/upstream
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool reset     # clear all 429 cooldowns now
+dsh plugin --profile desktop exec dsh-workbuddy-xdpool checkin   # today's check-in state per account (--json)
+dsh plugin --profile desktop exec dsh-workbuddy-xdpool checkin all
+                                                                 # collect every account's daily reward (or pass one label)
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool login     # guide to adding another desktop account
 ```
 
@@ -101,8 +106,8 @@ workbuddy-xdpool:
 
 ## Architecture
 
-- **Host side** (`src/`): registers the `workbuddy-xdpool` provider, the `workbuddy-xdpool` settings section (`settings.installSection`), three same-origin status/action routes, and account discovery + catalog seeding.
-- **Client** (`src/client/`): the browser card loaded via `dsh.client`; the collapsible shell reuses the host's `dsm-plugin-card*` style language (`--dsw-alias-*` theme tokens), with content classes namespaced `dsm-workbuddy-xdpool-*`.
+- **Host side** (`src/`): registers the `workbuddy-xdpool` provider, the `workbuddy-xdpool` settings section (`settings.installSection`), four same-origin routes (status / re-scan / clear cooldowns / check-in), and account discovery + catalog seeding. The upstream client picks the CN or global origin per credential from its login domain.
+- **Client** (`src/client/`): the browser card loaded via `dsh.client`; the collapsible shell reuses the host's `dsm-plugin-card*` style language (`--dsw-alias-*` theme tokens), with content classes namespaced `dsm-workbuddy-xdpool-*`. Check-in is the plugin's only mutating route: POST-only, loopback-origin-only, an explicit per-account `accountId`, and a pre-claim status re-check.
 - **Build**: `tsdown` produces `lib/index.js` (host entry) + `lib/bin.js` (CLI) + `lib/client.js` (CJS browser bundle wrapped in `window.__ModuleLoader__.load`).
 
 ## Known limitations
@@ -120,9 +125,13 @@ workbuddy-xdpool:
 
 ## Acknowledgments
 
-- [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) (MIT) — the reference for settings-section registration (`settings.installSection`) and the DSH plugin / client-card loading mechanism.
-- [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) (MIT) — the reference for the `dsm-plugin-card*` card style language and `--dsw-alias-*` theme tokens.
-- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) (MIT) — reference implementation of the upstream WorkBuddy protocol/credits endpoints.
+This project was built with reference to the following public projects, whose copyright notices are retained as their licenses require. The reference is to **design ideas and established findings**; the code is an independent implementation, and the modules that draw on an existing pattern say so in their file headers:
+
+- [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) (MIT) — the core reference for settings-section registration (`settings.installSection`) and the DSH plugin structure, client-card loading, desktop credential refresh, and loopback shim hardening.
+- [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) (MIT, Copyright (c) 2026 LaoDing) — the reference for the `dsm-plugin-card*` card style language and `--dsw-alias-*` theme tokens; the **daily check-in** endpoints (`/v2/billing/meter/checkin-activity-status` and `/v2/billing/meter/daily-checkin`), the credit-package aggregation rules (monthly-cycle vs one-off gift), and picking the upstream origin per credential domain for CN/global follow interface shapes that project had already validated.
+- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) (MIT) — reference implementation of the upstream WorkBuddy protocol (`copilot.tencent.com` wire behavior) and credits endpoints.
+
+All copyrights belong to their respective authors. This project takes the **reference-the-design, implement-independently** approach and does not wholesale copy any reference project's source. If an attribution is missing or wrong, please open an issue.
 
 ## License
 

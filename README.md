@@ -26,7 +26,11 @@
 
 - **模型目录直接标注**：卡片列出当前在池内可用的模型，并标注积分倍率（如 `GLM-5.2 · x0.79`）、免费 / 限时免费 / 夜间折扣标签、图片输入能力与上下文窗口，倍率与标签跟随上游 `credits` / `tags` 实时更新。
 
-- **两种人工动作**：卡片与 CLI 都提供「重新检测账号」（重新扫描桌面登录快照，把新登录的账号并入池）与「清除所有冷却」（立即解除全部 429 冷却）两个操作。
+- **每日签到**：卡片在每个账号的积分区下方提供签到按钮，并显示连签天数、每日积分与里程碑额外奖励；一键领取该账号当日签到奖励。多账号可逐个领取，无需先切换账号。领取前会重新查询状态，**今日已领取的账号不会被重复领取**。CLI 亦提供 `checkin` 命令。
+
+- **国内版 / 国际版自动适配**：按账号凭据里的登录域名自动选择上游域名——国际版登录（`workbuddy.ai`）走 `www.workbuddy.ai`；国内版（默认）走 `copilot.tencent.com` 与 `www.codebuddy.cn`。同一池内可混用两种区域的账号，各自请求各自区域的上游。
+
+- **三种人工动作**：卡片与 CLI 都提供「重新检测账号」（重新扫描桌面登录快照，把新登录的账号并入池）、「清除所有冷却」（立即解除全部 429 冷却）与「每日签到」三个操作。
 
 ## 安装
 
@@ -77,6 +81,9 @@ dsh plugin --profile desktop exec dsh-workbuddy-xdpool status    # 池账号数/
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool accounts  # 已发现账号（--json）
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool doctor    # 诊断发现/冷却/上游连通性
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool reset     # 立即清除所有 429 冷却
+dsh plugin --profile desktop exec dsh-workbuddy-xdpool checkin   # 查询每个账号今日签到状态（--json 机器可读）
+dsh plugin --profile desktop exec dsh-workbuddy-xdpool checkin all
+                                                                 # 领取所有账号今日签到奖励；也可传账号标签只领一个
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool login     # 引导如何在桌面再加一个账号入池
 ```
 
@@ -115,10 +122,10 @@ workbuddy-xdpool:
 ## 架构
 
 - **宿主侧**（`src/`，DSH 主进程内）：
-  - `index.ts` —— 注册 `workbuddy-xdpool` provider、`workbuddy-xdpool` 设置节（`settings.installSection`）、3 条同源只读/动作路由、账号发现与模型目录播种。
+  - `index.ts` —— 注册 `workbuddy-xdpool` provider、`workbuddy-xdpool` 设置节（`settings.installSection`）、4 条同源路由（状态 / 重新检测 / 清除冷却 / 签到）、账号发现与模型目录播种。
   - `accounts.ts` —— `WorkBuddyAccountPool`：读本机 WorkBuddy 桌面 auth 快照、429 冷却、round-robin failover 与 token 刷新。
-  - `catalog.ts` / `upstream.ts` —— 上游模型目录（含每模型积分倍率、免费/图片能力标签）与积分查询客户端。
-  - `web-status.ts` / `status-paths.ts` —— 卡片消费的同源状态文档与路由。
+  - `catalog.ts` / `upstream.ts` —— 上游模型目录（含每模型积分倍率、免费/图片能力标签）、积分查询与每日签到的上游客户端（按凭据域名自动切换国内 / 国际版域名）。
+  - `web-status.ts` / `status-paths.ts` —— 卡片消费的同源状态文档与路由；签到是本插件唯一的写操作，按「POST + 回环来源 + 显式 accountId + 领取前二次确认」四重守卫。
   - `bin.ts` —— 上述 CLI。
 - **客户端**（`src/client/`，浏览器卡片，经 `dsh.client` 由宿主加载）：折叠卡片外壳沿用宿主内置卡的 `dsm-plugin-card*` 样式语言（`--dsw-alias-*` 主题变量），内容用 `dsm-workbuddy-xdpool-*` 前缀，绝不污染宿主其它卡片；命名空间 `settings.workbuddy-xdpool`。
 - **构建**：`tsdown` 产出 `lib/index.js`（宿主入口）+ `lib/bin.js`（CLI）+ `lib/client.js`（CJS，`window.__ModuleLoader__.load` 包裹的浏览器 bundle）。
@@ -138,9 +145,13 @@ workbuddy-xdpool:
 
 ## 致谢
 
-- [jmglsi/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect)（MIT）—— 设置节注册（`settings.installSection`）与 DSH 插件结构、客户端卡片加载机制的核心参照；本项目沿用其「宿主通过 installSection 挂卡片」的打通路径。
-- [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy)（MIT）—— `dsm-plugin-card*` 卡片样式语言与 `--dsw-alias-*` 主题变量的参照实现。
-- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（MIT）—— WorkBuddy 上游协议/积分接口的参照实现。
+本项目的实现参考了以下已公开的项目，并按其许可证要求保留版权声明。参考方向为**设计思路与既有结论**，代码为独立实现；关键模块在源文件头部注释中也标注了所参考的项目与模式：
+
+- [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect)（MIT）—— 设置节注册（`settings.installSection`）与 DSH 插件结构、客户端卡片加载机制、桌面端凭据刷新与 loopback shim 加固的核心参照；本项目沿用其「宿主通过 installSection 挂卡片」的打通路径。
+- [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy)（MIT，Copyright (c) 2026 LaoDing）—— `dsm-plugin-card*` 卡片样式语言与 `--dsw-alias-*` 主题变量的参照实现；**每日签到**（`/v2/billing/meter/checkin-activity-status` 与 `/v2/billing/meter/daily-checkin`）、积分包聚合口径（月度周期套餐 / 一次性礼包区分）与国内 / 国际版按 `domain` 选择上游域名的做法，参考了该项目已验证的接口形态。
+- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（MIT）—— WorkBuddy 上游协议（`copilot.tencent.com` 的 wire behavior）与积分接口的参照实现。
+
+以上项目的版权归各自作者所有。本项目采用**参考设计思路 + 独立实现**的方式，未整体复制任何参考项目的源码。若标注有遗漏或不当之处，欢迎提交 issue 指正。
 
 ## 许可证
 
