@@ -1,5 +1,12 @@
 # DSH WorkBuddy XD Pool
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/dsh-workbuddy-xdpool"><img src="https://img.shields.io/npm/v/dsh-workbuddy-xdpool?style=flat-square&label=npm&color=cb3837" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/dsh-workbuddy-xdpool"><img src="https://img.shields.io/npm/d18m/dsh-workbuddy-xdpool?style=flat-square&label=downloads&color=cb3837" alt="npm downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/aosi526/dsh-workbuddy-xdpool?style=flat-square" alt="MIT license"></a>
+  <a href="https://github.com/aosi526/dsh-workbuddy-xdpool/stargazers"><img src="https://img.shields.io/github/stars/aosi526/dsh-workbuddy-xdpool?style=flat-square" alt="GitHub stars"></a>
+</p>
+
 [English](./README.en.md) | 中文
 
 将 WorkBuddy 桌面 App 里登录过的**所有账号**自动并入一个 **DeepSeek Harness 模型池**：无需任何手动配置，你在 WorkBuddy 桌面登录的每个账号都会成为一个池成员；某个账号被限流（429）时，请求会自动切换到下一个可用账号，实现多账号自动容错轮换。
