@@ -46,17 +46,28 @@ async function fakeAuthDir(count: number): Promise<string> {
 }
 
 /** A fetch stub that rate-limits the first `failures` accounts, then succeeds. */
-function rotationFetch(failures: number, state: { hit: string[] }) {
+/**
+ * A fetch stub that rate-limits the first `failures` DISTINCT credentials it is
+ * handed, then serves an SSE stream.
+ *
+ * Counting distinct tokens, not "token index < N": the pool now drains accounts
+ * in priority order rather than round-robin, and that order is derived from
+ * credential metadata, so a test cannot assume which account holds which index.
+ */
+function rotationFetch(failures: number, state: { hit: string[]; seen?: Set<string> }) {
   // A rate-limit reset in the near FUTURE so a penalized account actually
   // enters cooldown (a stale past timestamp would leave it perpetually usable).
   const resetAt = new Date(Date.now() + 10 * 60 * 1000)
-  const resetText = `${resetAt.getFullYear()}-${String(resetAt.getMonth() + 1).padStart(2, '0')}-${String(resetAt.getDate()).padStart(2, '0')} ${String(resetAt.getHours()).padStart(2, '0')}:${String(resetAt.getMinutes()).padStart(2, '0')}:${String(resetAt.getSeconds()).padStart(2, '0')}`
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  const resetText = `${resetAt.getFullYear()}-${pad(resetAt.getMonth() + 1)}-${pad(resetAt.getDate())} ${pad(resetAt.getHours())}:${pad(resetAt.getMinutes())}:${pad(resetAt.getSeconds())}`
+  const seen = state.seen ?? new Set<string>()
+  state.seen = seen
   return async (_url: unknown, init: RequestInit): Promise<Response> => {
     const headers = init.headers as Record<string, string>
     const token = (headers['Authorization'] ?? '').replace('Bearer ', '')
     state.hit.push(token)
-    const index = Number(token.split('-')[1])
-    if (index < failures) {
+    seen.add(token)
+    if (seen.size <= failures) {
       return new Response(
         JSON.stringify({ code: 6004, msg: `您的使用量已超出频率限制，将在 ${resetText} UTC+8 重置` }),
         { status: 429, headers: { 'Content-Type': 'application/json' } },

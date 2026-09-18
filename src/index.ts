@@ -76,6 +76,14 @@ export interface Config {
   /** Rate-limit cooldown per account, milliseconds. */
   cooldownMs?: number
   /**
+   * How the pool spreads requests across accounts.
+   *
+   * `priority` (default) drains one account before moving to the next, which
+   * is what a pool of your own accounts is for. `round-robin` splits the
+   * spend evenly instead. Absent reads as `priority`.
+   */
+  distribution?: 'priority' | 'round-robin'
+  /**
    * Model ids enabled in the picker. Absent means "every model the catalog
    * advertises" — an unconfigured install should never present an empty model
    * list just because the key is missing.
@@ -92,7 +100,7 @@ export interface Config {
    * advertise more than DSH wants to hand a single turn, so the card lets the
    * user cap a model without touching the catalog.
    */
-  contextBudgets?: Partial<Record<string, number>>
+  contextBudgets?: Record<string, number>
 }
 
 /** Upper bound the card offers as the "default" context window, in tokens. */
@@ -111,6 +119,7 @@ export const DEFAULT_CONTEXT_BUDGET = 200_000
 export const Config: z<Config> = z.object({
   authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app own location)'),
   cooldownMs: z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds'),
+  distribution: z.union(['priority', 'round-robin']).default('priority').description('How requests are spread: priority (drain one) or round-robin'),
   enabledModelIds: z.array(z.string()).default([]).description('Model ids enabled in the picker (empty = all)'),
   imageModelIds: z.array(z.string()).default([]).description('Model ids accepting image input (empty = follow upstream)'),
   contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Per-model context-window override, keyed by model id'),
@@ -181,12 +190,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     onChange() { applyConfigFromSource() },
   }
   const applyConfigFromSource = (): void => {
-    const { authFile, cooldownMs, enabledModelIds, imageModelIds, contextBudgets } = current()
+    const { authFile, cooldownMs, distribution, enabledModelIds, imageModelIds, contextBudgets } = current()
     core.pool.applyConfig({
       ...authFile === undefined
         ? {}
         : { authDirs: [dirname(authFile)] },
       ...cooldownMs === undefined ? {} : { cooldownMs },
+      // Absent reads as priority, so an install that never opened the card
+      // drains one account at a time rather than splitting the spend.
+      distribution: distribution ?? 'priority',
     })
     // The model selection travels the same settings path as the pool options:
     // the card writes it through the settings section and the catalog filters

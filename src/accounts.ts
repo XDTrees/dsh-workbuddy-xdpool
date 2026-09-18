@@ -41,6 +41,16 @@ export interface WorkBuddyCredential {
   refreshToken: string
   expiresAtMs: number
   refreshExpiresAtMs?: number
+  /**
+   * When the upstream says it issued this token (`auth.lastRefreshTime`).
+   *
+   * This, not `expiresAtMs`, is the reliable freshness signal: the upstream
+   * never rewrites a stored expiry when it revokes a token, so a long-dead
+   * backup can claim to expire later than the token that actually works.
+   * Absent on documents the desktop app did not write (the plugin's own
+   * refreshed copy, older builds).
+   */
+  lastRefreshAtMs?: number
   nickname?: string
   uin?: string
   uid?: string
@@ -155,11 +165,19 @@ export function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyC
     return undefined
   }
 
+  // The upstream's own issue time, the only signal that stays truthful after a
+  // token is revoked: credential selection prefers it over the stored expiry,
+  // which a dead backup can claim arbitrarily far into the future.
+  const lastRefreshAtMs = typeof auth['lastRefreshTime'] === 'number'
+    ? expiryToMs(auth['lastRefreshTime'])
+    : undefined
+
   return {
     accessToken,
     refreshToken: typeof auth['refreshToken'] === 'string' ? auth['refreshToken'] : '',
     expiresAtMs: typeof auth['expiresAt'] === 'number' ? expiryToMs(auth['expiresAt']) : 0,
     ...refreshExpiresAtMs === undefined ? {} : { refreshExpiresAtMs },
+    ...lastRefreshAtMs === undefined ? {} : { lastRefreshAtMs },
     ...optionalString(identity['nickname']) === undefined ? {} : { nickname: optionalString(identity['nickname']) },
     ...optionalString(identity['uin']) === undefined ? {} : { uin: optionalString(identity['uin']) },
     ...optionalString(identity['uid']) === undefined ? {} : { uid: optionalString(identity['uid']) },
@@ -175,6 +193,47 @@ export function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyC
  * Stable account id. `uin` is the billing identity the upstream keys on and
  * survives re-login; `uid` is the fallback.
  */
+/**
+ * True when `path` is the desktop app's live sign-in (as opposed to a backup
+ * snapshot it left behind). The live file always wins: it is the session the
+ * app itself is using.
+ */
+function isLiveAuthFile(path: string): boolean {
+  return basename(path) === WORKBUDDY_LIVE_FILENAME
+}
+
+/**
+ * Which of two credentials for the same account the pool should keep.
+ *
+ * Ordering, highest first:
+ *
+ * 1. the live file the desktop app is signed in with;
+ * 2. the credential the upstream issued most recently (`lastRefreshAtMs`);
+ * 3. the longer stored expiry, as a fallback for documents that carry no issue
+ *    time (the plugin's own refreshed copy, older builds).
+ *
+ * The stored expiry alone is NOT a freshness signal: the upstream does not
+ * rewrite it when it revokes a token, so a long-dead backup can claim to expire
+ * later than the token that actually works. Selecting on it made every upstream
+ * call return 401 while a perfectly good credential sat in the same directory.
+ */
+function compareFreshness(a: WorkBuddyCredential, b: WorkBuddyCredential): number {
+  const aLive = isLiveAuthFile(a.sourcePath) ? 1 : 0
+  const bLive = isLiveAuthFile(b.sourcePath) ? 1 : 0
+  if (aLive !== bLive) return bLive - aLive
+
+  const aIssued = a.lastRefreshAtMs ?? 0
+  const bIssued = b.lastRefreshAtMs ?? 0
+  if (aIssued !== bIssued) return bIssued - aIssued
+
+  return b.expiresAtMs - a.expiresAtMs
+}
+
+/** True when `candidate` should replace `incumbent` for the same account. */
+function isFresher(candidate: WorkBuddyCredential, incumbent: WorkBuddyCredential): boolean {
+  return compareFreshness(candidate, incumbent) < 0
+}
+
 export function workbuddyAccountId(
   credential: Pick<WorkBuddyCredential, 'uin' | 'uid' | 'nickname'>,
 ): string {
@@ -227,6 +286,9 @@ export function candidateAuthDirs(env: NodeJS.ProcessEnv = process.env): string[
   return dirs
 }
 
+/** How the pool chooses which account serves the next request. */
+export type AccountDistribution = 'priority' | 'round-robin'
+
 export interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
   logger?: { info?(...args: unknown[]): void; warn(...args: unknown[]): void; error?(...args: unknown[]): void }
@@ -238,6 +300,17 @@ export interface AccountPoolOptions {
   client?: TokenRefresher
   /** Refresh this long before actual expiry; default five minutes. */
   refreshMarginMs?: number
+  /**
+   * How requests are spread across the pool.
+   *
+   * - `priority` (default): one account serves every request until it is
+   *   rate-limited, then the next in order takes over. Credits drain one
+   *   account at a time, and a cooled account resumes at the head of the
+   *   queue the moment its window resets.
+   * - `round-robin`: consecutive requests rotate through the pool so the
+   *   spend spreads evenly.
+   */
+  distribution?: AccountDistribution
 }
 
 /**
@@ -251,6 +324,8 @@ export class WorkBuddyAccountPool {
   private readonly client: TokenRefresher | undefined
   private readonly refreshMarginMs: number
   private accounts: WorkBuddyAccount[] = []
+  private distribution: AccountDistribution
+  /** Cursor for round-robin mode; unused under priority distribution. */
   private cursor = 0
   private lastScanAtMs = 0
   private preferredId: string | undefined
@@ -262,6 +337,9 @@ export class WorkBuddyAccountPool {
     this.cooldownMs = options.cooldownMs ?? 60_000
     this.client = options.client
     this.refreshMarginMs = options.refreshMarginMs ?? 5 * 60 * 1000
+    // Priority is the default: users pool their own accounts to spend one
+    // before touching the next, not to split every request evenly.
+    this.distribution = options.distribution ?? 'priority'
   }
 
   /**
@@ -269,12 +347,19 @@ export class WorkBuddyAccountPool {
    * without rebuilding the pool. A later `scan()` uses the new auth dirs and
    * cooldown window; existing accounts keep their in-memory state.
    */
-  applyConfig(options: { authDirs?: readonly string[]; cooldownMs?: number }): void {
+  applyConfig(options: {
+    authDirs?: readonly string[]
+    cooldownMs?: number
+    distribution?: AccountDistribution
+  }): void {
     if (options.authDirs !== undefined && options.authDirs.length > 0) {
       this.authDirs = options.authDirs
     }
     if (options.cooldownMs !== undefined && options.cooldownMs >= 1000) {
       this.cooldownMs = options.cooldownMs
+    }
+    if (options.distribution !== undefined) {
+      this.distribution = options.distribution
     }
   }
 
@@ -306,13 +391,21 @@ export class WorkBuddyAccountPool {
         })
         continue
       }
-      // Prefer the credential with the longest remaining lifetime.
-      if ((credential.expiresAtMs ?? 0) > (existing.credential.expiresAtMs ?? 0)) {
+      // Keep whichever credential the app/upstream considers current. The stored
+      // expiry alone is not a freshness signal, so this goes through `isFresher`
+      // rather than comparing expiry values directly.
+      if (isFresher(credential, existing.credential)) {
         byId.set(id, { ...existing, credential, label: accountLabel(credential) })
       }
     }
 
-    this.accounts = [...byId.values()]
+    // A stable, predictable order is what makes "prefer the first account"
+    // meaningful: a live sign-in leads, then the most recently issued
+    // credential, then the newest expiry. `byId` already preserves the order
+    // accounts were first discovered, so re-scans do not shuffle the queue.
+    const ordered = [...byId.values()]
+    ordered.sort((a, b) => compareFreshness(a.credential, b.credential))
+    this.accounts = ordered
     this.lastScanAtMs = Date.now()
     return this.accounts
   }
@@ -345,12 +438,24 @@ export class WorkBuddyAccountPool {
   }
 
   /**
-   * Pick the next usable account for an optional model. Scans on first use,
-   * and rescans when every known account is cooling down — a fresh desktop
-   * login is the usual way out of an exhausted pool. A preferred
-   * (user-selected) account that is healthy is tried first; otherwise the
-   * cursor round-robins so consecutive requests spread across accounts and a
-   * still-cooling preferred account is skipped.
+   * Pick the account to serve a request.
+   *
+   * Two distributions, chosen by the `distribution` setting:
+   *
+   * - **priority** (default, and what the card ships with): one account serves
+   *   every request until it is rate-limited, then the next in order takes over.
+   *   Credits drain one account at a time, and a cooling account returns to the
+   *   head of the queue the moment its window resets — it was never consumed, so
+   *   it resumes straight away.
+   * - **round-robin**: consecutive requests rotate through the pool so spend
+   *   spreads evenly across every account.
+   *
+   * In both modes an explicit user selection (`prefer`) heads the list, a
+   * cooling account is skipped for that model only, and an unrecognised setting
+   * falls back to priority.
+   *
+   * Scans on first use, and rescans when every known account is cooling down: a
+   * fresh desktop login is the usual way out of an exhausted pool.
    */
   async acquire(modelId?: string, region?: WorkBuddyRegion): Promise<WorkBuddyAccount | undefined> {
     if (this.accounts.length === 0) await this.scan()
@@ -361,25 +466,35 @@ export class WorkBuddyAccountPool {
     }
     if (pool.length === 0) return undefined
 
-    // Start the rotation at the preferred account when it is usable; the cursor
-    // still advances on every acquisition so failover spreads across accounts.
-    let start = this.cursor % pool.length
+    // The user's explicit pick leads; otherwise the discovery order stands.
     if (this.preferredId !== undefined) {
       const preferredIndex = pool.findIndex(account => account.id === this.preferredId)
-      if (preferredIndex !== -1) start = preferredIndex
+      if (preferredIndex > 0) {
+        const [preferred] = pool.splice(preferredIndex, 1)
+        if (preferred !== undefined) pool = [preferred, ...pool]
+      }
     }
 
-    for (let step = 0; step < pool.length; step += 1) {
-      const account = pool[(start + step) % pool.length]
-      if (account === undefined) continue
-      await this.ensureFresh(account)
-      this.cursor = (start + step + 1) % pool.length
-      return account
+    // `pool` is already filtered to accounts that can serve this model right
+    // now, so the head is the highest-priority account that is not cooling.
+    const index = this.distribution === 'round-robin'
+      ? this.cursor % pool.length
+      : 0
+    const account = pool[index]
+    if (account === undefined) return undefined
+    if (this.distribution === 'round-robin') {
+      this.cursor = (index + 1) % pool.length
     }
-    return pool[0]
+    await this.ensureFresh(account)
+    return account
   }
 
   /** Pin the account the plugin card should prefer; tokens stay out of settings. */
+  /** How the pool currently spreads requests. Shown on the card. */
+  currentDistribution(): AccountDistribution {
+    return this.distribution
+  }
+
   prefer(accountId: string | undefined): void {
     this.preferredId = accountId
   }

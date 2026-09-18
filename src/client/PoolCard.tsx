@@ -27,6 +27,8 @@ import {
   type PoolWebModel,
   type PoolWebStatus,
   type PoolRegion,
+  type PoolWebCreditPackage,
+  type PoolDistribution,
 } from '../status-paths.ts'
 import { POOL_PLUGIN_ICON } from './icon.ts'
 import { POOL_CARD_CSS } from './styles.ts'
@@ -169,6 +171,29 @@ function draftIsDirty(status: PoolWebStatus, draft: Record<string, ModelDraftEnt
     if (saved !== next) return true
   }
   return false
+}
+
+/** Absolute expiry with the time of day: the upstream grants one-off packages at
+ *  arbitrary clock times, so "expires 09/19 15:36" is what the user needs — a
+ *  date alone would read as if it lapsed at midnight. */
+function formatExpiry(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms)) return ''
+  return new Intl.DateTimeFormat(undefined, {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(ms))
+}
+
+/** Whole days until `ms`, floored at 0; undefined when there is no deadline. */
+function daysUntil(ms: number | undefined): number | undefined {
+  if (ms === undefined || !Number.isFinite(ms)) return undefined
+  return Math.max(0, Math.floor((ms - Date.now()) / 86_400_000))
+}
+
+/** True when a one-off package lapses inside the "expiring soon" window. */
+function isExpiringSoon(pack: PoolWebCreditPackage): boolean {
+  if (pack.monthly === true) return false
+  const days = daysUntil(pack.expiresAtMs)
+  return days !== undefined && days <= 3
 }
 
 function tagFor(model: PoolWebModel): 'free' | 'limited' | 'night' | undefined {
@@ -376,6 +401,27 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * The card refuses an empty enable-list: saving one would leave the picker
    * with nothing to offer and no obvious way back.
    */
+  /**
+   * Switch how the pool spreads requests. Written straight through the
+   * settings scope (that is where the host keeps the pool options), so the
+   * change lands without a restart and survives the next card refresh.
+   */
+  const setDistribution = async (next: PoolDistribution): Promise<void> => {
+    const write = settingsScope?.set
+    if (write === undefined) {
+      setError(t?.('row.modelsSaveError', { message: 'settings scope is read-only' })
+        ?? 'settings scope is read-only')
+      return
+    }
+    setFlash(undefined)
+    try {
+      await write.call(settingsScope, 'distribution', next)
+      await refresh(activeRegion)
+    } catch (cause: unknown) {
+      if (mounted.current) setError(String(cause))
+    }
+  }
+
   const saveModels = async (): Promise<void> => {
     if (draft === undefined || status === undefined) return
     if (enabledCount === 0) {
@@ -504,6 +550,37 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                     : null}
                   {shimHint === null ? null
                     : <p className="dsm-workbuddy-xdpool-usage-hint">{shimHint}</p>}
+                  {/* How the pool spends: one account at a time, or spread evenly. */}
+                  {status === undefined ? null
+                    : <div className="dsm-workbuddy-xdpool-dist" role="radiogroup"
+                        aria-label={t?.('row.distTitle') ?? 'Account usage'}>
+                        <span className="dsm-workbuddy-xdpool-dist-title">
+                          {t?.('row.distTitle') ?? 'Account usage'}
+                        </span>
+                        {(['priority', 'round-robin'] as const).map(option => {
+                          const active = (status.distribution ?? 'priority') === option
+                          const label = option === 'priority'
+                            ? (t?.('row.distPriority') ?? 'Priority')
+                            : (t?.('row.distRoundRobin') ?? 'Round-robin')
+                          const hint = option === 'priority'
+                            ? (t?.('row.distPriorityHint') ?? '')
+                            : (t?.('row.distRoundRobinHint') ?? '')
+                          return (
+                            <button
+                              key={option}
+                              type="button"
+                              role="radio"
+                              aria-checked={active}
+                              title={hint}
+                              disabled={!modelsEditable}
+                              className={`dsm-workbuddy-xdpool-dist-option${active ? ' dsm-workbuddy-xdpool-dist-option-active' : ''}`}
+                              onClick={() => { void setDistribution(option) }}
+                            >
+                              {label}
+                            </button>
+                          )
+                        })}
+                      </div>}
                 </div>
                 <div className="dsm-workbuddy-xdpool-usage-actions">
                   <button
@@ -759,15 +836,33 @@ function AccountStats({
           : packages.length === 0
             ? <span className="dsm-workbuddy-xdpool-panel-empty">–</span>
             : <ul className="dsm-workbuddy-xdpool-packages">
-                {packages.map((pack, index) => (
-                  <li key={`${pack.packageName}-${String(index)}`}>
-                    <span className="dsm-workbuddy-xdpool-packages-name">{pack.packageName}</span>
-                    <span className="dsm-workbuddy-xdpool-packages-value">
-                      {t?.('row.creditsPackage', { remain: formatNumber(pack.remain), size: formatNumber(pack.size) })
-                        ?? `${formatNumber(pack.remain)} / ${formatNumber(pack.size)}`}
-                    </span>
-                  </li>
-                ))}
+                {packages.map((pack, index) => {
+                  const expiry = formatExpiry(pack.expiresAtMs)
+                  const refresh = formatExpiry(pack.cycleRefreshMs)
+                  const soon = isExpiringSoon(pack)
+                  // Monthly packs refresh on a cycle; one-off packs expire. Either
+                  // way the deadline is what the user needs, and a pack that declares
+                  // neither simply omits the line (the grid keeps the columns aligned).
+                  const when = pack.monthly === true
+                    ? (refresh === '' ? null : (t?.('row.creditsRefreshAt', { time: refresh }) ?? `Refreshes ${refresh}`))
+                    : (expiry === '' ? null : (t?.('row.creditsExpiresAt', { time: expiry }) ?? `Expires ${expiry}`))
+                  return (
+                    <li key={`${pack.packageName}-${String(index)}`}>
+                      <span className="dsm-workbuddy-xdpool-packages-name">{pack.packageName}</span>
+                      <span className="dsm-workbuddy-xdpool-packages-value">
+                        {t?.('row.creditsPackage', { remain: formatNumber(pack.remain), size: formatNumber(pack.size) })
+                          ?? `${formatNumber(pack.remain)} / ${formatNumber(pack.size)}`}
+                      </span>
+                      {when === null ? null
+                        : <span
+                            className={`dsm-workbuddy-xdpool-packages-when${soon ? ' dsm-workbuddy-xdpool-packages-when-soon' : ''}`}
+                            title={t?.('row.creditsExpiresSoonTitle') ?? 'Expiring within 3 days'}
+                          >
+                            {when}
+                          </span>}
+                    </li>
+                  )
+                })}
               </ul>}
         {credits?.expiringSoon !== undefined && credits.expiringSoon > 0
           ? <div className="dsm-workbuddy-xdpool-panel-foot">

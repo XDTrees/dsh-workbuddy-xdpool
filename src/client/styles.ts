@@ -62,6 +62,14 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-usage-status{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:500;color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-usage-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .dsm-workbuddy-xdpool-usage-hint{padding-left:19px;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
+/* Distribution switch: priority (drain one) vs round-robin (spread). */
+.dsm-workbuddy-xdpool-dist{display:flex;align-items:center;gap:8px;padding-left:19px;flex-wrap:wrap}
+.dsm-workbuddy-xdpool-dist-title{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
+.dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:999px;padding:2px 10px;font-size:11px;line-height:18px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s}
+.dsm-workbuddy-xdpool-dist-option:hover:not(:disabled):not(.dsm-workbuddy-xdpool-dist-option-active){color:var(--dsw-alias-label-primary,#e6e6e6);border-color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-workbuddy-xdpool-dist-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-xdpool-dist-option-active{background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.14));border-color:var(--dsw-alias-state-success-primary,#22a06b);color:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-workbuddy-xdpool-dist-option:disabled{cursor:default;opacity:.6}
 .dsm-workbuddy-xdpool-usage-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* Account list (each account = a labeled subpanel, same as dingminhua). */
@@ -90,9 +98,18 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-panel-foot{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-top:9px;padding-top:9px;border-top:1px solid var(--dsw-alias-border-l2,#36373b);color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;line-height:18px}
 .dsm-workbuddy-xdpool-panel-foot strong{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:15px;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-packages{display:flex;flex-direction:column;gap:5px;margin:0;padding:0;list-style:none}
-.dsm-workbuddy-xdpool-packages li{display:flex;align-items:baseline;justify-content:space-between;gap:10px;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;line-height:18px}
-.dsm-workbuddy-xdpool-packages-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsm-workbuddy-xdpool-packages-value{flex:none;color:var(--dsw-alias-label-tertiary,#999);font-size:11px;font-variant-numeric:tabular-nums}
+/* One credit package: name + amount on the first line, its deadline beneath.
+   A two-row grid keeps the columns aligned across rows; a wrapping flex row
+   dropped the deadline onto a second line that started at the container edge,
+   so the list read as ragged text rather than a table. */
+.dsm-workbuddy-xdpool-packages li{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:1px;align-items:baseline;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;line-height:18px}
+.dsm-workbuddy-xdpool-packages-name{grid-column:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-workbuddy-xdpool-packages-value{grid-column:2;justify-self:end;color:var(--dsw-alias-label-tertiary,#999);font-size:11px;font-variant-numeric:tabular-nums}
+/* Per-package deadline: the upstream grants one-off packs at arbitrary clock
+   times, so each row carries its own timestamp; the soon ones are tinted and
+   fold onto their own line so a long package name cannot squeeze them out. */
+.dsm-workbuddy-xdpool-packages-when{grid-column:1/-1;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:15px;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-packages-when-soon{color:var(--dsw-alias-state-warning-primary,#d97706)}
 .dsm-workbuddy-xdpool-panel-total{position:relative;align-items:center;text-align:center;overflow:hidden}
 .dsm-workbuddy-xdpool-panel-total::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;opacity:.9;background:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-xdpool-total-value{color:var(--dsw-alias-state-success-primary,#22a06b);font-size:30px;line-height:34px;font-weight:700;letter-spacing:-.5px;white-space:nowrap;font-variant-numeric:tabular-nums}

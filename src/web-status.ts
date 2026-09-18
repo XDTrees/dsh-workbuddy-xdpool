@@ -298,6 +298,7 @@ export async function poolWebStatus(
     }, selection)),
     selection,
     region,
+    distribution: deps.pool.currentDistribution(),
     regions,
     shim,
   }

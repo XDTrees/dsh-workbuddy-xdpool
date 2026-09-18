@@ -124,26 +124,50 @@ const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153']
 /** The two gateways WorkBuddy serves: the domestic one and the international one. */
 export type WorkBuddyRegion = 'cn' | 'global'
 
+/**
+ * Hosts the international product answers on, once each has been stripped of a
+ * leading label. The WorkBuddy AI desktop app signs in at `workbuddy.ai` (and
+ * the desktop client itself lists `workbuddy.cc` alongside it); the CodeBuddy
+ * CLI signs the same international account in at `codebuddy.ai`. All are served
+ * by one gateway stack, so all are `global` — missing a spelling sends those
+ * tokens to the CN gateway, which rejects them at the openresty layer with an
+ * HTML 401 instead of a business JSON error.
+ */
+const GLOBAL_HOSTS: readonly string[] = ['workbuddy.ai', 'workbuddy.cc', 'codebuddy.ai']
+
+/** Region for a login domain; an empty domain means CN (matching upstream tooling). */
 export function regionOf(domain: string): 'cn' | 'global' {
   const lowered = domain.trim().toLowerCase()
-  // The desktop client treats both .ai and .cc as the international gateway
-  // (see its isInternationalHost list), so a login that landed on either
-  // must route to the global base rather than back to the CN one.
-  if (lowered.endsWith('.workbuddy.ai') || lowered.endsWith('.workbuddy.cc')) return 'global'
-  if (lowered === 'workbuddy.ai' || lowered === 'workbuddy.cc') return 'global'
+  for (const host of GLOBAL_HOSTS) {
+    if (lowered === host || lowered.endsWith(`.${host}`)) return 'global'
+  }
   return 'cn'
 }
 
+/**
+ * Gateway for a global credential.
+ *
+ * International accounts are NOT interchangeable across brand domains: a token
+ * issued at `codebuddy.ai` is rejected by the `workbuddy.ai` gateway and vice
+ * versa, so the base must follow the credential's own domain rather than one
+ * hardcoded host. Anything unrecognised falls back to the desktop app's gateway.
+ */
+function globalBase(credential: WorkBuddyCredential): string {
+  const lowered = credential.domain.trim().toLowerCase()
+  if (lowered === 'codebuddy.ai' || lowered.endsWith('.codebuddy.ai')) return 'https://www.codebuddy.ai'
+  return GLOBAL_BASE
+}
+
 function chatBase(credential: WorkBuddyCredential): string {
-  return regionOf(credential.domain) === 'global' ? GLOBAL_BASE : CN_CHAT_BASE
+  return regionOf(credential.domain) === 'global' ? globalBase(credential) : CN_CHAT_BASE
 }
 
 function billingBase(credential: WorkBuddyCredential): string {
-  return regionOf(credential.domain) === 'global' ? GLOBAL_BASE : CN_BILLING_BASE
+  return regionOf(credential.domain) === 'global' ? globalBase(credential) : CN_BILLING_BASE
 }
 
 function originReferer(credential: WorkBuddyCredential): string {
-  return regionOf(credential.domain) === 'global' ? GLOBAL_BASE : CN_BILLING_BASE
+  return regionOf(credential.domain) === 'global' ? globalBase(credential) : CN_BILLING_BASE
 }
 
 /** Headers every upstream request shares. */
@@ -211,8 +235,31 @@ interface Envelope {
   data: unknown
 }
 
+/**
+ * Gateway denials that arrive as an HTML page rather than a JSON envelope.
+ *
+ * openresty / APISIX reject a request before it reaches the product when the
+ * credential is one the gateway no longer honours — most often a stale sign-in
+ * left in the auth directory. The status alone (401) is not actionable and the
+ * HTML body leaks nothing useful, so this turns it into a sentence the user can
+ * act on.
+ */
+function isGatewayHtmlRejection(status: number, text: string): boolean {
+  if (status !== 401 && status !== 403) return false
+  const head = text.slice(0, 512).toLowerCase()
+  return head.includes('<html') || head.includes('openresty') || head.includes('apisix')
+}
+
 async function readEnvelope(response: Response): Promise<Envelope> {
   const text = await response.text()
+  if (isGatewayHtmlRejection(response.status, text)) {
+    throw new Error(
+      'the WorkBuddy gateway rejected this credential (http 401). This usually means the ' +
+      'account is using a stale sign-in the upstream no longer accepts: sign in again in ' +
+      'the WorkBuddy desktop app, then pick the account on the plugin card. ' +
+      'Run `dsh-workbuddy-xdpool doctor` to list every credential found.',
+    )
+  }
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -287,14 +334,63 @@ export function parseCreditMultiplier(value: unknown): number | undefined {
 }
 
 /** Parse the upstream's `reasoning` object; unknown shapes degrade to `{}`. */
+/**
+ * The effort ladder the upstream's plural-form payloads declare across both
+ * gateways (the live union of every `supportedEfforts` list seen; `minimal` has
+ * never appeared). Both gateways also accept every level of it on
+ * singular-form models — medium/xhigh fold into high, low/max answer with their
+ * own budgets — so a singular `effort` value is a DEFAULT, never the model's
+ * only level.
+ */
+const SINGULAR_EFFORT_LADDER: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
+
+/**
+ * True when `reasoning` arrives in the singular spelling: an `effort` string,
+ * with none of the plural-form fields alongside it. Seen on CN
+ * `deepseek-v4.1-flash` / `kimi-k3-1` / `glm-5.2` and global
+ * `deepseek-v4.1-flash` / `kimi-k3` / `gemini-3.5-flash`.
+ */
+function isSingularEffortForm(raw: Record<string, unknown>): boolean {
+  return typeof raw['effort'] === 'string'
+    && !Array.isArray(raw['supportedEfforts'])
+    && typeof raw['defaultEffort'] !== 'string'
+    && typeof raw['canDisableThinking'] !== 'boolean'
+}
+
+/**
+ * Fold a singular-form `effort` into the plural shape the rest of the plugin
+ * already understands. Probes on both gateways show these models answer with
+ * distinct `reasoning_content` across the whole ladder — and do not think at
+ * all when no `reasoning_effort` is sent — so the fold widens
+ * `supportedEfforts` and carries the declared value into `defaultEffort`. An
+ * unrecognized `effort` passes through as the lone level.
+ */
+function singularEffortLadder(raw: Record<string, unknown>): string[] | undefined {
+  const effort = typeof raw['effort'] === 'string' ? raw['effort'] : undefined
+  if (effort === undefined) return undefined
+  return SINGULAR_EFFORT_LADDER.includes(effort) ? [...SINGULAR_EFFORT_LADDER] : [effort]
+}
+
+/**
+ * Parse the upstream's `reasoning` object; unknown shapes degrade to
+ * `undefined`. Both spellings normalize here: the plural form passes through as
+ * declared, and the singular `effort` form folds via
+ * {@link singularEffortLadder}.
+ */
 export function parseReasoning(value: unknown): WorkBuddyUpstreamModel['reasoning'] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
+  const singularForm = isSingularEffortForm(raw)
+  const effort = typeof raw['effort'] === 'string' ? raw['effort'] : undefined
   const supportedEfforts = Array.isArray(raw['supportedEfforts'])
-    ? raw['supportedEfforts'].filter((effort): effort is string => typeof effort === 'string')
-    : undefined
-  const defaultEffort = typeof raw['defaultEffort'] === 'string' ? raw['defaultEffort'] : undefined
-  const canDisableThinking = typeof raw['canDisableThinking'] === 'boolean' ? raw['canDisableThinking'] : undefined
+    ? raw['supportedEfforts'].filter((entry): entry is string => typeof entry === 'string')
+    : singularEffortLadder(raw)
+  const defaultEffort = typeof raw['defaultEffort'] === 'string'
+    ? raw['defaultEffort']
+    : effort
+  const canDisableThinking = typeof raw['canDisableThinking'] === 'boolean'
+    ? raw['canDisableThinking']
+    : singularForm ? true : undefined
   if (supportedEfforts === undefined && defaultEffort === undefined && canDisableThinking === undefined) {
     return undefined
   }

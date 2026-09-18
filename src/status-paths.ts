@@ -139,7 +139,7 @@ export interface PoolWebModelSelection {
   /** Absent = each model follows its upstream image capability. */
   imageModelIds?: readonly string[]
   /** Per-model context-window cap, keyed by model id. */
-  contextBudgets?: Readonly<Record<string, number>>
+  contextBudgets?: Readonly<Record<string, number | undefined>>
 }
 
 /** The JSON document the pool card renders. */
@@ -152,6 +152,11 @@ export interface PoolWebStatus {
   models: readonly PoolWebModel[]
   /** The saved selection the card diffs its draft against. */
   selection: PoolWebModelSelection
+  /**
+   * How the pool spreads requests: `priority` drains one account before
+   * moving on, `round-robin` splits the spend evenly.
+   */
+  distribution: PoolDistribution
   /** Which region this document describes. */
   region: PoolRegion
   /** Every region holding at least one account, in display order. */
@@ -165,3 +170,7 @@ export interface PoolWebStatus {
  * international one (`workbuddy.ai`).
  */
 export type PoolRegion = 'cn' | 'global'
+
+/** How the pool spreads requests across its accounts. */
+export type PoolDistribution = 'priority' | 'round-robin'
+

@@ -126,7 +126,7 @@ export interface ModelSelection {
   /** Absent = each model follows its upstream image capability. */
   imageModelIds?: readonly string[]
   /** Per-model context-window cap, keyed by model id. */
-  contextBudgets?: Readonly<Record<string, number>>
+  contextBudgets?: Readonly<Record<string, number | undefined>>
 }
 
 /** Convert one upstream catalog entry into the plugin's model-info shape. */

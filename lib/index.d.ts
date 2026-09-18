@@ -150,6 +150,16 @@ interface WorkBuddyCredential {
   refreshToken: string;
   expiresAtMs: number;
   refreshExpiresAtMs?: number;
+  /**
+   * When the upstream says it issued this token (`auth.lastRefreshTime`).
+   *
+   * This, not `expiresAtMs`, is the reliable freshness signal: the upstream
+   * never rewrites a stored expiry when it revokes a token, so a long-dead
+   * backup can claim to expire later than the token that actually works.
+   * Absent on documents the desktop app did not write (the plugin's own
+   * refreshed copy, older builds).
+   */
+  lastRefreshAtMs?: number;
   nickname?: string;
   uin?: string;
   uid?: string;
@@ -194,13 +204,11 @@ export declare function defaultDesktopAuthDirs(platform?: NodeJS.Platform, home?
  * when there is no usable access token.
  */
 export declare function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyCredential | undefined;
-/**
- * Stable account id. `uin` is the billing identity the upstream keys on and
- * survives re-login; `uid` is the fallback.
- */
 export declare function workbuddyAccountId(credential: Pick<WorkBuddyCredential, 'uin' | 'uid' | 'nickname'>): string;
 /** Every directory the pool should scan, in probe order. */
 export declare function candidateAuthDirs(env?: NodeJS.ProcessEnv): string[];
+/** How the pool chooses which account serves the next request. */
+type AccountDistribution = 'priority' | 'round-robin';
 interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
   logger?: {
@@ -216,6 +224,17 @@ interface AccountPoolOptions {
   client?: TokenRefresher;
   /** Refresh this long before actual expiry; default five minutes. */
   refreshMarginMs?: number;
+  /**
+   * How requests are spread across the pool.
+   *
+   * - `priority` (default): one account serves every request until it is
+   *   rate-limited, then the next in order takes over. Credits drain one
+   *   account at a time, and a cooled account resumes at the head of the
+   *   queue the moment its window resets.
+   * - `round-robin`: consecutive requests rotate through the pool so the
+   *   spend spreads evenly.
+   */
+  distribution?: AccountDistribution;
 }
 /**
  * Read-only pool of every discovered WorkBuddy account, with rate-limit
@@ -228,6 +247,8 @@ export declare class WorkBuddyAccountPool {
   private readonly client;
   private readonly refreshMarginMs;
   private accounts;
+  private distribution;
+  /** Cursor for round-robin mode; unused under priority distribution. */
   private cursor;
   private lastScanAtMs;
   private preferredId;
@@ -241,6 +262,7 @@ export declare class WorkBuddyAccountPool {
   applyConfig(options: {
     authDirs?: readonly string[];
     cooldownMs?: number;
+    distribution?: AccountDistribution;
   }): void;
   /** Rescan the auth directories and merge newly discovered accounts. */
   scan(): Promise<WorkBuddyAccount[]>;
@@ -257,15 +279,29 @@ export declare class WorkBuddyAccountPool {
    */
   private available;
   /**
-   * Pick the next usable account for an optional model. Scans on first use,
-   * and rescans when every known account is cooling down — a fresh desktop
-   * login is the usual way out of an exhausted pool. A preferred
-   * (user-selected) account that is healthy is tried first; otherwise the
-   * cursor round-robins so consecutive requests spread across accounts and a
-   * still-cooling preferred account is skipped.
+   * Pick the account to serve a request.
+   *
+   * Two distributions, chosen by the `distribution` setting:
+   *
+   * - **priority** (default, and what the card ships with): one account serves
+   *   every request until it is rate-limited, then the next in order takes over.
+   *   Credits drain one account at a time, and a cooling account returns to the
+   *   head of the queue the moment its window resets — it was never consumed, so
+   *   it resumes straight away.
+   * - **round-robin**: consecutive requests rotate through the pool so spend
+   *   spreads evenly across every account.
+   *
+   * In both modes an explicit user selection (`prefer`) heads the list, a
+   * cooling account is skipped for that model only, and an unrecognised setting
+   * falls back to priority.
+   *
+   * Scans on first use, and rescans when every known account is cooling down: a
+   * fresh desktop login is the usual way out of an exhausted pool.
    */
   acquire(modelId?: string, region?: WorkBuddyRegion): Promise<WorkBuddyAccount | undefined>;
   /** Pin the account the plugin card should prefer; tokens stay out of settings. */
+  /** How the pool currently spreads requests. Shown on the card. */
+  currentDistribution(): AccountDistribution;
   prefer(accountId: string | undefined): void;
   /** Best-effort refresh of one account after a session-dead upstream answer. */
   refreshAccount(accountId: string): Promise<void>;
@@ -351,7 +387,7 @@ interface ModelSelection {
   /** Absent = each model follows its upstream image capability. */
   imageModelIds?: readonly string[];
   /** Per-model context-window cap, keyed by model id. */
-  contextBudgets?: Readonly<Record<string, number>>;
+  contextBudgets?: Readonly<Record<string, number | undefined>>;
 }
 //#endregion
 //#region src/shim.d.ts
@@ -605,7 +641,7 @@ interface PoolWebModelSelection {
   /** Absent = each model follows its upstream image capability. */
   imageModelIds?: readonly string[];
   /** Per-model context-window cap, keyed by model id. */
-  contextBudgets?: Readonly<Record<string, number>>;
+  contextBudgets?: Readonly<Record<string, number | undefined>>;
 }
 /** The JSON document the pool card renders. */
 interface PoolWebStatus {
@@ -617,6 +653,11 @@ interface PoolWebStatus {
   models: readonly PoolWebModel[];
   /** The saved selection the card diffs its draft against. */
   selection: PoolWebModelSelection;
+  /**
+   * How the pool spreads requests: `priority` drains one account before
+   * moving on, `round-robin` splits the spend evenly.
+   */
+  distribution: PoolDistribution;
   /** Which region this document describes. */
   region: PoolRegion;
   /** Every region holding at least one account, in display order. */
@@ -632,6 +673,8 @@ interface PoolWebStatus {
  * international one (`workbuddy.ai`).
  */
 type PoolRegion = 'cn' | 'global';
+/** How the pool spreads requests across its accounts. */
+type PoolDistribution = 'priority' | 'round-robin';
 //#endregion
 //#region src/index.d.ts
 /** Stable Cordis plugin name. */
@@ -652,6 +695,14 @@ export interface Config {
   /** Rate-limit cooldown per account, milliseconds. */
   cooldownMs?: number;
   /**
+   * How the pool spreads requests across accounts.
+   *
+   * `priority` (default) drains one account before moving to the next, which
+   * is what a pool of your own accounts is for. `round-robin` splits the
+   * spend evenly instead. Absent reads as `priority`.
+   */
+  distribution?: 'priority' | 'round-robin';
+  /**
    * Model ids enabled in the picker. Absent means "every model the catalog
    * advertises" — an unconfigured install should never present an empty model
    * list just because the key is missing.
@@ -668,7 +719,7 @@ export interface Config {
    * advertise more than DSH wants to hand a single turn, so the card lets the
    * user cap a model without touching the catalog.
    */
-  contextBudgets?: Partial<Record<string, number>>;
+  contextBudgets?: Record<string, number>;
 }
 /** Upper bound the card offers as the "default" context window, in tokens. */
 export declare const DEFAULT_CONTEXT_BUDGET = 200000;
