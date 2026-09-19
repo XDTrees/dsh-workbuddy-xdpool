@@ -14,9 +14,10 @@
 import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, AuthContext, CredentialStore, Model, Provider } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
-import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { resolveImageAttachmentAccess, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
+import type { Context } from '@deepseek-ai/cordis'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
 import type { WorkBuddyShim } from './shim.ts'
 
@@ -70,6 +71,7 @@ const INERT_AUTH: { credentials: CredentialStore; authContext: AuthContext } = {
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const
 
 export interface WorkBuddyAdapterOptions {
+  ctx?: Context
   shim: WorkBuddyShim
   catalog: WorkBuddyCatalog
   providerId?: string
@@ -166,7 +168,7 @@ function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, providerId: string
  * applies from the first snapshot after startup. Call only after `shim.ready`.
  */
 export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBuddyAdapter {
-  const { shim, catalog } = options
+  const { shim, catalog, ctx } = options
   const providerId = options.providerId ?? WORKBUDDY_POOL_PROVIDER
   const displayName = options.displayName ?? 'WorkBuddy XD Pool'
 
@@ -218,6 +220,15 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // The shim's per-process secret is the OpenAI apiKey; the shim validates it
     // and resolves the real WorkBuddy token itself, per request, from the pool.
     resolveApiKey: async () => shim.token(),
+    resolveAttachments: () => ctx?.get('attachments'),
+    resolveImageAccess: (attachments, ref) =>
+      ctx
+        ? resolveImageAttachmentAccess(
+          attachments,
+          (hostPath: string) => ctx.get('fs')?.processPathFromHostPath(hostPath) ?? hostPath,
+          ref,
+        )
+        : undefined,
   })
 
   return {

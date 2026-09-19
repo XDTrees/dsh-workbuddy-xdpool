@@ -344,12 +344,14 @@ export function apply(ctx: Context, config: Config = {}): void {
         // the two gateways are not interchangeable.
         const adaptersByRegion = {
           cn: createWorkBuddyAdapter({
+            ctx,
             shim: shims.cn,
             catalog: core.catalogs.cn,
             providerId: POOL_PROVIDER_BY_REGION.cn,
             displayName: POOL_NAME_BY_REGION.cn,
           }),
           global: createWorkBuddyAdapter({
+            ctx,
             shim: shims.global,
             catalog: core.catalogs.global,
             providerId: POOL_PROVIDER_BY_REGION.global,

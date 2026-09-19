@@ -1,7 +1,7 @@
 import z from "@deepseek-ai/schemastery";
 import { Api, Model } from "@earendil-works/pi-ai";
 import { PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
-import { Context } from "@deepseek-ai/cordis";
+import { Context, Context as Context$1 } from "@deepseek-ai/cordis";
 import { SettingsNamespace } from "@deepseek-ai/dsh-settings";
 //#region src/upstream.d.ts
 /** Upstream failure classes the shim maps onto distinct HTTP answers. */
@@ -443,6 +443,7 @@ export declare function createWorkBuddyShim(options: WorkBuddyShimOptions): Work
 /** Provider route this bundle owns for the domestic (CN) gateway. */
 export declare const WORKBUDDY_POOL_PROVIDER = "workbuddy-xdpool";
 interface WorkBuddyAdapterOptions {
+  ctx?: Context$1;
   shim: WorkBuddyShim;
   catalog: WorkBuddyCatalog;
   providerId?: string;
