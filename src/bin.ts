@@ -104,7 +104,7 @@ async function commandStatus(args: string[]): Promise<number> {
       }
     }),
     cooling: accounts.filter(account => account.cooldownUntilMs > Date.now()).length,
-    models: core.catalog.current().map(model => ({ id: model.id, name: model.name, multiplier: model.multiplier })),
+    models: core.catalogs.cn.current().map(model => ({ id: model.id, name: model.name, multiplier: model.multiplier })),
     shim: { running: false },
   }
 

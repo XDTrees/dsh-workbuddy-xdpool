@@ -132,7 +132,7 @@ describe('check-in status', () => {
       fetchImpl: (async () => jsonResponse(checkinPayload(false))) as never,
     })
 
-    const status = await poolWebStatus({ pool, catalog: new WorkBuddyCatalog(), client })
+    const status = await poolWebStatus({ pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
     expect(status.accounts).toHaveLength(2)
     for (const row of status.accounts) {
       expect(row.checkin).toMatchObject({
@@ -153,7 +153,7 @@ describe('check-in status', () => {
       fetchImpl: (async () => jsonResponse('nope', 500)) as never,
     })
 
-    const status = await poolWebStatus({ pool, catalog: new WorkBuddyCatalog(), client })
+    const status = await poolWebStatus({ pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
     // The account row still renders; only the check-in field reports the failure.
     expect(status.accounts).toHaveLength(1)
     expect(status.accounts[0]!.checkin).toBeUndefined()
@@ -167,7 +167,7 @@ describe('check-in status', () => {
       fetchImpl: (async () => jsonResponse(checkinPayload(true))) as never,
     })
 
-    const status = await poolWebStatus({ pool, catalog: new WorkBuddyCatalog(), client })
+    const status = await poolWebStatus({ pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
     const serialized = JSON.stringify(status)
     expect(serialized).not.toMatch(/eyJ[A-Za-z0-9_-]+\./u)
     expect(serialized).not.toContain('token-0')
@@ -182,7 +182,7 @@ describe('check-in route', () => {
     const routes = new Map<string, (req: unknown, res: unknown) => Promise<void> | void>()
     registerPoolStatusRoute(fakeContext(routes) as never, {
       pool,
-      catalog: new WorkBuddyCatalog(),
+      catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() },
       client: new WorkBuddyUpstreamClient({ fetchImpl: (async () => jsonResponse(checkinPayload(false))) as never }),
     })
     expect([...routes.keys()]).toContain(POOL_CHECKIN_PATH)
@@ -204,7 +204,7 @@ describe('check-in route', () => {
     })
 
     const routes = new Map<string, (req: unknown, res: unknown) => Promise<void> | void>()
-    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalog: new WorkBuddyCatalog(), client })
+    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
 
     const res = fakeResponse()
     await routes.get(POOL_CHECKIN_PATH)!(fakeRequest({ accountId: target.id }), res)
@@ -222,7 +222,7 @@ describe('check-in route', () => {
       fetchImpl: (async () => jsonResponse(checkinPayload(false))) as never,
     })
     const routes = new Map<string, (req: unknown, res: unknown) => Promise<void> | void>()
-    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalog: new WorkBuddyCatalog(), client })
+    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
 
     const res = fakeResponse()
     await routes.get(POOL_CHECKIN_PATH)!(fakeRequest({}), res)
@@ -236,7 +236,7 @@ describe('check-in route', () => {
       fetchImpl: (async () => jsonResponse(checkinPayload(false))) as never,
     })
     const routes = new Map<string, (req: unknown, res: unknown) => Promise<void> | void>()
-    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalog: new WorkBuddyCatalog(), client })
+    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
 
     const res = fakeResponse()
     await routes.get(POOL_CHECKIN_PATH)!(fakeRequest({ accountId: 'nope' }), res)
@@ -258,7 +258,7 @@ describe('check-in route', () => {
       }) as never,
     })
     const routes = new Map<string, (req: unknown, res: unknown) => Promise<void> | void>()
-    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalog: new WorkBuddyCatalog(), client })
+    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
 
     const res = fakeResponse()
     await routes.get(POOL_CHECKIN_PATH)!(fakeRequest({ accountId: target.id }), res)
@@ -275,7 +275,7 @@ describe('check-in route', () => {
       fetchImpl: (async () => jsonResponse(checkinPayload(false))) as never,
     })
     const routes = new Map<string, (req: unknown, res: unknown) => Promise<void> | void>()
-    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalog: new WorkBuddyCatalog(), client })
+    registerPoolStatusRoute(fakeContext(routes) as never, { pool, catalogs: { cn: new WorkBuddyCatalog(), global: new WorkBuddyCatalog() }, client })
 
     const res = fakeResponse()
     const req = fakeRequest({ accountId: pool.list()[0]!.id }, 'http://evil.example.com')

@@ -30,7 +30,6 @@ export interface TokenRefresher {
 export const WORKBUDDY_LIVE_FILENAME = 'workbuddy-desktop.info'
 
 /** Snapshot files left behind by previous logins share this prefix. */
-const SNAPSHOT_PREFIX = 'workbuddy-desktop.'
 
 /** Env override for the auth file or its directory. */
 export const WORKBUDDY_AUTH_FILE_ENV = 'WORKBUDDY_AUTH_FILE'
@@ -249,6 +248,17 @@ function accountLabel(credential: WorkBuddyCredential): string {
 }
 
 /** List the auth files in one directory: the live file plus every snapshot. */
+/**
+ * Credential files in one auth directory, freshest first.
+ *
+ * Every `*.info` file counts, not just the timestamped `workbuddy-desktop.*`
+ * snapshots: the international client signs in as `workbuddy-desktop-ai.info`
+ * (a hyphen, not a dot), so a prefix test silently dropped every global
+ * credential and the global provider then saw an empty pool.
+ *
+ * Filenames are plain strings, and the ordering here is only a first pass —
+ * `isFresher` makes the real call once each file has been parsed.
+ */
 async function authFilesIn(dir: string): Promise<string[]> {
   let entries: string[]
   try {
@@ -256,11 +266,7 @@ async function authFilesIn(dir: string): Promise<string[]> {
   } catch {
     return []
   }
-  const files = entries.filter(name => {
-    if (name === WORKBUDDY_LIVE_FILENAME) return true
-    // Snapshot: "workbuddy-desktop.<timestamp>.<pid>.<uuid>.info"
-    return name.startsWith(SNAPSHOT_PREFIX) && name.endsWith('.info')
-  })
+  const files = entries.filter(name => name.endsWith('.info'))
   // Newest snapshot first so the freshest token wins when uids collide.
   files.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
   return files.map(name => join(dir, name))

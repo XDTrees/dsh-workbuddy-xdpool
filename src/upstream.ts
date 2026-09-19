@@ -38,7 +38,7 @@ export interface WorkBuddyUpstreamModel {
   contextWindow: number
   maxTokens: number
   creditMultiplier?: number
-  multimodal?: boolean
+  /** Upstream image-input flag. Both gateways spell it `supportsImages`; some entries   * also carry `disabledMultimodal`, the negative spelling. Reading anything else   * reported every model as text-only, which made a vision shim register a second   * route under the same display name and split the model picker group.   */  supportsImages?: boolean
   reasoning?: { supportedEfforts?: readonly string[]; defaultEffort?: string; canDisableThinking?: boolean }
   descriptionZh?: string
   descriptionEn?: string
@@ -105,7 +105,20 @@ const CN_BILLING_BASE = 'https://www.codebuddy.cn'
 const GLOBAL_BASE = 'https://www.workbuddy.ai'
 
 /** Client UA the desktop CLI uses. */
+/** Client UA the desktop CLI uses — the CN gateway answers this one. */
 const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
+
+/**
+ * Desktop app UA. The global gateway serves its product config only to this
+ * client channel: the CLI UA gets a truncated roster (or an HTTP 500), which
+ * is why the international catalog must be read with the desktop spelling.
+ */
+const DESKTOP_UA = 'WorkBuddy/5.5.2'
+
+/** CN model catalog. */
+const MODELS_CATALOG_PATH = '/v2/enterprises/personal/models'
+/** Global product config, which carries the international model roster. */
+const GLOBAL_CONFIG_PATH = '/v3/config'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
 
@@ -415,7 +428,7 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
   const descriptionEn = typeof raw['descriptionEn'] === 'string' && raw['descriptionEn'] !== '' ? raw['descriptionEn'] : undefined
   const creditMultiplier = parseCreditMultiplier(raw['credits'])
   const reasoning = parseReasoning(raw['reasoning'])
-  const supportsToolCall = typeof raw['supportsToolCall'] === 'boolean' ? raw['supportsToolCall'] : undefined
+  const supportsToolCall = typeof raw['supportsToolCall'] === 'boolean' ? raw['supportsToolCall'] : undefined  const supportsImages = typeof raw['supportsImages'] === 'boolean' ? raw['supportsImages'] : undefined
   return {
     id,
     name,
@@ -425,7 +438,7 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
     ...reasoning === undefined ? {} : { reasoning },
     ...descriptionZh === undefined ? {} : { descriptionZh },
     ...descriptionEn === undefined ? {} : { descriptionEn },
-    ...supportsToolCall === undefined ? {} : { supportsToolCall },
+    ...supportsToolCall === undefined ? {} : { supportsToolCall },    ...supportsImages === undefined ? {} : { supportsImages },
   }
 }
 
@@ -542,16 +555,51 @@ export class WorkBuddyUpstreamClient {
     return outcome
   }
 
-  /** GET the personal model catalog, keeping the `cli` agent's models only. */
+  /**
+   * Fetch the model catalog, keeping the `cli` agent's models only.
+   *
+   * The two gateways are read differently, because they answer differently:
+   *
+   * - **CN** serves the roster at `/v2/enterprises/personal/models` and expects
+   *   the CLI client spelling.
+   * - **Global** serves it as part of the product config at `/v3/config`, and
+   *   only to the DESKTOP client channel. Asking the global host with the CLI UA
+   *   yields a truncated roster, and the CN path answers HTTP 500 there — which
+   *   is what left the international provider on its static fallback.
+   *
+   * Both documents share the `{ models, agents }` entry shape, so the parsing
+   * below is common to the two branches.
+   */
   async fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]> {
-    const response = await this.fetchImpl(`${chatBase(credential)}/console/enterprises/personal/models`, {
-      headers: {
-        'Authorization': `Bearer ${credential.accessToken}`,
-        'Accept': 'application/json',
-        'Origin': originReferer(credential),
-        'Referer': `${originReferer(credential)}/`,
-        'User-Agent': CLIENT_UA,
-      },
+    const global = regionOf(credential.domain) === 'global'
+    const url = global
+      ? `${globalBase(credential)}${GLOBAL_CONFIG_PATH}`
+      : `${chatBase(credential)}${MODELS_CATALOG_PATH}`
+
+    const headers: Record<string, string> = global
+      ? {
+          'Authorization': `Bearer ${credential.accessToken}`,
+          'Accept': 'application/json',
+          ...credential.uid === undefined || credential.uid === '' ? {} : { 'X-User-Id': credential.uid },
+          ...credential.domain === '' ? {} : { 'X-Domain': credential.domain },
+          'X-Product': 'SaaS',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Connection': 'close',
+          'User-Agent': DESKTOP_UA,
+        }
+      : {
+          'Authorization': `Bearer ${credential.accessToken}`,
+          'Accept': 'application/json',
+          'Origin': originReferer(credential),
+          'Referer': `${originReferer(credential)}/`,
+          'User-Agent': CLIENT_UA,
+        }
+    if (!global && credential.enterpriseId !== undefined && credential.enterpriseId !== '') {
+      headers['X-Enterprise-Id'] = credential.enterpriseId
+    }
+
+    const response = await this.fetchImpl(url, {
+      headers,
       ...signal === undefined ? {} : { signal },
     })
     const envelope = await readEnvelope(response)

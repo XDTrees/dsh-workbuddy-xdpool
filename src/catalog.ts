@@ -69,7 +69,7 @@ export class WorkBuddyCatalog {
       .filter(model => allow === undefined || allow.has(model.id))
       .map(model => {
         const next = { ...model }
-        if (imageSet !== undefined) next.supportsImages = imageSet.has(model.id)
+        if (imageSet !== undefined) next.supportsImages = next.supportsImages || imageSet.has(model.id)
         const budget = budgets?.[model.id]
         if (budget !== undefined && budget > 0 && budget < next.contextWindow) next.contextWindow = budget
         return next
@@ -136,7 +136,7 @@ export function toModelInfo(model: WorkBuddyUpstreamModel): WorkBuddyModelInfo {
     name: model.name,
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxTokens,
-    supportsImages: model.multimodal ?? false,
+    supportsImages: model.supportsImages ?? false,
     ...model.creditMultiplier === undefined ? {} : { multiplier: model.creditMultiplier },
     ...model.reasoning?.supportedEfforts === undefined ? {} : { supportedEfforts: model.reasoning.supportedEfforts },
   }

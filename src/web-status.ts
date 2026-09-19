@@ -43,7 +43,8 @@ export type { PoolWebStatus }
 /** Constructor dependencies — a narrow slice of the pool runtime. */
 export interface PoolStatusRouteOptions {
   pool: WorkBuddyAccountPool
-  catalog: WorkBuddyCatalog
+  /** One catalog per region; the card reads the one for its active tab. */
+  catalogs: Readonly<Record<PoolRegion, WorkBuddyCatalog>>
   client: WorkBuddyUpstreamClient
   /** Lazily resolve the running loopback shim, when it has bound a port. */
   shim?: () => { running: boolean; baseUrl?: string }
@@ -225,7 +226,7 @@ export async function poolWebStatus(
   const regions: readonly PoolRegion[] = ['cn', 'global']
   // The selection the card diffs its draft against. Sourced from the
   // catalog, which is where the settings section pushes it.
-  const selection: PoolWebModelSelection = deps.catalog.currentSelection()
+  const selection: PoolWebModelSelection = deps.catalogs[region].currentSelection()
   const rows: PoolWebAccount[] = []
   const now = Date.now()
 
@@ -285,7 +286,7 @@ export async function poolWebStatus(
     // The card edits the *user-visible* list, so it gets the selection-applied
     // view: disabled models arrive flagged rather than dropped, which is what
     // lets the row render a checkbox in its real state.
-    models: deps.catalog.current().map(model => toWebModel({
+    models: deps.catalogs[region].current().map(model => toWebModel({
       id: model.id,
       name: model.name,
       contextWindow: model.contextWindow,

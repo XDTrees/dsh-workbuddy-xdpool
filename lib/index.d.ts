@@ -20,7 +20,12 @@ interface WorkBuddyUpstreamModel {
   contextWindow: number;
   maxTokens: number;
   creditMultiplier?: number;
-  multimodal?: boolean;
+  /** Upstream image-input flag. Both gateways spell it `supportsImages`; some entries
+   * also carry `disabledMultimodal`, the negative spelling. Reading anything else
+   * reported every model as text-only, which made a vision shim register a second
+   * route under the same display name and split the model picker group.
+   */
+  supportsImages?: boolean;
   reasoning?: {
     supportedEfforts?: readonly string[];
     defaultEffort?: string;
@@ -112,7 +117,21 @@ export declare class WorkBuddyUpstreamClient {
   chatStream(credential: WorkBuddyCredential, prepared: string, signal?: AbortSignal): Promise<ChatStreamResult>;
   /** POST the token-refresh endpoint; the caller merges the outcome. */
   refreshToken(credential: WorkBuddyCredential): Promise<WorkBuddyRefreshOutcome>;
-  /** GET the personal model catalog, keeping the `cli` agent's models only. */
+  /**
+   * Fetch the model catalog, keeping the `cli` agent's models only.
+   *
+   * The two gateways are read differently, because they answer differently:
+   *
+   * - **CN** serves the roster at `/v2/enterprises/personal/models` and expects
+   *   the CLI client spelling.
+   * - **Global** serves it as part of the product config at `/v3/config`, and
+   *   only to the DESKTOP client channel. Asking the global host with the CLI UA
+   *   yields a truncated roster, and the CN path answers HTTP 500 there — which
+   *   is what left the international provider on its static fallback.
+   *
+   * Both documents share the `{ models, agents }` entry shape, so the parsing
+   * below is common to the two branches.
+   */
   fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]>;
   /** Read-only credits query, aggregated by package. Does not consume credits. */
   fetchCredits(credential: WorkBuddyCredential): Promise<WorkBuddyCredits>;
@@ -142,6 +161,7 @@ interface TokenRefresher {
 }
 /** Live auth file name the WorkBuddy desktop app writes. */
 export declare const WORKBUDDY_LIVE_FILENAME = "workbuddy-desktop.info";
+/** Snapshot files left behind by previous logins share this prefix. */
 /** Env override for the auth file or its directory. */
 export declare const WORKBUDDY_AUTH_FILE_ENV = "WORKBUDDY_AUTH_FILE";
 /** One parsed WorkBuddy credential. */
@@ -488,6 +508,7 @@ interface WorkBuddyStatus {
 }
 interface StatusOptions {
   pool: WorkBuddyAccountPool;
+  /** The catalog to report. Regional callers pass their own region's. */
   catalog: WorkBuddyCatalog;
   client: WorkBuddyUpstreamClient;
   shim?: {
@@ -737,7 +758,8 @@ export declare const Config: z<Config>;
 /** Everything the CLI needs from a live plugin instance. */
 export interface WorkBuddyPoolApi {
   pool: WorkBuddyAccountPool;
-  catalog: WorkBuddyCatalog;
+  /** One catalog per region, matching the two registered providers. */
+  catalogs: Readonly<Record<WorkBuddyRegion, WorkBuddyCatalog>>;
   client: WorkBuddyUpstreamClient;
   shim: WorkBuddyShim;
   adapter: WorkBuddyAdapter | undefined;
@@ -750,11 +772,22 @@ export declare function currentApi(): WorkBuddyPoolApi | undefined;
 /** Test seam: install an API instance without booting cordis. */
 export declare function setApi(next: WorkBuddyPoolApi | undefined): void;
 /** Assemble the runtime objects without registering anything. */
+/**
+ * Assemble the runtime objects without registering anything.
+ *
+ * One catalog per region, mirroring the two shims: the CN and global gateways
+ * do not advertise the same roster, and a shared catalog meant the picker showed
+ * whichever list happened to be fetched first (always the CN one, since the
+ * seeding step read `accounts[0]`).
+ */
 export declare function createCore(logger?: {
   warn(...args: unknown[]): void;
 }): {
   pool: WorkBuddyAccountPool;
-  catalog: WorkBuddyCatalog;
+  catalogs: {
+    readonly cn: WorkBuddyCatalog;
+    readonly global: WorkBuddyCatalog;
+  };
   client: WorkBuddyUpstreamClient;
 };
 /**

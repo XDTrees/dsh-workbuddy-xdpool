@@ -22,7 +22,7 @@ import {
 } from './adapter.ts'
 import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 import { buildStatus } from './status.ts'
-import { WorkBuddyUpstreamClient } from './upstream.ts'
+import { regionOf, WorkBuddyUpstreamClient, type WorkBuddyRegion } from './upstream.ts'
 import { registerPoolStatusRoute } from './web-status.ts'
 
 export { WORKBUDDY_POOL_PROVIDER, createWorkBuddyAdapter, type WorkBuddyAdapter } from './adapter.ts'
@@ -128,7 +128,8 @@ export const Config: z<Config> = z.object({
 /** Everything the CLI needs from a live plugin instance. */
 export interface WorkBuddyPoolApi {
   pool: WorkBuddyAccountPool
-  catalog: WorkBuddyCatalog
+  /** One catalog per region, matching the two registered providers. */
+  catalogs: Readonly<Record<WorkBuddyRegion, WorkBuddyCatalog>>
   client: WorkBuddyUpstreamClient
   shim: WorkBuddyShim
   adapter: WorkBuddyAdapter | undefined
@@ -151,10 +152,22 @@ export function setApi(next: WorkBuddyPoolApi | undefined): void {
 }
 
 /** Assemble the runtime objects without registering anything. */
+/**
+ * Assemble the runtime objects without registering anything.
+ *
+ * One catalog per region, mirroring the two shims: the CN and global gateways
+ * do not advertise the same roster, and a shared catalog meant the picker showed
+ * whichever list happened to be fetched first (always the CN one, since the
+ * seeding step read `accounts[0]`).
+ */
 export function createCore(logger?: { warn(...args: unknown[]): void }) {
   const client = new WorkBuddyUpstreamClient()
   const pool = new WorkBuddyAccountPool({ ...logger === undefined ? {} : { logger }, client })
-  return { pool, catalog: new WorkBuddyCatalog(), client }
+  const catalogs = {
+    cn: new WorkBuddyCatalog(),
+    global: new WorkBuddyCatalog(),
+  } as const
+  return { pool, catalogs, client }
 }
 
 /**
@@ -201,15 +214,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       distribution: distribution ?? 'priority',
     })
     // The model selection travels the same settings path as the pool options:
-    // the card writes it through the settings section and the catalog filters
-    // the picker from it. Invalidating the adapter here is what makes a save
+    // The model selection travels the same settings path as the pool options:
+    // the card writes it through the settings section and both catalogs filter
+    // their picker from it. Invalidating the adapter here is what makes a save
     // take effect without a host restart.
-    core.catalog.applySelection({
+    const selection = {
       ...enabledModelIds === undefined ? {} : { enabledModelIds },
       ...imageModelIds === undefined ? {} : { imageModelIds },
       ...contextBudgets === undefined ? {} : { contextBudgets },
-    })
-    invalidateCatalog()
+    }
+    // Both regions honour the same selection: it is a property of the pool, not
+    // of whichever gateway a model happens to come from.
+    core.catalogs.cn.applySelection(selection)
+    core.catalogs.global.applySelection(selection)
   }
   // `settings` is declared in this plugin top-level `inject`, so the service is
   // available synchronously here. Calling `installSection` without that
@@ -252,8 +269,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   // each is scoped to its gateway's accounts, so the two providers are fully
   // independent: a failing region cannot take the other one down with it.
   const shims = {
-    cn: createWorkBuddyShim({ pool: core.pool, client: core.client, catalog: core.catalog, logger: ctx.logger, region: 'cn' }),
-    global: createWorkBuddyShim({ pool: core.pool, client: core.client, catalog: core.catalog, logger: ctx.logger, region: 'global' }),
+    cn: createWorkBuddyShim({ pool: core.pool, client: core.client, catalog: core.catalogs.cn, logger: ctx.logger, region: 'cn' }),
+    global: createWorkBuddyShim({ pool: core.pool, client: core.client, catalog: core.catalogs.global, logger: ctx.logger, region: 'global' }),
   } as const
   const shim = shims.cn
 
@@ -279,7 +296,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // mount and the card shows an offline banner — the provider still works.
   ctx.inject(['webServer'], (webCtx) => registerPoolStatusRoute(webCtx, {
     pool: core.pool,
-    catalog: core.catalog,
+    catalogs: core.catalogs,
     client: core.client,
     shim: () => shimInfo('cn'),
     // The settings section owns the model selection; this is the write half of
@@ -303,7 +320,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     async status(includeCredits = false) {
       return buildStatus({
         pool: core.pool,
-        catalog: core.catalog,
+        catalog: core.catalogs.cn,
         client: core.client,
         shim: shimInfo('cn'),
         includeCredits,
@@ -328,13 +345,13 @@ export function apply(ctx: Context, config: Config = {}): void {
         const adaptersByRegion = {
           cn: createWorkBuddyAdapter({
             shim: shims.cn,
-            catalog: core.catalog,
+            catalog: core.catalogs.cn,
             providerId: POOL_PROVIDER_BY_REGION.cn,
             displayName: POOL_NAME_BY_REGION.cn,
           }),
           global: createWorkBuddyAdapter({
             shim: shims.global,
-            catalog: core.catalog,
+            catalog: core.catalogs.global,
             providerId: POOL_PROVIDER_BY_REGION.global,
             displayName: POOL_NAME_BY_REGION.global,
           }),
@@ -405,13 +422,14 @@ export function apply(ctx: Context, config: Config = {}): void {
 
         // The model picker asks the host for a provider's catalog; answering
         // here (rather than only from the adapter's static snapshot) is what
-        // makes a saved selection visible without a restart. Both regions share
-        // one catalog: the upstream advertises the same models on each gateway,
-        // and the selection is a property of the pool rather than of a region.
+        // makes a saved selection visible without a restart. Each region answers
+        // from its own catalog — the two gateways do not advertise the same
+        // roster, so one shared list would serve the wrong models to one of them.
         ctx.llm.registerModelDiscovery(WORKBUDDY_POOL_SETTINGS_NS, async (request: { provider?: string }) => {
           if (request.provider !== WORKBUDDY_POOL_PROVIDER
             && request.provider !== WORKBUDDY_GLOBAL_POOL_PROVIDER) return []
-          return core.catalog.visible().map(model => ({
+          const region = request.provider === WORKBUDDY_GLOBAL_POOL_PROVIDER ? 'global' : 'cn'
+          return core.catalogs[region].visible().map(model => ({
             id: model.id,
             name: model.name,
             contextWindow: model.contextWindow,
@@ -443,17 +461,26 @@ export function apply(ctx: Context, config: Config = {}): void {
       // reasoning levels) from the upstream; the static fallback covers an
       // offline upstream so the provider is never empty.
       void (async () => {
-        try {
-          const accounts = await core.pool.scan()
-          const credential = accounts[0]?.credential
-          if (credential === undefined) return
-          const models = await core.client.fetchModels(credential)
-          core.catalog.updateFromUpstream(models)
-          invalidateCatalog()
-          ctx.logger.info?.(`dsh-workbuddy-xdpool: live catalog seeded with ${models.length} model(s)`)
-        } catch (error: unknown) {
-          ctx.logger.warn('dsh-workbuddy-xdpool: live model catalog unavailable; using static fallback', error)
+        // Seed each region from its OWN account and endpoint: the two gateways
+        // advertise different rosters, so seeding both from accounts[0] gave the
+        // global provider the CN model list (and vice versa). A region with no
+        // signed-in account keeps its static fallback.
+        const accounts = await core.pool.scan()
+        for (const region of ['cn', 'global'] as const) {
+          try {
+            const credential = accounts.find(account => regionOf(account.credential.domain) === region)?.credential
+            if (credential === undefined) {
+              ctx.logger.info?.(`dsh-workbuddy-xdpool: no ${region} account yet; keeping the static ${region} catalog`)
+              continue
+            }
+            const models = await core.client.fetchModels(credential)
+            core.catalogs[region].updateFromUpstream(models)
+            ctx.logger.info?.(`dsh-workbuddy-xdpool: ${region} catalog seeded with ${models.length} model(s)`)
+          } catch (error: unknown) {
+            ctx.logger.warn(`dsh-workbuddy-xdpool: ${region} model catalog unavailable; using static fallback`, error)
+          }
         }
+        invalidateCatalog()
       })()
     }, (error: unknown) => {
       ctx.logger.error('dsh-workbuddy-xdpool: shim failed to listen', error)

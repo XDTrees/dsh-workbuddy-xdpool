@@ -45,6 +45,7 @@ export interface WorkBuddyStatus {
 
 export interface StatusOptions {
   pool: WorkBuddyAccountPool
+  /** The catalog to report. Regional callers pass their own region's. */
   catalog: WorkBuddyCatalog
   client: WorkBuddyUpstreamClient
   shim?: { running: boolean; baseUrl?: string }
