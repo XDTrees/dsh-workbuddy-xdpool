@@ -4,10 +4,12 @@
   "description": "Merge every locally signed-in WorkBuddy account into DeepSeek Harness as one auto-failing-over model pool (multi-account rotation, live credits, daily check-in and model catalog).",
   "version": "0.4.5",
   "license": "MIT",
-  "author": "aosi526",
+  "author": "XDTrees",
+  "homepage": "https://github.com/XDTrees/dsh-workbuddy-xdpool#readme",
+  "bugs": { "url": "https://github.com/XDTrees/dsh-workbuddy-xdpool/issues" },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aosi526/dsh-workbuddy-xdpool.git"
+    "url": "git+https://github.com/XDTrees/dsh-workbuddy-xdpool.git"
   },
   "keywords": [
     "dsh-plugin",
