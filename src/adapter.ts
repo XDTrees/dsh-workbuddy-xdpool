@@ -14,9 +14,10 @@
 import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, AuthContext, CredentialStore, Model, Provider } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
-import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { resolveImageAttachmentAccess, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
+import type { Context } from '@deepseek-ai/cordis'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
 import type { WorkBuddyShim } from './shim.ts'
 
@@ -72,6 +73,8 @@ const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const
 export interface WorkBuddyAdapterOptions {
   shim: WorkBuddyShim
   catalog: WorkBuddyCatalog
+  /** Plugin context; the pi-ai adapter reads `attachments`/`fs` from it. */
+  ctx: Context
   providerId?: string
   displayName?: string
 }
@@ -218,6 +221,13 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // The shim's per-process secret is the OpenAI apiKey; the shim validates it
     // and resolves the real WorkBuddy token itself, per request, from the pool.
     resolveApiKey: async () => shim.token(),
+    // Image input is served from the host durable attachment store. The host
+    // PiAiAdapter refuses any request that carries an image when this hook is
+    // absent ("pi-ai image input requires the durable attachment service"), so a
+    // route advertising image input must wire both hooks up.
+    resolveAttachments: () => options.ctx.get('attachments'),
+    resolveImageAccess: (attachments, ref) =>
+      resolveImageAttachmentAccess(attachments, hostPath => options.ctx.get('fs')?.processPathFromHostPath(hostPath), ref),
   })
 
   return {
