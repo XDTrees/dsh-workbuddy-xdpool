@@ -1,0 +1,99 @@
+## 打 tag 即发布到 npm：npm 通过 OIDC 信任本 workflow，因此不需要任何 token，
+## 也不需要两步验证码。绑定信息见同目录 README.md。
+##
+## 要点（改这个文件时别破坏）：
+##   - 文件名必须与 npm 侧「Workflow filename」一致：release.yml
+##   - id-token: write 是 OIDC 的唯一硬要求，删掉就退化成需要 token
+##   - registry-url 指向官方 registry（本机 .npmrc 默认是淘宝镜像，必须覆盖）
+##   - package-manager-cache: false —— 官方要求在发布构建里禁用缓存
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 允许手动重跑，便于失败后重试而不必重新打 tag
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC：npm 据此确认「是本人授权的 workflow」
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      # pnpm 在跑任何 script 之前会做一次依赖状态检查，必要时自动执行
+      # `pnpm install`（不带我们的命令行参数）。那个自动 install 会重新解析
+      # 版本范围，进而撞上 @deepseek-ai/dsh-* 预发布版的
+      # ERR_PNPM_NO_MATCHING_VERSION。用环境变量把配置喂给所有子进程，
+      # 自动 install 才会和上面那次显式 install 用同一套设置。
+      npm_config_auto_install_peers: 'false'
+      npm_config_registry: 'https://registry.npmjs.org'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # package.json 没有 packageManager 字段，必须显式指定版本，
+          # 否则 action 会报 "No pnpm version is specified"
+          version: '11'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Install dependencies
+        # 必须用 --frozen-lockfile：@deepseek-ai/dsh-* 依赖锁的是 0.1.x 预发布版
+        # （如 0.1.2-rc.1），而 package.json 的范围 >=0.1.2 <0.2.0-0 按 semver
+        # 并不匹配预发布版。只有严格照 lockfile 装才不触发那次解析；放开
+        # （--no-frozen-lockfile）就报 ERR_PNPM_NO_MATCHING_VERSION。
+        #
+        # --config.auto-install-peers=false 必须显式传：lockfile 记的
+        # settings.autoInstallPeers=false 要与之一致，否则报
+        # ERR_PNPM_LOCKFILE_CONFIG_MISMATCH。
+        run: |
+          pnpm install --frozen-lockfile \
+            --registry=https://registry.npmjs.org \
+            --config.auto-install-peers=false
+
+      - name: Show resolved toolchain
+        # 失败时先看得到环境，避免把依赖问题误判成别的
+        run: |
+          node --version
+          pnpm --version
+          npm --version
+          ls node_modules/.bin | head -30
+
+      - name: Verify the tag matches package.json
+        # 版本号对不上就中止：宁可让发布失败，也不要发出一个名不副实的版本
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json=$PKG_VERSION  tag=$TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Build
+        # 直接调用本地二进制，不走 `pnpm build`：pnpm 跑 script 前会做依赖状态
+        # 检查、必要时自动 install，那次 install 不带上面的参数，会重新触发
+        # ERR_PNPM_NO_MATCHING_VERSION。
+        run: ./node_modules/.bin/tsdown
+
+      - name: Test
+        run: ./node_modules/.bin/vitest run
+
+      - name: Publish to npm
+        # OIDC 自动生效；npm CLI 会先尝试 OIDC，再回退到传统 token
+        run: npm publish --ignore-scripts --access public
