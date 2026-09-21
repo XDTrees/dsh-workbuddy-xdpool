@@ -101,10 +101,43 @@ export interface Config {
    * user cap a model without touching the catalog.
    */
   contextBudgets?: Record<string, number>
+  /**
+   * Per-region model selection. The two gateways advertise different rosters, so
+   * one shared list would let a save on one tab silently rewrite the other tab's
+   * picker. Each region owns its own copy; a region with no entry falls back to
+   * the legacy flat keys above, so an upgrade keeps the list already in use.
+   */
+  modelSelectionCn?: ModelSelectionConfig
+  modelSelectionGlobal?: ModelSelectionConfig
+}
+
+/** One region's saved model selection. */
+export interface ModelSelectionConfig {
+  enabledModelIds?: string[]
+  imageModelIds?: string[]
+  contextBudgets?: Record<string, number>
 }
 
 /** Upper bound the card offers as the "default" context window, in tokens. */
 export const DEFAULT_CONTEXT_BUDGET = 200_000
+
+/**
+ * One region's model-selection schema.
+ *
+ * Every field is optional on purpose: an absent field keeps its documented
+ * meaning ("all enabled" / "follow the upstream image flag" / "no cap"), and a
+ * region that has never been saved stays absent so `applyConfigFromSource` can
+ * fall back to the legacy flat keys.
+ */
+const modelSelectionSchema = z.object({
+  enabledModelIds: z.array(z.string()).description('Model ids enabled in this region\'s picker (absent = all)'),
+  imageModelIds: z.array(z.string()).description('Model ids accepting image input in this region (absent = follow upstream)'),
+  contextBudgets: z.dict(z.number().step(1).min(1)).description('Per-model context-window override for this region'),
+})
+
+/** Settings key holding one region's saved selection. */
+export const modelSelectionKeyFor = (region: 'cn' | 'global'): string =>
+  region === 'cn' ? 'modelSelectionCn' : 'modelSelectionGlobal'
 
 /**
  * Plugin configuration schema.
@@ -120,9 +153,11 @@ export const Config: z<Config> = z.object({
   authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app own location)'),
   cooldownMs: z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds'),
   distribution: z.union(['priority', 'round-robin']).default('priority').description('How requests are spread: priority (drain one) or round-robin'),
-  enabledModelIds: z.array(z.string()).default([]).description('Model ids enabled in the picker (empty = all)'),
-  imageModelIds: z.array(z.string()).default([]).description('Model ids accepting image input (empty = follow upstream)'),
-  contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Per-model context-window override, keyed by model id'),
+  enabledModelIds: z.array(z.string()).default([]).description('Legacy shared model-id list; used by a region that has no per-region selection yet'),
+  imageModelIds: z.array(z.string()).default([]).description('Legacy shared image-id list; used by a region that has no per-region selection yet'),
+  contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Legacy shared context budgets; used by a region with no per-region selection yet'),
+  modelSelectionCn: modelSelectionSchema.description('Model selection for the domestic gateway'),
+  modelSelectionGlobal: modelSelectionSchema.description('Model selection for the international gateway'),
 })
 
 /** Everything the CLI needs from a live plugin instance. */
@@ -203,7 +238,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     onChange() { applyConfigFromSource() },
   }
   const applyConfigFromSource = (): void => {
-    const { authFile, cooldownMs, distribution, enabledModelIds, imageModelIds, contextBudgets } = current()
+    const { authFile, cooldownMs, distribution, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal } = current()
     core.pool.applyConfig({
       ...authFile === undefined
         ? {}
@@ -214,19 +249,20 @@ export function apply(ctx: Context, config: Config = {}): void {
       distribution: distribution ?? 'priority',
     })
     // The model selection travels the same settings path as the pool options:
-    // The model selection travels the same settings path as the pool options:
-    // the card writes it through the settings section and both catalogs filter
-    // their picker from it. Invalidating the adapter here is what makes a save
+    // the card writes it through the settings section and each catalog filters
+    // its own picker from it. Invalidating the adapter here is what makes a save
     // take effect without a host restart.
-    const selection = {
+    //
+    // Every region reads its OWN key. A region that has never been saved falls
+    // back to the legacy flat keys, so an upgrade keeps the list the user was
+    // already using instead of resetting one side to "everything".
+    const legacySelection = {
       ...enabledModelIds === undefined ? {} : { enabledModelIds },
       ...imageModelIds === undefined ? {} : { imageModelIds },
       ...contextBudgets === undefined ? {} : { contextBudgets },
     }
-    // Both regions honour the same selection: it is a property of the pool, not
-    // of whichever gateway a model happens to come from.
-    core.catalogs.cn.applySelection(selection)
-    core.catalogs.global.applySelection(selection)
+    core.catalogs.cn.applySelection(modelSelectionCn ?? legacySelection)
+    core.catalogs.global.applySelection(modelSelectionGlobal ?? legacySelection)
   }
   // `settings` is declared in this plugin top-level `inject`, so the service is
   // available synchronously here. Calling `installSection` without that
@@ -302,10 +338,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     // The settings section owns the model selection; this is the write half of
     // the card's save round-trip. It goes through `settingsScope.set` (below)
     // so the change lands in the same document the model picker reads.
-    saveSelection: (selection) => {
-      setSetting('enabledModelIds', selection.enabledModelIds)
-      setSetting('imageModelIds', selection.imageModelIds)
-      setSetting('contextBudgets', selection.contextBudgets)
+    //
+    // The region is written to its own key: saving the domestic tab must never
+    // rewrite the international picker, because the two gateways advertise
+    // different rosters and the user curates them separately.
+    saveSelection: (region, selection) => {
+      setSetting(modelSelectionKeyFor(region), {
+        ...selection.enabledModelIds === undefined ? {} : { enabledModelIds: [...selection.enabledModelIds] },
+        ...selection.imageModelIds === undefined ? {} : { imageModelIds: [...selection.imageModelIds] },
+        ...selection.contextBudgets === undefined ? {} : { contextBudgets: { ...selection.contextBudgets } },
+      })
     },
   }))
   api = {

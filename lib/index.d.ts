@@ -743,9 +743,25 @@ export interface Config {
    * user cap a model without touching the catalog.
    */
   contextBudgets?: Record<string, number>;
+  /**
+   * Per-region model selection. The two gateways advertise different rosters, so
+   * one shared list would let a save on one tab silently rewrite the other tab's
+   * picker. Each region owns its own copy; a region with no entry falls back to
+   * the legacy flat keys above, so an upgrade keeps the list already in use.
+   */
+  modelSelectionCn?: ModelSelectionConfig;
+  modelSelectionGlobal?: ModelSelectionConfig;
+}
+/** One region's saved model selection. */
+export interface ModelSelectionConfig {
+  enabledModelIds?: string[];
+  imageModelIds?: string[];
+  contextBudgets?: Record<string, number>;
 }
 /** Upper bound the card offers as the "default" context window, in tokens. */
 export declare const DEFAULT_CONTEXT_BUDGET = 200000;
+/** Settings key holding one region's saved selection. */
+export declare const modelSelectionKeyFor: (region: 'cn' | 'global') => string;
 /**
  * Plugin configuration schema.
  *

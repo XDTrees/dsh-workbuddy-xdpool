@@ -234,7 +234,16 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * is touched the draft takes over and is what the Save button posts. Discard
    * drops it back to the copy the server last reported.
    */
-  const [draft, setDraft] = useState<Record<string, ModelDraftEntry> | undefined>(undefined)
+  const [draftByRegion, setDraftByRegion] = useState<Partial<Record<PoolRegion, Record<string, ModelDraftEntry>>>>({})
+  /**
+   * The draft for the tab on screen. Keyed by region: the two gateways have
+   * different rosters, so edits made on one tab must not leak into the other
+   * when the user switches tabs (or saves).
+   */
+  const draft = draftByRegion[activeRegion]
+  const setDraft = (next: Record<string, ModelDraftEntry> | undefined): void => {
+    setDraftByRegion(prev => ({ ...prev, [activeRegion]: next }))
+  }
   const [savingModels, setSavingModels] = useState(false)
   const mounted = useRef(true)
 
@@ -445,9 +454,9 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       for (const [id, entry] of Object.entries(draft)) {
         if (entry.budget !== undefined) contextBudgets[id] = entry.budget
       }
-      await write.call(settingsScope, 'enabledModelIds', enabledModelIds)
-      await write.call(settingsScope, 'imageModelIds', imageModelIds)
-      await write.call(settingsScope, 'contextBudgets', contextBudgets)
+      // One key per region: saving this tab must not rewrite the other tab's list.
+      const key = activeRegion === 'cn' ? 'modelSelectionCn' : 'modelSelectionGlobal'
+      await write.call(settingsScope, key, { enabledModelIds, imageModelIds, contextBudgets })
       setDraft(undefined)
       if (mounted.current) setFlash(t?.('row.modelsSaved') ?? 'Saved')
     } catch (cause: unknown) {

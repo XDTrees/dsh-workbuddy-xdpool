@@ -53,7 +53,12 @@ export interface PoolStatusRouteOptions {
    * the settings section; absent when the plugin runs without a settings
    * service (the save route then reports 503 rather than pretending to work).
    */
-  saveSelection?: (selection: PoolWebModelSelection) => Promise<void> | void
+  /**
+   * Persist one region's selection. The region travels with the payload: the two
+   * gateways advertise different rosters, so the domestic tab and the
+   * international tab each own their list and must never overwrite each other.
+   */
+  saveSelection?: (region: PoolRegion, selection: PoolWebModelSelection) => Promise<void> | void
 }
 
 /** Redact token-like content before it crosses to the browser. */
@@ -406,8 +411,11 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
           const body = await readJsonBody(req)
           const selection = parseSelection(body)
           if (selection === undefined) return json(res, 400, { error: 'invalid selection payload' })
-          await deps.saveSelection(selection)
-          json(res, 200, { ok: true, selection })
+          // The region travels with the payload: one tab's save must not
+          // touch the other tab's list. An unknown value falls back to cn.
+          const region: PoolRegion = body['region'] === 'global' ? 'global' : 'cn'
+          await deps.saveSelection(region, selection)
+          json(res, 200, { ok: true, region, selection })
         } catch (error: unknown) {
           json(res, 500, { error: safeMessage(error) })
         }
