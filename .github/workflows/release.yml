@@ -5,7 +5,11 @@
 ##   - 文件名必须与 npm 侧「Workflow filename」一致：release.yml
 ##   - id-token: write 是 OIDC 的唯一硬要求，删掉就退化成需要 token
 ##   - registry-url 指向官方 registry（本机 .npmrc 默认是淘宝镜像，必须覆盖）
-##   - package-manager-cache: false —— 官方要求在发布构建里禁用缓存
+##   - package-manager-cache: false —— 官方要求在发布构建里禁用缓存。
+##     注意这是 setup-node v7 才有的输入：v4 上它不存在，会报
+##     "Unexpected input(s) 'package-manager-cache'" 并静默失效。
+##   - action 版本要 v7/v6：v4 系列自身跑在 Node 20 上，GitHub 已弃用，
+##     会刷一堆 deprecation 告警（v7 跑在 node24）。
 name: Release
 
 on:
@@ -36,18 +40,19 @@ jobs:
       npm_config_registry: 'https://registry.npmjs.org'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           # package.json 没有 packageManager 字段，必须显式指定版本，
           # 否则 action 会报 "No pnpm version is specified"
           version: '11'
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
+          # 构建用的 Node；action 自身跑哪个 Node 由 action 版本决定。
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
