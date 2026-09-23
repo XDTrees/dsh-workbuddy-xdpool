@@ -18,3 +18,6 @@ release-body.md
 .release-bodies.json
 .m.txt
 .cm.txt
+
+# 待处理的截图暂存
+.shot-*.png
