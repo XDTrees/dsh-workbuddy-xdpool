@@ -14,3 +14,6 @@ release-body.md
 
 # 临时：本地 API 调用用
 .gh-token.tmp
+# 临时/中间文件
+.m.txt
+.releases.json
