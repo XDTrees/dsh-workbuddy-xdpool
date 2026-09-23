@@ -1,0 +1,5 @@
+fix(release): 版本校验只在 tag 推送时跑
+
+手动触发把 GITHUB_REF_NAME 当作 tag 名去跟 package.json 比对，而手动
+触发时它是分支名（main），所以那一步必然失败——手动触发的 CI 从来跑
+不过去。改成只在 push（tag）路径校验。

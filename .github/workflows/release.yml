@@ -87,6 +87,9 @@ jobs:
           ls node_modules/.bin | head -30
 
       - name: Verify the tag matches package.json
+        # 只在 tag 推送时校验。手动触发时 GITHUB_REF_NAME 是分支名（main），
+        # 拿它跟版本号比必然不相等——那会让手动触发永远跑不下去。
+        if: github.event_name == 'push'
         # 版本号对不上就中止：宁可让发布失败，也不要发出一个名不副实的版本
         run: |
           PKG_VERSION="$(node -p "require('./package.json').version")"
