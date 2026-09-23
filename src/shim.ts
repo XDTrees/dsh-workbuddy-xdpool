@@ -284,6 +284,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
       if (result.ok) {
         logger?.info?.(`dsh-workbuddy-xdpool: served by ${account.label}`)
+        // Only now is this account the one actually serving the user: a request
+        // that failed over to another account must not mark the tried one as used.
+        pool.noteServed(account.id)
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -312,7 +315,19 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         continue
       }
 
-      // Rotate only on rate limits; other failures are terminal for this request.
+      // Credit exhaustion is an ACCOUNT condition, not a model one: every model on
+      // that account is dead until its quota resets, so cool the whole account and
+      // rotate. Failing the request here would waste the other healthy accounts.
+      if (result.kind === 'hard_credit') {
+        pool.penalizeExhausted(account.id)
+        logger?.warn(
+          `dsh-workbuddy-xdpool: ${account.label} has no credits left `
+            + `(attempt ${attempt + 1}/${maxAttempts}); rotating`,
+        )
+        continue
+      }
+
+      // Other failures are terminal for this request.
       if (result.kind !== 'soft_rate') break
 
       exhaustedByRateLimit = true

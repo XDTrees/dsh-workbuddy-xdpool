@@ -240,6 +240,8 @@ interface AccountPoolOptions {
   authDirs?: readonly string[];
   /** How long a rate-limited account stays out of rotation. */
   cooldownMs?: number;
+  /** How long an account rests after its credits run out (default 30 minutes). */
+  exhaustCooldownMs?: number;
   /** Upstream client used to refresh near-expiry tokens. */
   client?: TokenRefresher;
   /** Refresh this long before actual expiry; default five minutes. */
@@ -260,6 +262,12 @@ export declare class WorkBuddyAccountPool {
   private readonly logger;
   private authDirs;
   private cooldownMs;
+  /**
+   * How long an account stays out of rotation after the upstream reports its
+   * credits are spent. Credit packs reset on their own schedule rather than on a
+   * rate-limit window, so this is much longer than `cooldownMs`.
+   */
+  private exhaustCooldownMs;
   private readonly client;
   private readonly refreshMarginMs;
   private accounts;
@@ -296,6 +304,7 @@ export declare class WorkBuddyAccountPool {
   applyConfig(options: {
     authDirs?: readonly string[];
     cooldownMs?: number;
+    exhaustCooldownMs?: number;
     distribution?: AccountDistribution;
     disabledAccountIds?: readonly string[];
   }): void;
@@ -358,6 +367,27 @@ export declare class WorkBuddyAccountPool {
   isDisabled(accountId: string): boolean;
   /** Every account id the user switched off, in discovery order. */
   disabledIdsInOrder(): string[];
+  /**
+   * Record that an account actually served a request.
+   *
+   * Called by the shim once the upstream answers 200 — only then is the account
+   * the one the user is really being served by. `balanced` mode reads the same map
+   * for its idle weighting, so a request that failed over to another account must
+   * not count as used for the account that was merely tried.
+   */
+  noteServed(accountId: string): void;
+  /**
+   * The account that served the most recent request, if any.
+   *
+   * Distinct from "who would serve the next one": this is a record of what
+   * actually happened, which is what the card needs to answer "which account am
+   * I using right now?". Under `balanced` there is no deterministic next account
+   * at all, so a recorded fact is the only honest answer.
+   *
+   * Returns undefined before the first request of the process, and after every
+   * known account has been re-scanned away (a login swapped out under us).
+   */
+  lastServedId(): string | undefined;
   /** Best-effort refresh of one account after a session-dead upstream answer. */
   refreshAccount(accountId: string): Promise<void>;
   /**
@@ -367,6 +397,15 @@ export declare class WorkBuddyAccountPool {
    * endpoint never takes down a working session.
    */
   private ensureFresh;
+  /**
+   * Cool a whole account after the upstream reports its credits are spent.
+   *
+   * Credit exhaustion is an ACCOUNT condition, unlike a model rate limit: every
+   * model on that account is unusable until the quota resets, so this cools the
+   * account as a whole (no `modelId`) for the configured exhaustion window. The
+   * shim then rotates to a different account instead of failing the request.
+   */
+  penalizeExhausted(accountId: string): void;
   /**
    * Mark an account (or one of its models) rate-limited.
    *

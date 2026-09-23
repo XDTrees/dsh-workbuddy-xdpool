@@ -299,14 +299,38 @@ export function apply(ctx: Context, config: Config = {}): void {
    * the three model-selection keys, so the settings file cannot be steered from
    * the browser; the catalog re-reads through `onChange` either way.
    */
+  /**
+   * Write one key of the plugin's own settings section. Only ever called with the
+   * model-selection keys, the distribution, and the disabled-account list, so the
+   * settings file cannot be steered from the browser; the catalogs and the pool
+   * re-read through `onChange` either way.
+   *
+   * `set` returns a promise, so a rejection must be caught explicitly: a bare
+   * `void write.call(...)` swallows it, and the card then looks like it saved
+   * while the value never reached the settings file.
+   */
   const setSetting = (key: string, value: unknown): void => {
     if (value === undefined) return
     const write = settingsService?.set
-    if (write === undefined) return
+    if (write === undefined) {
+      ctx.logger.warn?.(
+`dsh-workbuddy-xdpool: no settings writer; ` + key + ` was not saved`
+)
+      return
+    }
     try {
-      void write.call(settingsService, key, value)
+      const result = write.call(settingsService, key, value) as Promise<void> | undefined
+      if (result !== undefined && typeof result.then === 'function') {
+        result.catch((error: unknown) => {
+          ctx.logger.warn?.(
+`dsh-workbuddy-xdpool: failed to persist ` + key
+, error)
+        })
+      }
     } catch (error: unknown) {
-      ctx.logger.warn?.(`dsh-workbuddy-xdpool: failed to persist ${key}`, error)
+      ctx.logger.warn?.(
+`dsh-workbuddy-xdpool: failed to persist ` + key
+, error)
     }
   }
 

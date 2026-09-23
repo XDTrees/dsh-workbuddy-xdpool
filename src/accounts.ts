@@ -302,6 +302,8 @@ export interface AccountPoolOptions {
   authDirs?: readonly string[]
   /** How long a rate-limited account stays out of rotation. */
   cooldownMs?: number
+  /** How long an account rests after its credits run out (default 30 minutes). */
+  exhaustCooldownMs?: number
   /** Upstream client used to refresh near-expiry tokens. */
   client?: TokenRefresher
   /** Refresh this long before actual expiry; default five minutes. */
@@ -347,10 +349,19 @@ function idleWeight(lastUsedAt: number | undefined, now: number): number {
   return 1 + idle
 }
 
+/** Default rest for an account whose credits ran out (packs reset on their own schedule). */
+const EXHAUST_COOLDOWN_MS = 30 * 60 * 1000
+
 export class WorkBuddyAccountPool {
   private readonly logger: AccountPoolOptions['logger']
   private authDirs: readonly string[]
   private cooldownMs: number
+  /**
+   * How long an account stays out of rotation after the upstream reports its
+   * credits are spent. Credit packs reset on their own schedule rather than on a
+   * rate-limit window, so this is much longer than `cooldownMs`.
+   */
+  private exhaustCooldownMs: number
   private readonly client: TokenRefresher | undefined
   private readonly refreshMarginMs: number
   private accounts: WorkBuddyAccount[] = []
@@ -383,6 +394,7 @@ export class WorkBuddyAccountPool {
     this.logger = options.logger
     this.authDirs = options.authDirs ?? candidateAuthDirs()
     this.cooldownMs = options.cooldownMs ?? 60_000
+    this.exhaustCooldownMs = options.exhaustCooldownMs ?? EXHAUST_COOLDOWN_MS
     this.client = options.client
     this.refreshMarginMs = options.refreshMarginMs ?? 5 * 60 * 1000
     // Priority is the default: users pool their own accounts to spend one
@@ -398,6 +410,7 @@ export class WorkBuddyAccountPool {
   applyConfig(options: {
     authDirs?: readonly string[]
     cooldownMs?: number
+    exhaustCooldownMs?: number
     distribution?: AccountDistribution
     disabledAccountIds?: readonly string[]
   }): void {
@@ -406,6 +419,9 @@ export class WorkBuddyAccountPool {
     }
     if (options.cooldownMs !== undefined && options.cooldownMs >= 1000) {
       this.cooldownMs = options.cooldownMs
+    }
+    if (options.exhaustCooldownMs !== undefined && options.exhaustCooldownMs >= 1000) {
+      this.exhaustCooldownMs = options.exhaustCooldownMs
     }
     if (options.distribution !== undefined) {
       this.distribution = options.distribution
@@ -562,7 +578,6 @@ export class WorkBuddyAccountPool {
     if (this.preferredId !== undefined) {
       const preferred = pool.find(account => account.id === this.preferredId)
       if (preferred !== undefined) {
-        this.lastUsedAt.set(preferred.id, Date.now())
         await this.ensureFresh(preferred)
         return preferred
       }
@@ -577,8 +592,10 @@ export class WorkBuddyAccountPool {
       : this.distribution === 'balanced'
         ? this.pickByWeight(pool)
         : pool[0]
+    // Serving is recorded by noteServed once the upstream answers 200, not
+    // here: picking only says which account is being tried, and the shim may
+    // still rotate before the request succeeds.
     if (account === undefined) return undefined
-    this.lastUsedAt.set(account.id, Date.now())
     await this.ensureFresh(account)
     return account
   }
@@ -601,6 +618,39 @@ export class WorkBuddyAccountPool {
   /** Every account id the user switched off, in discovery order. */
   disabledIdsInOrder(): string[] {
     return this.accounts.filter(account => this.disabledIds.has(account.id)).map(account => account.id)
+  }
+
+  /**
+   * Record that an account actually served a request.
+   *
+   * Called by the shim once the upstream answers 200 — only then is the account
+   * the one the user is really being served by. `balanced` mode reads the same map
+   * for its idle weighting, so a request that failed over to another account must
+   * not count as used for the account that was merely tried.
+   */
+  noteServed(accountId: string): void {
+    if (!this.accounts.some(account => account.id === accountId)) return
+    this.lastUsedAt.set(accountId, Date.now())
+  }
+
+  /**
+   * The account that served the most recent request, if any.
+   *
+   * Distinct from "who would serve the next one": this is a record of what
+   * actually happened, which is what the card needs to answer "which account am
+   * I using right now?". Under `balanced` there is no deterministic next account
+   * at all, so a recorded fact is the only honest answer.
+   *
+   * Returns undefined before the first request of the process, and after every
+   * known account has been re-scanned away (a login swapped out under us).
+   */
+  lastServedId(): string | undefined {
+    let newest: { id: string; at: number } | undefined
+    for (const [id, at] of this.lastUsedAt) {
+      if (!this.accounts.some(account => account.id === id)) continue
+      if (newest === undefined || at > newest.at) newest = { id, at }
+    }
+    return newest?.id
   }
 
   /** Best-effort refresh of one account after a session-dead upstream answer. */
@@ -659,6 +709,31 @@ export class WorkBuddyAccountPool {
     } finally {
       this.refreshInflight.delete(account.id)
     }
+  }
+
+  /**
+   * Cool a whole account after the upstream reports its credits are spent.
+   *
+   * Credit exhaustion is an ACCOUNT condition, unlike a model rate limit: every
+   * model on that account is unusable until the quota resets, so this cools the
+   * account as a whole (no `modelId`) for the configured exhaustion window. The
+   * shim then rotates to a different account instead of failing the request.
+   */
+  penalizeExhausted(accountId: string): void {
+    const until = Date.now() + this.exhaustCooldownMs
+    this.penalize(accountId, until)
+    this.logger?.warn(
+      
+`
+dsh-workbuddy-xdpool: account credits exhausted; cooling the whole account until 
+`
+ +
+        
+`
+${new Date(until).toISOString()}
+`
+,
+    )
   }
 
   /**

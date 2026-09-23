@@ -370,22 +370,29 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * restart and is re-applied after every re-scan.
    */
   const toggleAccountDisabled = async (accountId: string, disabled: boolean): Promise<void> => {
+    const write = settingsScope?.set
+    if (write === undefined) {
+      setError(t?.('row.modelsSaveError', { message: 'settings scope is read-only' })
+        ?? 'settings scope is read-only')
+      return
+    }
     setAccountBusyId(accountId)
     setFlash(undefined)
     try {
-      const response = await fetch(POOL_ACCOUNT_DISABLE_PATH, {
-        method: 'POST',
-        headers: { accept: 'application/json', 'content-type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ accountId, disabled }),
-      })
-      const body = await response.json().catch(() => undefined) as { error?: string } | undefined
-      if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
+      // Derived from the status the card already holds, so the write is a
+      // read-modify-write of the full list and two clicks cannot clobber.
+      const current = (status?.accounts ?? [])
+        .filter(account => account.disabled === true)
+        .map(account => account.id)
+      const next = disabled
+        ? (current.includes(accountId) ? current : [...current, accountId])
+        : current.filter(id => id !== accountId)
+      await write.call(settingsScope, 'disabledAccountIds', next)
       await refresh(activeRegion)
     } catch (cause: unknown) {
       const message = cause instanceof Error ? cause.message : String(cause)
       if (mounted.current) {
-          setError(t?.('row.accountToggleError', { message }) ?? `Could not switch the account: ${message}`)
+        setError(t?.('row.accountToggleError', { message }) ?? 'Could not switch the account: ' + message)
       }
     } finally {
       if (mounted.current) setAccountBusyId(undefined)
@@ -700,11 +707,33 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                           ?? `${accountCount} account(s) · ${cooling} cooling`}
                       </p>
                     </div>
+                    {(() => {
+                      // "In use now": the account that actually served the last request.
+                      // It is recorded on success only, so it answers "which account am I
+                      // using?" rather than "which one would be tried next".
+                      const active = status?.activeAccountId === undefined
+                        ? undefined
+                        : status.accounts.find(account => account.id === status.activeAccountId)
+                      if (active === undefined) return null
+                      return (
+                        <div className="dsm-workbuddy-xdpool-current">
+                          <span className="dsm-workbuddy-xdpool-current-dot" />
+                          <span className="dsm-workbuddy-xdpool-current-label">
+                            {t?.('row.currentAccount') ?? 'In use now'}
+                          </span>
+                          <span className="dsm-workbuddy-xdpool-current-name">{active.label}</span>
+                          {active.disabled === true
+                            ? <span className="dsm-workbuddy-xdpool-current-note">
+                                {t?.('row.currentAccountDisabled') ?? 'disabled — will switch on the next request'}
+                              </span>
+                            : null}
+                        </div>
+                      )
+                    })()}
                     {status?.accounts.map(account => (
                       <AccountBlock
                         key={account.id}
                         account={account}
-                        {...status.activeAccountId === undefined ? {} : { activeAccountId: status.activeAccountId }}
                         {...checkinBusyId === undefined ? {} : { checkinBusyId }}
                         onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
                           onToggleDisabled={(accountId, disabled) => { void toggleAccountDisabled(accountId, disabled) }}
@@ -776,7 +805,6 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
 /** One account block: label + status tag + meta + optional credit panels. */
 function AccountBlock({
   account,
-  activeAccountId,
   t,
   checkinBusyId,
   onClaimCheckin,
@@ -784,7 +812,6 @@ function AccountBlock({
   onToggleDisabled,
 }: {
   account: PoolWebAccount
-  activeAccountId?: string
   t?: PoolCardProps['t']
   /** Account id whose claim is in flight, if any. */
   checkinBusyId?: string
@@ -793,74 +820,77 @@ function AccountBlock({
   accountBusyId?: string
   onToggleDisabled: (accountId: string, disabled: boolean) => void
 }) {
-  const isActive = account.id === activeAccountId
   const isDisabled = account.disabled === true
   const isCooling = account.cooling === true
   const cooldownUntil = account.cooldownUntil !== undefined ? Date.parse(account.cooldownUntil) : undefined
   const modelCooldowns = account.modelCooldowns ?? []
 
-  // A whole-account cooldown shows the "Cooling" tag; per-model cooldowns do
-  // NOT mark the account cooling (its other models still serve) — they render
-  // as small per-model chips instead, e.g. "hy4-preview cooling to 10:14".
-  const tag = isActive
-    ? { text: t?.('row.accountNext') ?? 'Next up', cls: 'dsm-workbuddy-xdpool-account-tag' }
-    : isCooling
-      ? { text: t?.('row.cooling') ?? 'Cooling', cls: 'dsm-workbuddy-xdpool-account-tag dsm-workbuddy-xdpool-account-tag-cooling' }
-      : null
+  // Only a whole-account cooldown gets a tag. Per-model cooldowns do NOT mark
+  // the account cooling (its other models still serve) — they render as
+  // per-model chips below instead, e.g. "hy4-preview cooling to 10:14".
+  //
+  // There is deliberately no "Next up" tag: which account serves next is not
+  // knowable from here. `balanced` draws at random, `round-robin` walks a
+  // cursor, and the old flag only ever meant "highest-priority eligible" —
+  // which is not the same thing, and did not account for disabled accounts.
+  const tag = isCooling
+    ? { text: t?.('row.cooling') ?? 'Cooling', cls: 'dsm-workbuddy-xdpool-account-tag dsm-workbuddy-xdpool-account-tag-cooling' }
+    : null
 
   return (
     <div className={isDisabled ? 'dsm-workbuddy-xdpool-account dsm-workbuddy-xdpool-account-off' : 'dsm-workbuddy-xdpool-account'}>
-      <div className="dsm-workbuddy-xdpool-account-copy">
-          <div className="dsm-workbuddy-xdpool-account-head">
-            <span className="dsm-workbuddy-xdpool-account-label">{account.label}</span>
-            <label
-              className="dsm-workbuddy-xdpool-account-toggle"
-              title={t?.('row.accountToggleHint') ?? 'Include this account in the pool'}
-            >
-              <input
-                type='checkbox'
-                checked={!isDisabled}
-                disabled={accountBusyId === account.id}
-                onChange={(event) => { onToggleDisabled(account.id, !event.target.checked) }}
-              />
-              {isDisabled ? (t?.('row.accountOff') ?? 'Off') : (t?.('row.accountInRotation') ?? 'In rotation')}
-            </label>
-          </div>
-        <div className="dsm-workbuddy-xdpool-account-tags">
-          {tag === null ? null : <span className={tag.cls}>{tag.text}</span>}
-        </div>
-        {account.domain !== '' && <span className="dsm-workbuddy-xdpool-account-meta">{account.domain}</span>}
-        {account.expiresAt !== undefined
-          ? <span className="dsm-workbuddy-xdpool-account-meta">
-              {t?.('row.tokenExpiry', { time: formatDateTime(account.expiresAt) })
-                ?? `token ${formatDateTime(account.expiresAt)}`}
-            </span>
-          : null}
-        {isCooling && cooldownUntil !== undefined && !Number.isNaN(cooldownUntil)
-          ? <span className="dsm-workbuddy-xdpool-account-meta">
-              {t?.('row.cooldownUntil', { time: formatTime(cooldownUntil) }) ?? `until ${formatTime(cooldownUntil)}`}
-              {' · '}
-              {t?.('row.cooldownHits', { hits: account.rateLimitHits ?? 0 })
-                ?? `${account.rateLimitHits ?? 0} hit(s)`}
-            </span>
-          : null}
-        {modelCooldowns.length > 0
-          ? <div className="dsm-workbuddy-xdpool-account-modelcool">
-              {modelCooldowns.map(mc => (
-                <span key={mc.modelId} className="dsm-workbuddy-xdpool-account-modelcool-chip">
-                  {t?.('row.modelCooling', { model: mc.modelId, time: formatDateTime(mc.until) })
-                    ?? `${mc.modelId} cooling to ${formatDateTime(mc.until)}`}
-                </span>
-              ))}
-            </div>
-          : null}
+      <div className="dsm-workbuddy-xdpool-account-head">
+        <span className="dsm-workbuddy-xdpool-account-label">{account.label}</span>
+        {tag === null ? null : <span className={tag.cls}>{tag.text}</span>}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={!isDisabled}
+          className={isDisabled
+            ? 'dsm-workbuddy-xdpool-account-toggle'
+            : 'dsm-workbuddy-xdpool-account-toggle dsm-workbuddy-xdpool-account-toggle-on'}
+          title={t?.('row.accountToggleHint') ?? 'Enable this account (uncheck to keep it out of the pool)'}
+          disabled={accountBusyId === account.id}
+          onClick={() => { onToggleDisabled(account.id, !isDisabled) }}
+        >
+          <span className="dsm-workbuddy-xdpool-account-toggle-dot" />
+          {isDisabled ? (t?.('row.accountOff') ?? 'Disabled') : (t?.('row.accountInRotation') ?? 'Enabled')}
+        </button>
       </div>
-      <AccountStats
-        account={account}
-        t={t}
-        checkinBusy={checkinBusyId === account.id}
-        onClaim={onClaimCheckin}
-      />
+      <div className="dsm-workbuddy-xdpool-account-body">
+        <div className="dsm-workbuddy-xdpool-account-copy">
+          {account.expiresAt !== undefined
+            ? <span className="dsm-workbuddy-xdpool-account-meta">
+                {t?.('row.tokenExpiry', { time: formatDateTime(account.expiresAt) })
+                  ?? `token ${formatDateTime(account.expiresAt)}`}
+              </span>
+            : null}
+          {isCooling && cooldownUntil !== undefined && !Number.isNaN(cooldownUntil)
+            ? <span className="dsm-workbuddy-xdpool-account-meta">
+                {t?.('row.cooldownUntil', { time: formatTime(cooldownUntil) }) ?? `until ${formatTime(cooldownUntil)}`}
+                {' · '}
+                {t?.('row.cooldownHits', { hits: account.rateLimitHits ?? 0 })
+                  ?? `${account.rateLimitHits ?? 0} hit(s)`}
+              </span>
+            : null}
+          {modelCooldowns.length > 0
+            ? <div className="dsm-workbuddy-xdpool-account-modelcool">
+                {modelCooldowns.map(mc => (
+                  <span key={mc.modelId} className="dsm-workbuddy-xdpool-account-modelcool-chip">
+                    {t?.('row.modelCooling', { model: mc.modelId, time: formatDateTime(mc.until) })
+                      ?? `${mc.modelId} cooling to ${formatDateTime(mc.until)}`}
+                  </span>
+                ))}
+              </div>
+            : null}
+        </div>
+        <AccountStats
+          account={account}
+          t={t}
+          checkinBusy={checkinBusyId === account.id}
+          onClaim={onClaimCheckin}
+        />
+      </div>
     </div>
   )
 }

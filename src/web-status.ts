@@ -298,7 +298,14 @@ export async function poolWebStatus(
   }
 
   const cooling = rows.filter(row => row.cooling).length
-  const firstUsable = accounts.find(account => account.cooldownUntilMs <= now)
+    // "In use now" is what actually served last, not what would serve next:
+    // under `balanced` the next pick is a weighted draw, so there is no fixed
+    // "next account" to report. Falls back to the head of the usable list before
+    // the first request of the process, when nothing has served yet.
+    const lastServed = deps.pool.lastServedId()
+    const firstUsable = lastServed !== undefined
+      ? accounts.find(account => account.id === lastServed)
+      : accounts.find(account => account.cooldownUntilMs <= now)
 
   let shim: { running: boolean; baseUrl?: string }
   if (deps.shim === undefined) {

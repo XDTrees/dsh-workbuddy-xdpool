@@ -308,3 +308,83 @@ describe('adapter', () => {
     expect(shim.token().length).toBeGreaterThan(0)
   })
 })
+
+describe('credit exhaustion (regression)', () => {
+  /**
+   * A fetch stub that answers HTTP 402 (credits spent) for the given tokens and
+   * serves an SSE stream otherwise. Exercises the account-wide cool path: an
+   * exhausted account must be skipped entirely, not merely for one model.
+   */
+  function exhaustedFetch(exhausted: Set<string>) {
+    return async (_url: unknown, init: RequestInit): Promise<Response> => {
+      const headers = init.headers as Record<string, string>
+      const token = (headers['Authorization'] ?? '').replace('Bearer ', '')
+      if (exhausted.has(token)) {
+        return new Response(
+          JSON.stringify({ code: 14018, msg: '额度已用尽' }),
+          { status: 402, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('data: {"ok":true}\n\ndata: [DONE]\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }
+  }
+
+  it('cools the whole account, so every model skips it', async () => {
+    const pool = new WorkBuddyAccountPool({ authDirs: [await fakeAuthDir(1)] })
+    await pool.scan()
+    const only = (await pool.acquire())!
+
+    pool.penalizeExhausted(only.id)
+
+    // Account-wide: a DIFFERENT model must not pick it either. A model-level
+    // penalty would still hand this account back for another model.
+    expect(await pool.acquire('hy3')).toBeUndefined()
+    expect(await pool.acquire('deepseek-v4.1-flash')).toBeUndefined()
+    expect(pool.list()[0]!.cooldownUntilMs).toBeGreaterThan(Date.now())
+  })
+
+  it('rotates to a healthy account instead of failing the request', async () => {
+    const pool = new WorkBuddyAccountPool({ authDirs: [await fakeAuthDir(2)] })
+    await pool.scan()
+    // Whichever account the pool tries first is the one with no credits left.
+    const doomed = (await pool.acquire())!
+    pool.resetCooldowns()
+
+    const client = new WorkBuddyUpstreamClient({
+      fetchImpl: exhaustedFetch(new Set([doomed.credential.accessToken])) as never,
+    })
+    const shim = createWorkBuddyShim({ pool, client, catalog: new WorkBuddyCatalog() })
+    shims.push(shim)
+    await shim.ready
+
+    const response = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${shim.token()}` },
+      body: JSON.stringify({ model: 'hy3', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+
+    // The request SUCCEEDS on the other account; a 402 would mean the shim
+    // treated credit exhaustion as terminal.
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('[DONE]')
+    // The exhausted account is cooled account-wide for later requests too.
+    expect(pool.list().filter(a => a.cooldownUntilMs > Date.now())).toHaveLength(1)
+  })
+
+  it('records only the account that actually served', async () => {
+    const pool = new WorkBuddyAccountPool({ authDirs: [await fakeAuthDir(2)] })
+    await pool.scan()
+
+    // Acquiring does NOT record: picking an account is not serving with it.
+    const tried = await pool.acquire()
+    expect(tried).toBeDefined()
+    expect(pool.lastServedId()).toBeUndefined()
+
+    // The shim records the account once the upstream answers 200.
+    pool.noteServed(tried!.id)
+    expect(pool.lastServedId()).toBe(tried!.id)
+  })
+})
