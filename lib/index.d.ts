@@ -1848,6 +1848,7 @@ interface PoolWebAutomation {
   reportHours: readonly number[];
   taskHours: readonly number[];
   streakHours: readonly number[];
+  travelHours: readonly number[];
   jobs: {
     checkin: PoolWebAutomationJob;
     report: PoolWebAutomationJob;

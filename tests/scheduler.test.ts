@@ -13,6 +13,7 @@
  * The fake upstream records every call, which is how "never called" is asserted.
  */
 
+import { readFileSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,6 +21,7 @@ import { describe, expect, it } from 'vitest'
 import { WorkBuddyAccountPool } from '../src/accounts.ts'
 import type { WorkBuddyCredential } from '../src/accounts.ts'
 import { WorkBuddyScheduler, dayKey, isFireHour } from '../src/scheduler.ts'
+import { AUTOMATION_JOB_KINDS } from '../src/scheduler.ts'
 import type { WorkBuddyTask, WorkBuddyUpstreamClient } from '../src/upstream.ts'
 
 /** Write a fake auth directory holding `count` CN accounts. */
@@ -1018,5 +1020,27 @@ describe('streak redemption and travel', () => {
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(upstream.calls).toContain('buddyAgree')
     expect(upstream.calls).toContain('buddyAdoptFirst')
+  })
+})
+
+describe('automation job list parity', () => {
+  /** The kinds the CARD renders, read off its source. */
+  function cardJobKinds(): string[] {
+    // Read as text rather than importing the card: importing the component
+    // drags in the host's CSS modules, which this Node test environment
+    // cannot load. Parsing the one line it declares the list on is enough,
+    // and the failure mode it guards against is exactly a stale list.
+    const src = readFileSync(new URL('../src/client/PoolCard.tsx', import.meta.url), 'utf8')
+    const match = /AUTOMATION_JOBS = \[([^\]]+)\]/.exec(src)
+    if (match === null) throw new Error("AUTOMATION_JOBS not found in PoolCard.tsx")
+    return [...(match[1] ?? '').matchAll(/'([a-z]+)'/g)].map(m => m[1] ?? '')
+  }
+
+  it('shows every job the scheduler runs, in the same order', () => {
+    // Two hand-written lists have to agree. The card renders one row per entry
+    // in AUTOMATION_JOBS; a kind the scheduler runs but the card omits is
+    // invisible — it works, and the user never sees that it does. That is
+    // exactly how the buddy trip went missing.
+    expect(cardJobKinds()).toEqual([...AUTOMATION_JOB_KINDS])
   })
 })

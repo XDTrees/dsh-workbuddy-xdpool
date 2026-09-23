@@ -132,7 +132,10 @@ function formatDateTime(value: string | undefined): string {
 const AUTOMATION_POLL_MS = 2000
 const AUTOMATION_POLL_ATTEMPTS = 90
 
-const AUTOMATION_JOBS = ['report', 'tasks', 'checkin', 'streak'] as const
+// The card renders one row per kind, and the list must match the scheduler's
+// `AUTOMATION_JOB_KINDS` exactly — they are two hand-written lists that have to
+// agree, and a kind missing here is invisible (the job runs, nothing shows it).
+export const AUTOMATION_JOBS = ['checkin', 'report', 'tasks', 'streak', 'travel'] as const
 
 export type AutomationJobKind = typeof AUTOMATION_JOBS[number]
 
@@ -145,6 +148,7 @@ function automationHours(status: PoolWebStatus, kind: AutomationJobKind): readon
     case 'tasks': return automation.taskHours
     case 'checkin': return automation.checkinHours
     case 'streak': return automation.streakHours
+    case 'travel': return automation.travelHours
   }
 }
 
