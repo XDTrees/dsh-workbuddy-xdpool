@@ -9,13 +9,12 @@ coverage/
 .env
 .DS_Store
 .dsh-vision-router/
-# Release 正文（由工作流从 CHANGELOG 抽取）
-release-body.md
 
-# 临时：本地 API 调用用
+# 本地用的一次性/中间文件，不属于仓库内容
+.ghtok
 .gh-token.tmp
-# 临时/中间文件
-.m.txt
+release-body.md
 .releases.json
-# commit message 暂存文件
+.release-bodies.json
+.m.txt
 .cm.txt
