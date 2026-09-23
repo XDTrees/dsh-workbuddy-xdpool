@@ -1,0 +1,6 @@
+ci(release): 手动触发默认不发布，加 publish 开关
+
+workflow_dispatch 原本会一路跑到 npm publish，也就是说没法用它验证
+CI——一触发就真的发出去一个版本。加一个布尔输入 publish（默认 false）：
+手动触发只跑构建+测试，确实要重发时再勾上；tag 推送路径不受影响，
+照旧发布。

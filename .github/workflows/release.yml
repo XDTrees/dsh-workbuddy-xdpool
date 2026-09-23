@@ -17,8 +17,14 @@ on:
   push:
     tags:
       - 'v*'
-  # 允许手动重跑，便于失败后重试而不必重新打 tag
+  # 手动触发默认只跑构建+测试，不发版——这样可以用它验证 CI 而不误发 npm。
+  # 确实要就着手动重发时，勾上 publish 输入。
   workflow_dispatch:
+    inputs:
+      publish:
+        description: '手动触发时也执行发布（默认只跑到测试）'
+        type: boolean
+        default: false
 
 permissions:
   id-token: write # OIDC：npm 据此确认「是本人授权的 workflow」
@@ -101,10 +107,12 @@ jobs:
         run: ./node_modules/.bin/vitest run
 
       - name: Publish to npm
+        if: github.event_name == 'push' || inputs.publish
         # OIDC 自动生效；npm CLI 会先尝试 OIDC，再回退到传统 token
         run: npm publish --ignore-scripts --access public
 
       - name: Create the GitHub release
+        if: github.event_name == 'push' || inputs.publish
         # 只推 tag 不会在 Releases 页面产生条目——那需要一个 Release 对象。
         # 缺了这一步，npm 上有新版而 Releases 页面停在上一个版本，
         # 看页面的人会以为没发。正文从 CHANGELOG 抽同版本那一段。
