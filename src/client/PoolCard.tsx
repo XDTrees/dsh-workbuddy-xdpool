@@ -25,6 +25,7 @@ import {
   POOL_RESCAN_PATH,
   POOL_STATUS_PATH,
   type PoolWebAccount,
+  type PoolWebAutomationJob,
   type PoolWebModel,
   type PoolWebStatus,
   type PoolRegion,
@@ -109,6 +110,35 @@ function formatDateTime(value: string | undefined): string {
   return new Intl.DateTimeFormat(undefined, {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   }).format(new Date(ms))
+}
+
+/**
+ * The automation jobs, in the order they run.
+ *
+ * The order is the contract: the report has to land before the task pass, or
+ * the task pass reads progress the report would have lit. `hoursOf` reads the
+ * matching hour list off the status document so the panel stays in step with
+ * whatever schedule the scheduler is actually running on.
+ */
+const AUTOMATION_JOBS = ['report', 'tasks', 'checkin', 'streak'] as const
+
+type AutomationJobKind = typeof AUTOMATION_JOBS[number]
+
+/** Read one job's configured hours off the status document. */
+function automationHours(status: PoolWebStatus, kind: AutomationJobKind): readonly number[] {
+  const automation = status.automation
+  if (automation === undefined) return []
+  switch (kind) {
+    case 'report': return automation.reportHours
+    case 'tasks': return automation.taskHours
+    case 'checkin': return automation.checkinHours
+    case 'streak': return automation.streakHours
+  }
+}
+
+/** Read one job's last-run record off the status document. */
+function automationJob(status: PoolWebStatus, kind: AutomationJobKind): PoolWebAutomationJob | undefined {
+  return status.automation?.jobs[kind]
 }
 
 function dotColor(status: 'ok' | 'error' | 'idle'): string {
@@ -227,6 +257,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [cooldownBusy, setCooldownBusy] = useState(false)
+  const [automationBusy, setAutomationBusy] = useState(false)
   const [flash, setFlash] = useState<string | undefined>(undefined)
   /** Account id whose daily claim is currently in flight. */
   const [checkinBusyId, setCheckinBusyId] = useState<string | undefined>(undefined)
@@ -473,6 +504,41 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     }
   }
 
+  /**
+   * Switch the daily-points automation on or off.
+   *
+   * The whole `automation` object is written as one key, because that is how the
+   * settings document stores it: the schedule fields must be carried along, or a
+   * save would drop the hour lists the scheduler is running on.
+   */
+  const setAutomationEnabled = async (enabled: boolean): Promise<void> => {
+    const write = settingsScope?.set
+    if (write === undefined) {
+      setError(t?.('row.modelsSaveError', { message: 'settings scope is read-only' })
+        ?? 'settings scope is read-only')
+      return
+    }
+    const existing = status?.automation
+    setAutomationBusy(true)
+    setFlash(undefined)
+    try {
+      await write.call(settingsScope, 'automation', {
+        ...existing === undefined ? {} : {
+          checkinHours: [...existing.checkinHours],
+          reportHours: [...existing.reportHours],
+          taskHours: [...existing.taskHours],
+          streakHours: [...existing.streakHours],
+        },
+        enabled,
+      })
+      await refresh(activeRegion)
+    } catch (cause: unknown) {
+      if (mounted.current) setError(String(cause))
+    } finally {
+      if (mounted.current) setAutomationBusy(false)
+    }
+  }
+
   const saveModels = async (): Promise<void> => {
     if (draft === undefined || status === undefined) return
     if (enabledCount === 0) {
@@ -665,6 +731,60 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 </div>
               </div>
 
+              {/* Daily-points automation: the schedule and each job's last run.
+                  Off by default, so the panel leads with the switch and only
+                  spells out the schedule once it is on. */}
+              {status?.automation === undefined ? null
+                : <section className="dsm-workbuddy-xdpool-auto" aria-label={t?.('row.autoTitle') ?? 'Automation'}>
+                    <div className="dsm-workbuddy-xdpool-auto-head">
+                      <span className="dsm-workbuddy-xdpool-auto-title">
+                        {t?.('row.autoTitle') ?? 'Automation'}
+                      </span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={status.automation.enabled}
+                        disabled={!settingsWritable || automationBusy}
+                        className={`dsm-workbuddy-xdpool-auto-switch${status.automation.enabled ? ' dsm-workbuddy-xdpool-auto-switch-on' : ''}`}
+                        onClick={() => { void setAutomationEnabled(!status.automation.enabled) }}
+                      >
+                        {automationBusy
+                          ? (t?.('row.autoBusy') ?? 'Saving…')
+                          : status.automation.enabled
+                            ? (t?.('row.autoOn') ?? 'On')
+                            : (t?.('row.autoOff') ?? 'Off')}
+                      </button>
+                    </div>
+                    <p className="dsm-workbuddy-xdpool-auto-hint">
+                      {status.automation.enabled
+                        ? (t?.('row.autoHintOn') ?? 'Reports activity, claims task rewards and checks in once a day.')
+                        : (t?.('row.autoHintOff') ?? 'Off: no background requests are made for you.')}
+                    </p>
+                    {status.automation.enabled
+                      ? <div className="dsm-workbuddy-xdpool-auto-jobs">
+                          {AUTOMATION_JOBS.map(kind => {
+                            const job = automationJob(status, kind)
+                            const hours = automationHours(status, kind)
+                            const label = t?.(`row.autoJob_${kind}`) ?? kind
+                            return (
+                              <div key={kind} className="dsm-workbuddy-xdpool-auto-job">
+                                <span className="dsm-workbuddy-xdpool-auto-job-name">{label}</span>
+                                <span className="dsm-workbuddy-xdpool-auto-job-when">
+                                  {hours.length === 0
+                                    ? (t?.('row.autoHourNone') ?? 'not scheduled')
+                                    : hours.map(hour => `${String(hour).padStart(2, '0')}:00`).join(' · ')}
+                                </span>
+                                <span className="dsm-workbuddy-xdpool-auto-job-last">
+                                  {job?.lastRunDate === undefined
+                                    ? (t?.('row.autoNever') ?? 'not run yet')
+                                    : `${job.lastRunDate} · ${job.ok}${job.failed > 0 ? `/${job.failed}` : ''}`}
+                                </span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      : null}
+                  </section>}
               {flash === undefined ? null
                 : <p className="dsm-workbuddy-xdpool-note">{flash}</p>}
               {error === undefined ? null

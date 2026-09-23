@@ -178,7 +178,55 @@ export interface PoolWebStatus {
   /** Every region holding at least one account, in display order. */
   regions: readonly PoolRegion[]
   shim: { running: boolean; baseUrl?: string }
+  /** Daily-points automation state, so the card can show what ran and when. */
+  automation: PoolWebAutomation
 }
+
+/** One automation job's last run, as shown on the card. */
+export interface PoolWebAutomationJob {
+  /** `YYYY-MM-DD` of the last run in this process, if it has run. */
+  lastRunDate?: string
+  /** Accounts that finished without error on the last run. */
+  ok: number
+  /** Accounts that failed on the last run (each one skipped, the run continued). */
+  failed: number
+  /** Credits claimed by the task job on the last run. */
+  credit: number
+  /** Energy claimed by the task job on the last run. */
+  energy: number
+  /** Tasks claimed by the task job on the last run. */
+  claimed: number
+  /** One-line summary of the last run. */
+  message?: string
+}
+
+/**
+ * Automation block on the status document.
+ *
+ * Carries the schedule and each job's last outcome so the card can answer
+ * "is it on, when does it run, and what did it last do" without reaching into
+ * the scheduler itself.
+ */
+export interface PoolWebAutomation {
+  /** Master switch, mirrored from the saved config. */
+  enabled: boolean
+  /** Whether the loop is currently running. */
+  running: boolean
+  /** Configured hours per job, so the card can show the schedule. */
+  checkinHours: readonly number[]
+  reportHours: readonly number[]
+  taskHours: readonly number[]
+  streakHours: readonly number[]
+  jobs: {
+    checkin: PoolWebAutomationJob
+    report: PoolWebAutomationJob
+    tasks: PoolWebAutomationJob
+    streak: PoolWebAutomationJob
+  }
+  /** Claimable tasks seen on the most recent task pass, across accounts. */
+  claimableSeen: number
+}
+
 
 /**
  * The two gateways, matching the provider ids the host registers. `cn` is the

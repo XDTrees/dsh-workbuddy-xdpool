@@ -20,6 +20,7 @@ import {
   createWorkBuddyAdapter,
   type WorkBuddyAdapter,
 } from './adapter.ts'
+import { WorkBuddyScheduler, type AutomationOptions } from './scheduler.ts'
 import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 import { buildStatus } from './status.ts'
 import { regionOf, WorkBuddyUpstreamClient, type WorkBuddyRegion } from './upstream.ts'
@@ -116,6 +117,12 @@ export interface Config {
    */
   modelSelectionCn?: ModelSelectionConfig
   modelSelectionGlobal?: ModelSelectionConfig
+  /**
+   * Daily-points automation. Absent means off: the scheduler makes upstream
+   * calls on the user behalf, so it stays opt-in rather than surprising a
+   * fresh install with background traffic.
+   */
+  automation?: AutomationConfig
 }
 
 /** One region's saved model selection. */
@@ -125,8 +132,53 @@ export interface ModelSelectionConfig {
   contextBudgets?: Record<string, number>
 }
 
+/**
+ * Daily-points automation.
+ *
+ * Absent means off: the scheduler makes upstream calls on the user behalf, so
+ * it stays opt-in rather than surprising a fresh install with background
+ * traffic. Each job carries its own hour list so the passes can be spread out
+ * (or pushed off-peak) without disabling any of them.
+ *
+ * Ordering note: the report job must run before the task job. A report is what
+ * lights the growth streak and unlocks the `first_buddy` family, so a task pass
+ * that ran first would read counters before they could have moved.
+ */
+export interface AutomationConfig {
+  /** Master switch for every automation job. Absent reads as false. */
+  enabled?: boolean
+  /** Hours (local, 0-23) at which the daily check-in runs. */
+  checkinHours?: number[]
+  /** Hours at which the activity report runs. Keep ahead of `taskHours`. */
+  reportHours?: number[]
+  /** Hours at which tasks are enrolled in and claimed. */
+  taskHours?: number[]
+  /** Hours at which streak redemption runs. */
+  streakHours?: number[]
+  /** How long an account rests after its credits run out, in milliseconds. */
+  exhaustCooldownMs?: number
+}
+
+
 /** Upper bound the card offers as the "default" context window, in tokens. */
 export const DEFAULT_CONTEXT_BUDGET = 200_000
+
+/**
+ * Fold a saved automation block into scheduler options.
+ *
+ * Absent means off, stated once here so every caller agrees: the card writes
+ * `enabled` as a real boolean, and a config that never touched the section must
+ * not accidentally arm background upstream traffic.
+ */
+export function automationOptions(automation: AutomationConfig | undefined): AutomationOptions {
+  return {
+    enabled: automation?.enabled === true,
+    ...automation?.checkinHours === undefined ? {} : { checkinHours: automation.checkinHours },
+    ...automation?.reportHours === undefined ? {} : { reportHours: automation.reportHours },
+    ...automation?.taskHours === undefined ? {} : { taskHours: automation.taskHours },
+    ...automation?.streakHours === undefined ? {} : { streakHours: automation.streakHours },
+  }
+}
 
 /**
  * One region's model-selection schema.
@@ -141,6 +193,28 @@ const modelSelectionSchema = z.object({
   imageModelIds: z.array(z.string()).description('Model ids accepting image input in this region (absent = follow upstream)'),
   contextBudgets: z.dict(z.number().step(1).min(1)).description('Per-model context-window override for this region'),
 })
+
+/**
+ * Automation schema.
+ *
+ * `enabled` carries a real default (false) because the scheduler reads it on
+ * every tick and a missing field must mean "off" rather than "undefined".
+ * The hour lists fall back in the scheduler itself, so they stay optional here
+ * and an absent list keeps the documented schedule.
+ *
+ * `exhaustCooldownMs` is mirrored from the pool options: the card offers it as
+ * part of the automation block, since how long a spent account rests only
+ * matters to the automation that has to work around it.
+ */
+const automationSchema = z.object({
+  enabled: z.boolean().default(false).description('Run the daily points automation'),
+  checkinHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for the daily check-in'),
+  reportHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for the activity report (runs before tasks)'),
+  taskHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for task enrolment and claiming'),
+  streakHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for streak redemption'),
+  exhaustCooldownMs: z.number().step(1).min(1000).description('How long a spent account rests, in milliseconds'),
+})
+
 
 /** Settings key holding one region's saved selection. */
 export const modelSelectionKeyFor = (region: 'cn' | 'global'): string =>
@@ -166,6 +240,8 @@ export const Config: z<Config> = z.object({
   contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Legacy shared context budgets; used by a region with no per-region selection yet'),
   modelSelectionCn: modelSelectionSchema.description('Model selection for the domestic gateway'),
   modelSelectionGlobal: modelSelectionSchema.description('Model selection for the international gateway'),
+  automation: automationSchema.description('Daily points automation (activity report, task claiming, check-in)'),
+
 })
 
 /** Everything the CLI needs from a live plugin instance. */
@@ -179,6 +255,9 @@ export interface WorkBuddyPoolApi {
   rescan(): Promise<number>
   status(includeCredits?: boolean): Promise<Awaited<ReturnType<typeof buildStatus>>>
   resetCooldowns(): void
+  /** Daily-points automation; assembled with the core, inert until started. */
+  scheduler: WorkBuddyScheduler
+
 }
 
 /** Live API, published for the CLI. */
@@ -203,14 +282,17 @@ export function setApi(next: WorkBuddyPoolApi | undefined): void {
  * whichever list happened to be fetched first (always the CN one, since the
  * seeding step read `accounts[0]`).
  */
-export function createCore(logger?: { warn(...args: unknown[]): void }) {
+export function createCore(logger?: { warn(...args: unknown[]): void; info?(...args: unknown[]): void }) {
   const client = new WorkBuddyUpstreamClient()
   const pool = new WorkBuddyAccountPool({ ...logger === undefined ? {} : { logger }, client })
   const catalogs = {
     cn: new WorkBuddyCatalog(),
     global: new WorkBuddyCatalog(),
   } as const
-  return { pool, catalogs, client }
+  // The scheduler is assembled here but stays inert until `start()`: the CLI and
+  // the tests both build a core without wanting background traffic.
+  const scheduler = new WorkBuddyScheduler(pool, client, { ...logger === undefined ? {} : { logger } })
+  return { pool, catalogs, client, scheduler }
 }
 
 /**
@@ -246,7 +328,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     onChange() { applyConfigFromSource() },
   }
   const applyConfigFromSource = (): void => {
-    const { authFile, cooldownMs, distribution, disabledAccountIds, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal } = current()
+    const { authFile, cooldownMs, distribution, disabledAccountIds, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal, automation } = current()
     core.pool.applyConfig({
       ...authFile === undefined
         ? {}
@@ -256,6 +338,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       // drains one account at a time rather than splitting the spend.
       distribution: distribution ?? 'priority',
       ...disabledAccountIds === undefined ? {} : { disabledAccountIds },
+      // How long a spent account rests also shapes the automation: the task pass
+      // skips a cooling account, so a short window means fewer accounts are
+      // excluded when a job runs.
+      ...automation?.exhaustCooldownMs === undefined ? {} : { exhaustCooldownMs: automation.exhaustCooldownMs },
     })
     // The model selection travels the same settings path as the pool options:
     // the card writes it through the settings section and each catalog filters
@@ -272,6 +358,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     core.catalogs.cn.applySelection(modelSelectionCn ?? legacySelection)
     core.catalogs.global.applySelection(modelSelectionGlobal ?? legacySelection)
+    // The automation reads the same settings document, so a save on the card
+    // re-arms it without a host restart. An absent block means off, which is why
+    // this passes `enabled: false` explicitly rather than leaving it undefined.
+    core.scheduler.applyConfig(automationOptions(automation))
   }
   // `settings` is declared in this plugin top-level `inject`, so the service is
   // available synchronously here. Calling `installSection` without that
@@ -358,6 +448,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     stopped = true
     void shims.cn.close()
     void shims.global.close()
+    // The scheduler holds a timer; stop it before the shims so a tick in flight
+    // cannot reach an upstream client whose base has already gone.
+    core.scheduler.stop()
   })
 
   // Same-origin routes backing the WorkBuddy XD Pool settings card. `webServer`
@@ -368,6 +461,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     catalogs: core.catalogs,
     client: core.client,
     shim: () => shimInfo('cn'),
+    // The automation is pool-wide, not per region, so both routes read the same
+    // scheduler snapshot.
+    scheduler: () => core.scheduler.status(),
     // The settings section owns the model selection; this is the write half of
     // the card's save round-trip. It goes through `settingsScope.set` (below)
     // so the change lands in the same document the model picker reads.
@@ -415,6 +511,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       core.pool.resetCooldowns()
     },
   }
+  // Start the automation last, once every runtime object exists: a tick firing
+  // immediately must not find a half-applied core. The scheduler no-ops while
+  // `enabled` is false, so this is safe on an install that never opened the card.
+  core.scheduler.start()
 
   // Register once BOTH loopback listeners hold a port: each adapter reads its
   // shim origin at construction time, so neither can be built any earlier.

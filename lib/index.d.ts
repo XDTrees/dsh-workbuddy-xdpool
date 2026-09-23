@@ -102,6 +102,32 @@ export declare function classifyUpstreamError(status: number, body: string): Ups
  * form, so the pool can resume exactly when the window reopens.
  */
 export declare function parseRateLimitReset(body: string): number | undefined;
+/** One growth-centre task, flattened from the upstream's loosely-shaped entry. */
+interface WorkBuddyTask {
+  /** Upstream task code; the claim path is built from it. */
+  taskCode: string;
+  title: string;
+  /** Reward in credits, when the task declares one. */
+  credit: number;
+  /** Reward in energy, when the task declares one. */
+  energy: number;
+  /** Whether the task carries any reward at all. */
+  hasReward: boolean;
+  /** Progress target; 0 is a valid value (a task with no counter). */
+  target: number;
+  /** Current progress; 0 is a valid value. */
+  current: number;
+  /** Upstream enrolment state: not_accepted / accepted / claimed. */
+  acceptStatus: string;
+  /** Upstream task state, e.g. `complete`. */
+  status: string;
+  /** Progress reached its target and the reward is still outstanding. */
+  claimable: boolean;
+  /** Reward already collected. */
+  claimed: boolean;
+  /** Upstream marked the task locked (not yet reachable). */
+  locked: boolean;
+}
 export declare class WorkBuddyUpstreamClient {
   private readonly fetchImpl;
   private readonly clientVersion;
@@ -139,6 +165,40 @@ export declare class WorkBuddyUpstreamClient {
   fetchCheckinStatus(credential: WorkBuddyCredential): Promise<WorkBuddyCheckinStatus>;
   /** Claim today's check-in reward. The browser route guards this mutation. */
   claimDailyCheckin(credential: WorkBuddyCredential): Promise<WorkBuddyCheckinClaim>;
+  /**
+   * Report one chat-activity event to the growth system.
+   *
+   * The body is an ARRAY holding a single `chat_request_send` event, and every
+   * field is filled in: a three-field minimal event is accepted with 200 and
+   * then silently dropped, so the full shape is load-bearing rather than
+   * cosmetic. `userId` is the one field the server actually keys on — without
+   * it the request still answers 200 and scores nothing.
+   *
+   * One report per account per day is the quota the reference panel settled on;
+   * a single report lights the growth streak and unlocks the `first_buddy`
+   * family, which is why this runs before the task-centre pass.
+   */
+  reportActivity(credential: WorkBuddyCredential, conversationId?: string): Promise<void>;
+  /**
+   * Read back the growth streak in days.
+   *
+   * This is the read-only oracle for {@link reportActivity}: a report that
+   * returned 200 yet left the streak untouched was silently dropped (a missing
+   * `userId` is the usual cause), so callers verify instead of trusting the
+   * status code.
+   *
+   * Two shape traps, both measured against the live upstream:
+   *
+   * - The path carries NO `/v2` prefix, unlike its sibling task endpoints under
+   *   `/v2/activity/growth/*`. Asking for the `/v2` form does not 404; it
+   *   answers with a body that carries no `streak` object at all.
+   * - The counter is nested as `data.streak.days`, not `data.days`. Reading the
+   *   flat field yields a constant 0, which would make every successful report
+   *   look like a silent drop.
+   *
+   * Returns 0 only when the field is genuinely absent.
+   */
+  growthStreakDays(credential: WorkBuddyCredential): Promise<number>;
   /** Legacy thin wrapper kept for `status`/`doctor`: returns raw envelope data. */
   credits(credential: WorkBuddyCredential): Promise<{
     ok: true;
@@ -146,6 +206,40 @@ export declare class WorkBuddyUpstreamClient {
   } | {
     ok: false;
     message: string;
+  }>;
+  /**
+   * Fetch the growth task list for one account.
+   *
+   * The upstream answers `data.tasks[]`, and `claimable` is derived locally —
+   * the upstream does not mark it. Only a task whose progress reached its
+   * target and that is not already claimed counts as eligible.
+   */
+  listTasks(credential: WorkBuddyCredential): Promise<readonly WorkBuddyTask[]>;
+  /**
+   * Accept (enrol in) tasks by code.
+   *
+   * Accepting is the "sign up" half: it produces no progress by itself, and the
+   * upstream answers success for an already-accepted task, so replaying this is
+   * safe. Progress is lit by real activity (a chat, an activity report).
+   */
+  acceptTasks(credential: WorkBuddyCredential, taskCodes: readonly string[]): Promise<void>;
+  /**
+   * Claim one task's reward.
+   *
+   * Two details differ from list/accept and are load-bearing:
+   *
+   * - The task code rides the PATH, not the body.
+   * - It is served by the web origin, not the chat host, and only when the
+   *   request carries the growth-centre Origin/Referer plus
+   *   `x-client-platform: web`. The chat host's `/reward/claim` path does not
+   *   exist and answers 400 "task not completed".
+   *
+   * A repeat claim answers `already_claimed` with zero credit, which is treated
+   * as success so the caller can stay idempotent.
+   */
+  claimTaskReward(credential: WorkBuddyCredential, taskCode: string): Promise<{
+    credit: number;
+    energy: number;
   }>;
 }
 //#endregion
@@ -541,6 +635,161 @@ interface WorkBuddyAdapter {
  */
 export declare function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBuddyAdapter;
 //#endregion
+//#region src/scheduler.d.ts
+/** Which jobs the automation runs, and when. */
+interface AutomationOptions {
+  /** Master switch; false stops every job. */
+  enabled?: boolean;
+  /** Hour list for the daily check-in job. */
+  checkinHours?: readonly number[];
+  /** Hour list for the task-centre job (accept + claim). */
+  taskHours?: readonly number[];
+  /** Hour list for the activity-report job. */
+  reportHours?: readonly number[];
+  /** Hour list for the streak-redemption job. */
+  streakHours?: readonly number[];
+  /** Per-account serial delay, in milliseconds. */
+  accountDelayMs?: number;
+  /** Override the clock, for tests. */
+  now?: () => Date;
+  /** Logger; defaults to a no-op so tests stay quiet. */
+  logger?: SchedulerLogger;
+}
+/** Logger surface, kept structural so any host logger fits. */
+interface SchedulerLogger {
+  info?(...args: unknown[]): void;
+  warn?(...args: unknown[]): void;
+}
+/** One job's last-run record, surfaced on the status document. */
+interface AutomationJobState {
+  /** `YYYY-MM-DD` of the last completed run, or undefined if it never ran. */
+  lastRunDate?: string;
+  /** Epoch ms of the last completed run. */
+  lastRunAtMs?: number;
+  /** Accounts that completed without throwing. */
+  ok: number;
+  /** Accounts that threw (each one skipped, the run continued). */
+  failed: number;
+  /** Credits claimed by the task job on the last run. */
+  credit: number;
+  /** Energy claimed by the task job on the last run. */
+  energy: number;
+  /** Tasks claimed by the task job on the last run. */
+  claimed: number;
+  /** Human-readable summary of the last run. */
+  message?: string;
+}
+/** Automation snapshot for the status document and the card. */
+interface AutomationStatus {
+  enabled: boolean;
+  /** Whether the loop is running. */
+  running: boolean;
+  checkinHours: readonly number[];
+  taskHours: readonly number[];
+  reportHours: readonly number[];
+  streakHours: readonly number[];
+  jobs: {
+    checkin: AutomationJobState;
+    report: AutomationJobState;
+    tasks: AutomationJobState;
+    streak: AutomationJobState;
+  };
+  /** Claimable tasks seen on the most recent task pass, across accounts. */
+  claimableSeen: number;
+}
+/**
+ * The points automation.
+ *
+ * Owns a single timer loop. Construction is inert — nothing runs until
+ * {@link start}, and {@link stop} is idempotent so a plugin teardown that fires
+ * twice is harmless.
+ */
+declare class WorkBuddyScheduler {
+  private readonly pool;
+  private readonly client;
+  private readonly logger;
+  private readonly now;
+  private readonly delayMs;
+  private enabled;
+  private checkinHours;
+  private taskHours;
+  private reportHours;
+  private streakHours;
+  private timer;
+  private running;
+  /** Guards against a slow run overlapping the next tick. */
+  private busy;
+  /**
+   * Set once {@link stop} is called.
+   *
+   * Deliberately false before `start`: the loop is not running yet, but a
+   * manual `tick` must still work. `stop` is what makes a run abandon the
+   * accounts it has not reached yet.
+   */
+  private stopped;
+  private readonly states;
+  private claimableSeen;
+  constructor(pool: WorkBuddyAccountPool, client: WorkBuddyUpstreamClient, options?: AutomationOptions);
+  /** Apply a new configuration; safe to call while running. */
+  applyConfig(options: AutomationOptions): void;
+  /** Hours for one job, used by the loop and the status document. */
+  private hoursOf;
+  /** Start the loop. Idempotent. */
+  start(): void;
+  /** Stop the loop. Idempotent, and safe before `start`. */
+  stop(): void;
+  /** Snapshot for the status document. */
+  status(): AutomationStatus;
+  /**
+   * One poll: run every due job, serially.
+   *
+   * Serial by design — the jobs share the same accounts and the upstream
+   * rate-limits per account, so overlapping passes would only trip that limit.
+   * A job that throws is recorded and the loop continues.
+   */
+  private tick;
+  /** Run one job against every eligible account and record the outcome. */
+  private runJob;
+  /** Compose the one-line summary shown on the card. */
+  private summarise;
+  /**
+   * Accounts to run against, in pool order.
+   *
+   * Disabled accounts are excluded here rather than filtered by the caller so a
+   * card switch takes effect on the next pass without any event plumbing.
+   */
+  private accountsInOrder;
+  /**
+   * Send one activity report, then verify it landed.
+   *
+   * The upstream answers 200 even when it drops the event, so the streak is
+   * read back as the oracle: `days > 0` means it counted. A failed read-back is
+   * logged and treated as a suspicious result, never as a retry — the report is
+   * idempotent per day, and hammering it is exactly what the one-a-day quota
+   * exists to avoid.
+   */
+  private reportOne;
+  /**
+   * The task-centre pass for one account.
+   *
+   * Order matters: enrich first (enrol in everything open), then claim. Both
+   * halves are idempotent — accepting an already-accepted task succeeds, and a
+   * repeat claim answers `already_claimed` — so a pass that dies halfway is
+   * safe to replay on the next tick.
+   */
+  private runTasks;
+  /**
+   * Streak redemption and lottery.
+   *
+   * Left as a deliberate no-op placeholder: the tier/lottery endpoints need
+   * their own round of probing against the live upstream before they can be
+   * wired safely, and a wrong call here could burn a redemption. The job slot,
+   * scheduling and status plumbing already exist, so filling it in is a
+   * self-contained change.
+   */
+  private redeemStreak;
+}
+//#endregion
 //#region src/status.d.ts
 /** One account's status row. */
 interface AccountStatus {
@@ -767,6 +1016,51 @@ interface PoolWebStatus {
     running: boolean;
     baseUrl?: string;
   };
+  /** Daily-points automation state, so the card can show what ran and when. */
+  automation: PoolWebAutomation;
+}
+/** One automation job's last run, as shown on the card. */
+interface PoolWebAutomationJob {
+  /** `YYYY-MM-DD` of the last run in this process, if it has run. */
+  lastRunDate?: string;
+  /** Accounts that finished without error on the last run. */
+  ok: number;
+  /** Accounts that failed on the last run (each one skipped, the run continued). */
+  failed: number;
+  /** Credits claimed by the task job on the last run. */
+  credit: number;
+  /** Energy claimed by the task job on the last run. */
+  energy: number;
+  /** Tasks claimed by the task job on the last run. */
+  claimed: number;
+  /** One-line summary of the last run. */
+  message?: string;
+}
+/**
+ * Automation block on the status document.
+ *
+ * Carries the schedule and each job's last outcome so the card can answer
+ * "is it on, when does it run, and what did it last do" without reaching into
+ * the scheduler itself.
+ */
+interface PoolWebAutomation {
+  /** Master switch, mirrored from the saved config. */
+  enabled: boolean;
+  /** Whether the loop is currently running. */
+  running: boolean;
+  /** Configured hours per job, so the card can show the schedule. */
+  checkinHours: readonly number[];
+  reportHours: readonly number[];
+  taskHours: readonly number[];
+  streakHours: readonly number[];
+  jobs: {
+    checkin: PoolWebAutomationJob;
+    report: PoolWebAutomationJob;
+    tasks: PoolWebAutomationJob;
+    streak: PoolWebAutomationJob;
+  };
+  /** Claimable tasks seen on the most recent task pass, across accounts. */
+  claimableSeen: number;
 }
 /**
  * The two gateways, matching the provider ids the host registers. `cn` is the
@@ -836,6 +1130,12 @@ export interface Config {
    */
   modelSelectionCn?: ModelSelectionConfig;
   modelSelectionGlobal?: ModelSelectionConfig;
+  /**
+   * Daily-points automation. Absent means off: the scheduler makes upstream
+   * calls on the user behalf, so it stays opt-in rather than surprising a
+   * fresh install with background traffic.
+   */
+  automation?: AutomationConfig;
 }
 /** One region's saved model selection. */
 export interface ModelSelectionConfig {
@@ -843,8 +1143,42 @@ export interface ModelSelectionConfig {
   imageModelIds?: string[];
   contextBudgets?: Record<string, number>;
 }
+/**
+ * Daily-points automation.
+ *
+ * Absent means off: the scheduler makes upstream calls on the user behalf, so
+ * it stays opt-in rather than surprising a fresh install with background
+ * traffic. Each job carries its own hour list so the passes can be spread out
+ * (or pushed off-peak) without disabling any of them.
+ *
+ * Ordering note: the report job must run before the task job. A report is what
+ * lights the growth streak and unlocks the `first_buddy` family, so a task pass
+ * that ran first would read counters before they could have moved.
+ */
+export interface AutomationConfig {
+  /** Master switch for every automation job. Absent reads as false. */
+  enabled?: boolean;
+  /** Hours (local, 0-23) at which the daily check-in runs. */
+  checkinHours?: number[];
+  /** Hours at which the activity report runs. Keep ahead of `taskHours`. */
+  reportHours?: number[];
+  /** Hours at which tasks are enrolled in and claimed. */
+  taskHours?: number[];
+  /** Hours at which streak redemption runs. */
+  streakHours?: number[];
+  /** How long an account rests after its credits run out, in milliseconds. */
+  exhaustCooldownMs?: number;
+}
 /** Upper bound the card offers as the "default" context window, in tokens. */
 export declare const DEFAULT_CONTEXT_BUDGET = 200000;
+/**
+ * Fold a saved automation block into scheduler options.
+ *
+ * Absent means off, stated once here so every caller agrees: the card writes
+ * `enabled` as a real boolean, and a config that never touched the section must
+ * not accidentally arm background upstream traffic.
+ */
+export declare function automationOptions(automation: AutomationConfig | undefined): AutomationOptions;
 /** Settings key holding one region's saved selection. */
 export declare const modelSelectionKeyFor: (region: 'cn' | 'global') => string;
 /**
@@ -869,6 +1203,8 @@ export interface WorkBuddyPoolApi {
   rescan(): Promise<number>;
   status(includeCredits?: boolean): Promise<Awaited<ReturnType<typeof buildStatus>>>;
   resetCooldowns(): void;
+  /** Daily-points automation; assembled with the core, inert until started. */
+  scheduler: WorkBuddyScheduler;
 }
 /** The live API, or undefined when the plugin has not applied yet. */
 export declare function currentApi(): WorkBuddyPoolApi | undefined;
@@ -885,6 +1221,7 @@ export declare function setApi(next: WorkBuddyPoolApi | undefined): void;
  */
 export declare function createCore(logger?: {
   warn(...args: unknown[]): void;
+  info?(...args: unknown[]): void;
 }): {
   pool: WorkBuddyAccountPool;
   catalogs: {
@@ -892,6 +1229,7 @@ export declare function createCore(logger?: {
     readonly global: WorkBuddyCatalog;
   };
   client: WorkBuddyUpstreamClient;
+  scheduler: WorkBuddyScheduler;
 };
 /**
  * Start the loopback endpoint, register the `workbuddy-xdpool` provider, and

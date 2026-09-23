@@ -23,6 +23,7 @@ import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
+import type { AutomationStatus } from './scheduler.ts'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_CHECKIN_PATH,
@@ -32,6 +33,7 @@ import {
   POOL_STATUS_PATH,
   type PoolWebAccount,
   type PoolWebAccountToggle,
+  type PoolWebAutomationJob,
   type PoolWebCheckin,
   type PoolWebModel,
   type PoolWebModelSelection,
@@ -50,6 +52,14 @@ export interface PoolStatusRouteOptions {
   client: WorkBuddyUpstreamClient
   /** Lazily resolve the running loopback shim, when it has bound a port. */
   shim?: () => { running: boolean; baseUrl?: string }
+  /**
+   * The daily-points automation, when the host half has one.
+   *
+   * Optional so these routes still mount on a profile that assembled a pool
+   * without a scheduler (the CLI and the tests do exactly that); the card then
+   * reports the automation as off instead of showing a broken panel.
+   */
+  scheduler?: () => AutomationStatus
   /**
    * Persist the user's model selection. Provided by the host half, which owns
    * the settings section; absent when the plugin runs without a settings
@@ -70,6 +80,16 @@ export interface PoolStatusRouteOptions {
 }
 
 /** Redact token-like content before it crosses to the browser. */
+/**
+ * A zeroed-out automation job record.
+ *
+ * Used when no scheduler is wired: the card renders the same shape either way,
+ * so an unwired profile shows zeroes rather than a missing panel.
+ */
+function emptyAutomationJob(): PoolWebAutomationJob {
+  return { ok: 0, failed: 0, credit: 0, energy: 0, claimed: 0 }
+}
+
 function safeMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error))
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[redacted token]')
@@ -318,6 +338,25 @@ export async function poolWebStatus(
     }
   }
 
+  // The automation panel reads the scheduler when one is wired, and reports the
+  // feature as off otherwise: a card showing an invented schedule would be worse
+  // than one that says it is not running.
+  const automation: AutomationStatus = deps.scheduler?.() ?? {
+    enabled: false,
+    running: false,
+    checkinHours: [],
+    reportHours: [],
+    taskHours: [],
+    streakHours: [],
+    jobs: {
+      checkin: emptyAutomationJob(),
+      report: emptyAutomationJob(),
+      tasks: emptyAutomationJob(),
+      streak: emptyAutomationJob(),
+    },
+    claimableSeen: 0,
+  }
+
   return {
     ok: accounts.length > 0 && cooling < accounts.length,
     accounts: rows,
@@ -342,6 +381,7 @@ export async function poolWebStatus(
     distribution: deps.pool.currentDistribution(),
     regions,
     shim,
+    automation,
   }
 }
 

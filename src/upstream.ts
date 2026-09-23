@@ -38,7 +38,12 @@ export interface WorkBuddyUpstreamModel {
   contextWindow: number
   maxTokens: number
   creditMultiplier?: number
-  /** Upstream image-input flag. Both gateways spell it `supportsImages`; some entries   * also carry `disabledMultimodal`, the negative spelling. Reading anything else   * reported every model as text-only, which made a vision shim register a second   * route under the same display name and split the model picker group.   */  supportsImages?: boolean
+  /** Upstream image-input flag. Both gateways spell it `supportsImages`; some entries
+   * also carry `disabledMultimodal`, the negative spelling. Reading anything else
+   * reported every model as text-only, which made a vision shim register a second
+   * route under the same display name and split the model picker group.
+   */
+  supportsImages?: boolean
   reasoning?: { supportedEfforts?: readonly string[]; defaultEffort?: string; canDisableThinking?: boolean }
   descriptionZh?: string
   descriptionEn?: string
@@ -428,7 +433,8 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
   const descriptionEn = typeof raw['descriptionEn'] === 'string' && raw['descriptionEn'] !== '' ? raw['descriptionEn'] : undefined
   const creditMultiplier = parseCreditMultiplier(raw['credits'])
   const reasoning = parseReasoning(raw['reasoning'])
-  const supportsToolCall = typeof raw['supportsToolCall'] === 'boolean' ? raw['supportsToolCall'] : undefined  const supportsImages = typeof raw['supportsImages'] === 'boolean' ? raw['supportsImages'] : undefined
+  const supportsToolCall = typeof raw['supportsToolCall'] === 'boolean' ? raw['supportsToolCall'] : undefined
+  const supportsImages = typeof raw['supportsImages'] === 'boolean' ? raw['supportsImages'] : undefined
   return {
     id,
     name,
@@ -438,9 +444,85 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
     ...reasoning === undefined ? {} : { reasoning },
     ...descriptionZh === undefined ? {} : { descriptionZh },
     ...descriptionEn === undefined ? {} : { descriptionEn },
-    ...supportsToolCall === undefined ? {} : { supportsToolCall },    ...supportsImages === undefined ? {} : { supportsImages },
+    ...supportsToolCall === undefined ? {} : { supportsToolCall },
+    ...supportsImages === undefined ? {} : { supportsImages },
   }
 }
+
+/** One growth-centre task, flattened from the upstream's loosely-shaped entry. */
+export interface WorkBuddyTask {
+  /** Upstream task code; the claim path is built from it. */
+  taskCode: string
+  title: string
+  /** Reward in credits, when the task declares one. */
+  credit: number
+  /** Reward in energy, when the task declares one. */
+  energy: number
+  /** Whether the task carries any reward at all. */
+  hasReward: boolean
+  /** Progress target; 0 is a valid value (a task with no counter). */
+  target: number
+  /** Current progress; 0 is a valid value. */
+  current: number
+  /** Upstream enrolment state: not_accepted / accepted / claimed. */
+  acceptStatus: string
+  /** Upstream task state, e.g. `complete`. */
+  status: string
+  /** Progress reached its target and the reward is still outstanding. */
+  claimable: boolean
+  /** Reward already collected. */
+  claimed: boolean
+  /** Upstream marked the task locked (not yet reachable). */
+  locked: boolean
+}
+
+/**
+ * Flatten one upstream task entry.
+ *
+ * Progress is reported two ways depending on the task: flat `current`/`target`
+ * fields, or a nested `progress: {current, target}`. The nested form wins when
+ * it carries anything, because a task that reports both puts the live counter
+ * there. Entries without a usable `task_code` are dropped — without one the
+ * claim path cannot be built.
+ */
+function parseTask(value: unknown): WorkBuddyTask | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  const taskCode = typeof raw['task_code'] === 'string' ? raw['task_code'] : ''
+  if (taskCode === '') return undefined
+
+  const num = (key: string): number => (typeof raw[key] === 'number' ? raw[key] as number : 0)
+  let current = num('current')
+  let target = num('target')
+  const progress = raw['progress']
+  if (typeof progress === 'object' && progress !== null) {
+    const nested = progress as Record<string, unknown>
+    const nestedCurrent = typeof nested['current'] === 'number' ? nested['current'] as number : 0
+    const nestedTarget = typeof nested['target'] === 'number' ? nested['target'] as number : 0
+    if (nestedTarget > 0 || nestedCurrent > 0) {
+      current = nestedCurrent
+      target = nestedTarget
+    }
+  }
+
+  const acceptStatus = typeof raw['accept_status'] === 'string' ? raw['accept_status'] : ''
+  const claimed = acceptStatus === 'claimed'
+  return {
+    taskCode,
+    title: typeof raw['title'] === 'string' && raw['title'] !== '' ? raw['title'] : taskCode,
+    credit: num('reward_credit'),
+    energy: num('reward_energy'),
+    hasReward: raw['has_reward'] === true,
+    target,
+    current,
+    acceptStatus,
+    status: typeof raw['status'] === 'string' ? raw['status'] : '',
+    claimable: !claimed && target > 0 && current >= target,
+    claimed,
+    locked: raw['locked'] === true,
+  }
+}
+
 
 export class WorkBuddyUpstreamClient {
   private readonly fetchImpl: typeof fetch
@@ -758,6 +840,106 @@ export class WorkBuddyUpstreamClient {
     }
   }
 
+  /**
+   * Report one chat-activity event to the growth system.
+   *
+   * The body is an ARRAY holding a single `chat_request_send` event, and every
+   * field is filled in: a three-field minimal event is accepted with 200 and
+   * then silently dropped, so the full shape is load-bearing rather than
+   * cosmetic. `userId` is the one field the server actually keys on — without
+   * it the request still answers 200 and scores nothing.
+   *
+   * One report per account per day is the quota the reference panel settled on;
+   * a single report lights the growth streak and unlocks the `first_buddy`
+   * family, which is why this runs before the task-centre pass.
+   */
+  async reportActivity(credential: WorkBuddyCredential, conversationId?: string): Promise<void> {
+    const conversationID = conversationId ?? `wb2api-${Date.now()}`
+    const requestID = conversationID
+    const now = Date.now()
+    const event = {
+      eventCode: 'chat_request_send',
+      timestamp: now,
+      reportDelay: 0,
+      mode: 'craft',
+      conversationId: conversationID,
+      requestId: requestID,
+      inputLength: 12,
+      requestModelId: 'deepseek-v4-flash',
+      requestModelName: 'DeepSeek V4 Flash',
+      isPlan: false,
+      isAutoExecuteTerminal: false,
+      isAutoModify: false,
+      codebaseEnable: false,
+      maxToken: 0,
+      maxSteps: 0,
+      temperature: 0,
+      maxRetries: 0,
+      mentionContexts: [] as unknown[],
+      knowledgeId: [] as unknown[],
+      knowledgeName: [] as unknown[],
+      codebaseId: '',
+      mentionContextCount: 0,
+      command: '',
+      expertId: '',
+      recommendId: '',
+      skillId: '',
+      skillCount: 0,
+      totalCount: 0,
+      fileUri: '',
+      presentAt: now,
+      traceId: '',
+      rootRequestId: requestID,
+      parentConversationId: conversationID,
+      agentName: 'default',
+      agentType: 'conversation',
+      userId: credential.uid ?? '',
+    }
+    const response = await this.fetchImpl(`${billingBase(credential)}/v2/report`, {
+      method: 'POST',
+      headers: billingHeaders(credential),
+      body: JSON.stringify([event]),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+  }
+
+  /**
+   * Read back the growth streak in days.
+   *
+   * This is the read-only oracle for {@link reportActivity}: a report that
+   * returned 200 yet left the streak untouched was silently dropped (a missing
+   * `userId` is the usual cause), so callers verify instead of trusting the
+   * status code.
+   *
+   * Two shape traps, both measured against the live upstream:
+   *
+   * - The path carries NO `/v2` prefix, unlike its sibling task endpoints under
+   *   `/v2/activity/growth/*`. Asking for the `/v2` form does not 404; it
+   *   answers with a body that carries no `streak` object at all.
+   * - The counter is nested as `data.streak.days`, not `data.days`. Reading the
+   *   flat field yields a constant 0, which would make every successful report
+   *   look like a silent drop.
+   *
+   * Returns 0 only when the field is genuinely absent.
+   */
+  async growthStreakDays(credential: WorkBuddyCredential): Promise<number> {
+    const response = await this.fetchImpl(`${chatBase(credential)}/activity/growth/streak`, {
+      headers: billingHeaders(credential),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const data = typeof envelope.data === 'object' && envelope.data !== null
+      ? envelope.data as Record<string, unknown>
+      : {}
+    const streak = typeof data['streak'] === 'object' && data['streak'] !== null
+      ? data['streak'] as Record<string, unknown>
+      : {}
+    return typeof streak['days'] === 'number' ? streak['days'] as number : 0
+  }
+
   /** Legacy thin wrapper kept for `status`/`doctor`: returns raw envelope data. */
   async credits(credential: WorkBuddyCredential): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> {
     try {
@@ -766,5 +948,88 @@ export class WorkBuddyUpstreamClient {
     } catch (error: unknown) {
       return { ok: false, message: String(error) }
     }
+  }
+
+  /**
+   * Fetch the growth task list for one account.
+   *
+   * The upstream answers `data.tasks[]`, and `claimable` is derived locally —
+   * the upstream does not mark it. Only a task whose progress reached its
+   * target and that is not already claimed counts as eligible.
+   */
+  async listTasks(credential: WorkBuddyCredential): Promise<readonly WorkBuddyTask[]> {
+    const response = await this.fetchImpl(`${chatBase(credential)}/v2/activity/growth/tasks`, {
+      headers: chatHeaders(credential),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const data = typeof envelope.data === 'object' && envelope.data !== null
+      ? envelope.data as Record<string, unknown>
+      : {}
+    const raw = Array.isArray(data['tasks']) ? data['tasks'] : []
+    const out: WorkBuddyTask[] = []
+    for (const entry of raw) {
+      const parsed = parseTask(entry)
+      if (parsed !== undefined) out.push(parsed)
+    }
+    return out
+  }
+
+  /**
+   * Accept (enrol in) tasks by code.
+   *
+   * Accepting is the "sign up" half: it produces no progress by itself, and the
+   * upstream answers success for an already-accepted task, so replaying this is
+   * safe. Progress is lit by real activity (a chat, an activity report).
+   */
+  async acceptTasks(credential: WorkBuddyCredential, taskCodes: readonly string[]): Promise<void> {
+    if (taskCodes.length === 0) return
+    const response = await this.fetchImpl(`${chatBase(credential)}/v2/activity/growth/tasks/accept`, {
+      method: 'POST',
+      headers: chatHeaders(credential),
+      body: JSON.stringify({ task_codes: [...taskCodes] }),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+  }
+
+  /**
+   * Claim one task's reward.
+   *
+   * Two details differ from list/accept and are load-bearing:
+   *
+   * - The task code rides the PATH, not the body.
+   * - It is served by the web origin, not the chat host, and only when the
+   *   request carries the growth-centre Origin/Referer plus
+   *   `x-client-platform: web`. The chat host's `/reward/claim` path does not
+   *   exist and answers 400 "task not completed".
+   *
+   * A repeat claim answers `already_claimed` with zero credit, which is treated
+   * as success so the caller can stay idempotent.
+   */
+  async claimTaskReward(credential: WorkBuddyCredential, taskCode: string): Promise<{ credit: number; energy: number }> {
+    const headers: Record<string, string> = {
+      ...billingHeaders(credential),
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://www.workbuddy.cn',
+      'Referer': 'https://www.workbuddy.cn/profile/growth-center',
+      'x-client-platform': 'web',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    }
+    const response = await this.fetchImpl(
+      `https://www.workbuddy.cn/activity/growth/tasks/${encodeURIComponent(taskCode)}/claim`,
+      { method: 'POST', headers, signal: AbortSignal.timeout(JSON_TIMEOUT_MS) },
+    )
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const data = typeof envelope.data === 'object' && envelope.data !== null
+      ? envelope.data as Record<string, unknown>
+      : {}
+    if (data['already_claimed'] === true) return { credit: 0, energy: 0 }
+    const credit = typeof data['credit'] === 'number' ? data['credit'] : 0
+    const energy = typeof data['energy'] === 'number' ? data['energy'] : 0
+    return { credit, energy }
   }
 }
