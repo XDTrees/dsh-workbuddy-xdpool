@@ -17,3 +17,5 @@ release-body.md
 # 临时/中间文件
 .m.txt
 .releases.json
+# commit message 暂存文件
+.cm.txt
