@@ -261,6 +261,15 @@ export interface PoolWebAutomationJob {
   claimed: number
   /** One-line summary of the last run. */
   message?: string
+  /**
+   * What the last run actually did, in the words of the task board.
+   *
+   * `message` is a count; this is the list a person can check off, which is
+   * what turns a row from "it ran" into "it did the things I care about".
+   */
+  detail?: readonly string[]
+  /** A pending milestone worth naming, e.g. the next streak tier countdown. */
+  progress?: string
 }
 
 /**

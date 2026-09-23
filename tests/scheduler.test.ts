@@ -338,6 +338,57 @@ describe('scheduler runs', () => {
     })
   }
 
+  it('runs a multi-hour job in EVERY one of its hours, not just the first', async () => {
+    // The cat-travel loop needs two passes a day: one to send the cat out and
+    // one to collect it. Guarding on the DATE alone capped it at a single pass,
+    // which left the cat sitting there until tomorrow — so the guard keys on the
+    // slot instead and a second hour still fires.
+    const { pool, upstream } = await harness(1)
+    upstream.buddy = { instanceId: 1, name: 'TestCat' }
+    upstream.travel = { state: 'idle', recordId: 0, dailyLimitReached: false, rewardCredit: 0 }
+    const morning = new Date(2026, 8, 7, 9, 0, 0)
+    const scheduler = build(pool, upstream, morning, { travel: [9, 21] })
+
+    await tickAt(scheduler, morning)
+    expect(upstream.calls.filter(call => call === 'travelDepart')).toHaveLength(1)
+
+    // Same hour again: the slot guard must still refuse a repeat.
+    await tickAt(scheduler, new Date(2026, 8, 7, 9, 30, 0))
+    expect(upstream.calls.filter(call => call === 'travelDepart')).toHaveLength(1)
+
+    // The evening slot: this is the pass the date guard used to swallow.
+    upstream.travel = { state: "arrived", recordId: 7, dailyLimitReached: true, rewardCredit: 10 }
+    await tickAt(scheduler, new Date(2026, 8, 7, 21, 0, 0))
+    expect(upstream.calls).toContain('travelClaim')
+  })
+  it('records what a pass actually claimed, so the card can list it', async () => {
+    // A row that only shows a count cannot answer "did it do the thing I care
+    // about"; the titles are what a person can check off.
+    const { pool, upstream } = await harness(1, {
+      tasks: [parsed('Buddy_App', { current: 0, target: 1, claimable: false, acceptStatus: 'accepted' })],
+    })
+    upstream.tasks = [{ ...upstream.tasks[0]!, title: '进入任一小助手应用' }]
+    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const scheduler = build(pool, upstream, when, { tasks: [11] })
+
+    await tickAt(scheduler, when)
+    expect(scheduler.status().jobs.tasks.detail).toContain('进入任一小助手应用')
+  })
+
+  it('says how far off the next streak tier is, instead of just locked', async () => {
+    // Every tier reads `locked` until enough days accumulate. Without the
+    // countdown the row looks like it silently failed.
+    const { pool, upstream } = await harness(1)
+    upstream.streak = { ...upstream.streak, days: 3 }
+    const when = new Date(2026, 8, 7, 12, 0, 0)
+    const scheduler = build(pool, upstream, when, { streak: [12] })
+
+    await tickAt(scheduler, when)
+    const progress = scheduler.status().jobs.streak.progress
+    expect(progress).toBeDefined()
+    expect(progress).toContain('7d')
+    expect(progress).toContain('4d')
+  })
   it('runs the task pass once per day and not twice', async () => {
     const { pool, upstream } = await harness(2)
     const when = new Date(2026, 8, 7, 11, 0, 0)

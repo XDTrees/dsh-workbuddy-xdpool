@@ -9,36 +9,83 @@
 
 English | [中文](./README.md)
 
-Merge **every WorkBuddy account** you have ever signed into on this machine into a single **DeepSeek Harness model pool**. No manual setup: each account you sign in on the WorkBuddy desktop app automatically becomes a pool member, and when one account gets rate-limited (HTTP 429), requests automatically fail over to the next healthy account.
+Every account you've signed into the WorkBuddy desktop app, merged into one DSH model pool. However many accounts you've used, that's how many the pool holds — no forms, no manual import.
 
-> Unlike single-account connectors (e.g. `dsh-workbuddy-connect`), XD Pool treats multi-account as the norm — it never picks or imports an account by hand. It scans every historical sign-in snapshot left by the WorkBuddy desktop app, merges them all into one shared pool, and exposes them as a single `workbuddy-xdpool` provider group whose requests auto-fail-over across members.
+An account gets rate-limited or runs out of credits? The request just moves to the next one that works. You keep asking; it keeps handling the rest.
 
-**Settings card (Settings → Plugins → DSH WorkBuddy XD Pool)**
+**It also throws in a full points-automation suite**: check-ins, task rewards, streak redemption, the buddy trip — all the chores you'd otherwise click through every day, done in the background.
 
-![WorkBuddy pool settings card: domestic/international tab strip, pool health, per-account panels, credit packages and totals, per-account daily check-in, and model management (enable, image input, context window)](assets/settings-card.png)
+> **How this differs from the single-account connectors**: plugins like `dsh-workbuddy-connect` handle one account at a time. XD Pool treats **multiple accounts as the normal case** — it doesn't pick favourites or ask you to import anything. Every sign-in snapshot on this machine goes into one shared pool, exposed as a single `workbuddy-xdpool` provider group, with automatic failover inside.
 
-**Model picker (domestic and international appear as two separate supplier groups; the rate multiplier is baked into model.name because the DSH 0.1.2 composer only reads name)**
+## Screenshots
 
-![Model picker: the domestic and international suppliers each form their own group, with the credit rate and promo badge shown next to every model name](assets/model-picker.png)
+**The plugin card (Settings → Plugins → DSH WorkBuddy XD Pool)**
 
-**Domestic / international dual suppliers (each with its own accounts, credits and models, usable at the same time)**
+![WorkBuddy pool card: CN/global tabs, pool health, account panels with credit packages, per-account check-in, the points-automation panel, and the model directory](assets/settings-card.png)
 
-![Switching between the domestic and international tabs: the side with no sign-in lists the steps for that region](assets/region-tabs.png)
+**The points-automation panel**
+
+![Points automation: the master switch, a Run now button, each job's last run with the tasks it actually collected, and the streak countdown](assets/automation-panel.png)
+
+**Model picker (CN and global as two separate groups)**
+
+![Model picker: the CN and global groups each list their own models with credit multipliers and promo tags](assets/model-picker.png)
+
+**CN / global dual provider (separate accounts, credits and models, usable at the same time)**
+
+![Switching between CN and global; the side that is not signed in shows that region's sign-in steps](assets/region-tabs.png)
 
 ## Features
 
-- **Zero-config**: install, enable, done. Every account signed into the WorkBuddy desktop app is auto-discovered into the rotation pool on first use.
-- **Automatic failover**: the pool tracks each account's `429` cooldown. A cooling account is skipped in favor of the next healthy one; cooldowns expire automatically. Requests pause only when every account is cooling at once.
-- **Pool health at a glance**: the settings card shows pool health (N accounts / X cooling, which account is next), each account's token expiry, and cooldown countdowns.
-- **Live remaining credits**: per-account credit packages (`package · remain / size`) and a big green total, refreshed from upstream in real time.
-- **Annotated model catalog**: the card lists pool models with their credit multiplier (e.g. `GLM-5.2 · x0.79`), free / limited-free / night-discount tags, image-input capability, and context window — kept live from upstream `credits` / `tags`.
-- **Daily check-in**: below each account's credits the card offers a check-in button showing the current streak, the per-day credit, and any milestone bonus. Collect an account's reward with one click — several accounts can be collected in turn, with no need to switch the pool's preferred account first. The status is re-read before claiming, so an account that already collected today is **never double-collected**. Also available as the `checkin` CLI command.
-- **CN / global region auto-detection**: the upstream origin is picked per account from its login domain — a global sign-in (`workbuddy.ai`) uses `www.workbuddy.ai`, while a CN sign-in (the default) uses `copilot.tencent.com` and `www.codebuddy.cn`. Both regions can coexist in one pool, each account talking to its own region, with rotation and failover working across both.
-- **Three manual actions**: re-detect desktop sign-ins, clear all cooldowns, and daily check-in — available both on the card and via the CLI.
+### 1. The multi-account pool
+
+- **Zero config**: install it, turn it on, done. Every account signed into the WorkBuddy desktop app is discovered and pooled automatically — nothing to enter by hand.
+
+- **Automatic failover**: the pool tracks each account's rate-limit state. Hit a 429 and that account cools down while later requests land on the next healthy one; it rejoins automatically once the cooldown ends. Requests only wait when every account is cooling.
+
+- **Pool health at a glance**: the card shows how many accounts there are, how many are cooling, which one is next, plus each account's token expiry and cooldown countdown.
+
+- **Live credit balances**: per-account credit packages (`package · remaining / total`) with a large total, refreshed from upstream as it changes.
+
+- **An annotated model catalog**: pool models with their credit multiplier (e.g. `GLM-5.2 · x0.79`), free / limited-free / night-discount tags, image-input support and context window — all tracking upstream live.
+
+- **CN / global auto-detection**: the upstream origin is picked per account from its login domain — a global sign-in (`workbuddy.ai`) goes to `www.workbuddy.ai`, CN (the default) to `copilot.tencent.com`. Both kinds can live in the same pool.
+
+- **Manual controls when you want them**: re-detect accounts, clear all cooldowns, and daily check-in — on the card and in the CLI.
+
+### 2. Points automation
+
+One switch on the card, and the plugin works through your growth-centre routine for you. **On by default, and you can hit "Run now" to force a pass whenever you like.**
+
+Five jobs:
+
+| Job | Default time | What it does |
+| --- | --- | --- |
+| Daily check-in | 09:00 | Collect today's check-in reward |
+| Activity report | 10:00 | Report activity so the growth centre counts the day |
+| Task rewards | 11:00 | Enrol in open tasks and collect every reward that's ready |
+| Streak bonus | 12:00 | Redeem streak tiers and spend the lottery draws |
+| Buddy trip | 09:00 · 21:00 | Send the cat out, collect it when it's back |
+
+**The task-rewards pass covers 13 board tasks**, including the ones that read as "somebody has to sit at the desktop and click these menus":
+
+> Browse inspiration · Use 5 templates · Try a hot skill · Apply the "Peacekeeper Elite" theme · Read the library · Summon 5 experts · Summon 3 expert teams · Try the Tencent Lighthouse expert · Open any assistant app · Enter the QQ teacher assistant · Create a design canvas · Create a scheduled task · Chat with the cat
+
+Measured across four accounts, one pass collected **3300 credits and 135 energy**.
+
+**The card tells you what a pass actually collected** — it lists the task names rather than reporting a bare count. The streak countdown is spelled out too ("7d in 4d"), so a locked tier doesn't look like a failure.
+
+**"Earned today"** breaks the day down by source — task rewards, check-in, streak, buddy trip — and resets at midnight.
+
+**Credit floor per account**: set a minimum balance and an account below it stops being given work, so you can keep some credits in reserve.
+
+> **The global region doesn't show this panel** — that gateway has no growth system at all.
 
 ## Install
 
-Prerequisite: WorkBuddy desktop app installed and signed in (the plugin reuses the app's sign-in state; adding accounts = signing in / switching accounts in the desktop app — each is absorbed into the pool automatically). Tested against DSH Desktop host `0.1.2`; compatible with `0.1.1-rc.2` / `0.1.2` (the settings-section install picks `settings.installSection` on `0.1.2-rc.1+`, or the older free function earlier).
+Prerequisite: the WorkBuddy desktop app installed and signed in (the plugin reuses the sign-in state it stores locally). Multi-account = sign in and out a few times in the desktop app; each sign-in is absorbed into the pool. Built against DSH Desktop host `0.1.2`.
+
+> Compatible with the `0.1.1-rc.2` / `0.1.2` host line: the settings section installs via `settings.installSection` (0.1.2-rc.1+) or the earlier free-function form, whichever the host supports.
 
 **Option A — install from npm (recommended)**
 
@@ -48,15 +95,15 @@ dsh plugin --profile desktop add dsh-workbuddy-xdpool
 ```
 
 > npm is the fast path: the only dependency pulled in is the plugin itself (**roughly 1 package, a few seconds**).
-> Installing from GitHub source also installs the dev toolchain (bundler, test runner, hundreds of packages), which is markedly slower.
+> Installing from the GitHub source drags in the dev dependencies (bundler, test runner, hundreds of packages) and is much slower.
 
-**Option B — install from GitHub source**
+**Option B — install from the GitHub source**
 
 ```sh
 dsh plugin --profile desktop add github:XDTrees/dsh-workbuddy-xdpool
 ```
 
-**Option C — manual bundle registration**
+**Option C — register the bundle by hand**
 
 ```sh
 # 1) install the package (npm or GitHub)
@@ -68,25 +115,27 @@ dsh plugin --profile desktop add dsh-workbuddy-xdpool
 # 3) restart DSH Desktop
 ```
 
-**Build locally** (developers):
+**Building locally (developers)**
 
 ```sh
 pnpm install
-pnpm build                  # outputs lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
-pnpm test                   # 26 tests (failover rotation, per-(account,model) cooldowns, check-in guards)
-pnpm typecheck              # host side
-pnpm typecheck:client       # client side
+pnpm build              # produces lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
+pnpm test               # 138 tests
+pnpm typecheck          # host side
+pnpm typecheck:client   # client side
 ```
 
-> `pnpm install` needs pnpm 11 (`npx pnpm@11`); add `--config.confirmModulesPurge=false --config.minimumReleaseAge=0` if the supply-chain age policy blocks freshly published rc packages.
+> **The build output is committed** (`lib/` is not gitignored), so a GitHub install needs no install-time script and never trips pnpm's "build scripts were blocked" prompt. **After changing `src/`, re-run `pnpm build` and commit `lib/` too** — otherwise users get the old build.
 
-> **The built output is committed** (`lib/` is no longer ignored). A GitHub install therefore runs
-> no install-time script and never hits pnpm's "build scripts are blocked" prompt. **After changing
-> `src/`, re-run `pnpm build` and commit `lib/` too**, or users would receive the old build.
+> Note: `pnpm install` wants pnpm 11 (`npx pnpm@11`), and may need `--config.confirmModulesPurge=false --config.minimumReleaseAge=0` — pnpm 11's default `minimumReleaseAge` supply-chain policy blocks just-published rc packages.
 
-After install: a **WorkBuddy XD Pool** group appears in the model picker; Settings → Plugins → **DSH WorkBuddy XD Pool** card shows pool health, per-account tokens/credits/check-in/cooldowns, plus "Detect accounts again" and "Clear all cooldowns" buttons. Works on Web / TUI profiles too (`--profile web` / `--profile dsh-tui`).
+Once installed: a **WorkBuddy XD Pool** group appears in the model picker, and Settings → Plugins → **DSH WorkBuddy XD Pool** shows pool health, each account's token / credits / check-in / cooldown state, the "Detect accounts again" and "Clear all cooldowns" buttons, and a check-in button per account.
+
+It also works under the Web / TUI profiles (`--profile web` / `--profile dsh-tui`).
 
 ## CLI
+
+All commands run through `dsh plugin --profile desktop exec dsh-workbuddy-xdpool <subcommand>`:
 
 ```sh
 dsh plugin --profile desktop exec dsh-workbuddy-xdpool status    # pool accounts/cooldown + shim state (--credits, --json, --rates)
@@ -131,32 +180,50 @@ workbuddy-xdpool:
 
 ## Architecture
 
-- **Host side** (`src/`): registers the `workbuddy-xdpool` provider, the `workbuddy-xdpool` settings section (`settings.installSection`), four same-origin routes (status / re-scan / clear cooldowns / check-in), and account discovery + catalog seeding. The upstream client picks the CN or global origin per credential from its login domain.
-- **Client** (`src/client/`): the browser card loaded via `dsh.client`; the collapsible shell reuses the host's `dsm-plugin-card*` style language (`--dsw-alias-*` theme tokens), with content classes namespaced `dsm-workbuddy-xdpool-*`. Check-in is the plugin's only mutating route: POST-only, loopback-origin-only, an explicit per-account `accountId`, and a pre-claim status re-check.
-- **Build**: `tsdown` produces `lib/index.js` (host entry) + `lib/index.d.ts` (types) + `lib/bin.js` (CLI) + `lib/client.js` (CJS browser bundle wrapped in `window.__ModuleLoader__.load`). All four are committed, so an install needs no build-time script.
+- **Host side** (`src/`, inside the DSH main process)
+  - `index.ts` — registers the `workbuddy-xdpool` provider, the `workbuddy-xdpool` settings section, the same-origin routes (status / re-scan / clear cooldowns / check-in / automation run / credit reserve), plus account discovery and catalog seeding.
+  - `accounts.ts` — `WorkBuddyAccountPool`: reads the desktop auth snapshots, 429 cooldowns, rotation and token refresh; account disabling and credit reserves live here too.
+  - `scheduler.ts` — the points-automation scheduler: runs five jobs on local time points (check-in / report / tasks / streak / travel), persists the daily earnings ledger, and backs the card's "Run now" button with the same code path.
+  - `task-events.ts` — builds the 13 task event chains. Each chain is plain data plus the fingerprint channel it must go out on (desktop or web); the tasks that need a REAL conversation (skill, experts) open one here to get the server-side id.
+  - `catalog.ts` / `upstream.ts` — the upstream client: model catalog (with per-model multipliers and free / image tags), credits, check-in, and every automation endpoint, switching CN/global by credential domain.
+  - `web-status.ts` / `status-paths.ts` — the same-origin status document and routes the card reads. Mutations are gated on POST + loopback origin + an explicit `accountId`.
+  - `bin.ts` — the CLI above.
+- **Client** (`src/client/`, the browser card loaded via `dsh.client`)
+  The collapsible shell reuses the host's `dsm-plugin-card*` style language (`--dsw-alias-*` theme tokens); content classes are namespaced `dsm-workbuddy-xdpool-*`, and copy lives under the `settings.workbuddy-xdpool` namespace.
+- **Build**
+  `tsdown` produces `lib/index.js` (host entry) + `lib/index.d.ts` (types) + `lib/bin.js` (CLI) + `lib/client.js` (CJS browser bundle wrapped in `window.__ModuleLoader__.load`). All four are committed, so an install needs no build-time script.
 
 ## Known limitations
 
-- **Only accounts on this machine**: the pool cannot and will not perform WorkBuddy sign-in / QR auth for you (tokens are minted by the WorkBuddy desktop app's own Tencent SSO and are device-bound). Add accounts by signing in on the desktop app.
-- Depends on WorkBuddy client endpoints (not an official public API); may need updates when WorkBuddy changes.
-- If Windows/Linux usernames differ and Windows env vars aren't forwarded into WSL, point `WORKBUDDY_AUTH_FILE` or the config `authFile` at the real location.
+- **Only accounts on THIS machine's desktop app**: the pool cannot — and will not — sign you in or scan a QR code (tokens are minted by the WorkBuddy desktop app's own Tencent SSO and bound to the device). Adding an account = signing in on the desktop app; XD Pool absorbs it.
+
+- **A few automation tasks are deliberately not implemented**
+  - `Expert_Philanthropy` (charity expert): requires a real donation; there is no way around it.
+  - `black_cat` (night owl): only scores between 23:00 and 08:00, and pays **no credits** — all-nighters for nothing.
+  - `Model_chat_GLM5.2` (chat with a specific model) and `wb_wechat_oa_subscribe_task` (follow the official account): the path is mapped out, deferred to the next release.
+
+- **`Expert_team_use_3` occasionally sticks at 2/3**: on one account, after two expert teams had been used that day, the third would not register (using a different, unused team didn't help either). Suspected per-account daily quota that resets the next day, unconfirmed. **Fresh accounts are unaffected** (measured 0/3 → 3/3).
+
+- **Depends on WorkBuddy's client APIs** (not an official public API), so a WorkBuddy update may require a matching plugin update. If an account's refresh token lapses, sign in again on the desktop.
+
+- If your Windows and Linux usernames differ and the Windows environment variable doesn't reach WSL, point `WORKBUDDY_AUTH_FILE` (or `authFile`) at the real location.
 
 ## Disclaimer
 
-- For **personal study and research only** — drives your own WorkBuddy accounts on your own machine. Do not use commercially or beyond reasonable personal use.
-- You are responsible for complying with WorkBuddy's terms of service; any consequences (account limits, emptied quotas, outages) are your own.
-- The authors are not liable for any direct or indirect loss from using or misusing this project.
-- This project is not affiliated with, endorsed by, or authorized by Tencent, WorkBuddy, or DeepSeek; all names belong to their respective owners.
+- This project is **for personal study and research only**. It drives only your own WorkBuddy accounts from your own machine — do not use it commercially or beyond reasonable personal use.
+- You are responsible for complying with WorkBuddy's terms of service. Any consequences of using this project (including but not limited to account restrictions, cleared balances, or service interruption) are yours to bear.
+- The authors accept no liability for any direct or indirect loss arising from the use or misuse of this project.
+- This project is not affiliated with, authorised by, or endorsed by Tencent, WorkBuddy, or DeepSeek. Product names appear only to describe compatibility; trademarks belong to their respective owners.
 
 ## Acknowledgments
 
-This project was built with reference to the following public projects, whose copyright notices are retained as their licenses require. The reference is to **design ideas and established findings**; the code is an independent implementation, and the modules that draw on an existing pattern say so in their file headers:
+This project draws on the following public projects and keeps their copyright notices as their licences require. What was taken is **design approach and established findings**; the code is an independent implementation. The modules that lean on a specific source say so in their file headers:
 
-- [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) (MIT) — the core reference for settings-section registration (`settings.installSection`) and the DSH plugin structure, client-card loading, desktop credential refresh, and loopback shim hardening.
-- [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) (MIT, Copyright (c) 2026 LaoDing) — the reference for the `dsm-plugin-card*` card style language and `--dsw-alias-*` theme tokens; the **daily check-in** endpoints (`/v2/billing/meter/checkin-activity-status` and `/v2/billing/meter/daily-checkin`), the credit-package aggregation rules (monthly-cycle vs one-off gift), and picking the upstream origin per credential domain for CN/global follow interface shapes that project had already validated.
-- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) (MIT) — reference implementation of the upstream WorkBuddy protocol (`copilot.tencent.com` wire behavior) and credits endpoints.
+- [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) (MIT) — the primary reference for settings-section registration (`settings.installSection`) and the DSH plugin structure, the client card loading mechanism, and desktop credential refresh plus loopback-shim hardening. This project follows its "host mounts the card via installSection" path.
+- [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) (MIT, Copyright (c) 2026 LaoDing) — the reference implementation for the `dsm-plugin-card*` card style language and `--dsw-alias-*` theme tokens; **daily check-in** (`/v2/billing/meter/checkin-activity-status` and `/v2/billing/meter/daily-checkin`), the credit-package aggregation rules (monthly vs one-off packs), and picking the upstream origin per credential `domain` all follow interface shapes that project verified.
+- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) (MIT) — the reference for the WorkBuddy upstream protocol (`copilot.tencent.com` wire behaviour) and the credits APIs; **points automation** (growth-centre check-in, activity report, streak redemption, the buddy-trip state machine, the 13 task event chains, and the expert summon chains) was ported wholesale from that project's Go reverse-engineering, including the scoring criteria and measured conclusions behind every event chain.
 
-All copyrights belong to their respective authors. This project takes the **reference-the-design, implement-independently** approach and does not wholesale copy any reference project's source. If an attribution is missing or wrong, please open an issue.
+All copyright in the above belongs to their respective authors. This project uses a **reference-the-approach, implement-independently** method and does not copy any reference project's source wholesale. If anything is mis-attributed or missing, please open an issue.
 
 ## License
 

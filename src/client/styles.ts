@@ -218,6 +218,10 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-auto-job-name{flex:0 0 72px;color:var(--dsw-alias-label-primary,#e8e8ea)}
 .dsm-workbuddy-xdpool-auto-job-when{flex:1 1 auto;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-auto-job-last{flex:0 0 auto;text-align:right;font-variant-numeric:tabular-nums}
+/* The job detail wraps to its own full-width line: it is a list of reward
+   titles, which needs the whole row rather than a cramped right-hand slot. */
+.dsm-workbuddy-xdpool-auto-job-detail{flex:1 1 100%;color:var(--dsw-alias-label-secondary,#b8bcc4);line-height:1.5;word-break:break-word}
+.dsm-workbuddy-xdpool-auto-job-note{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#b8bcc4)}
 .dsm-workbuddy-xdpool-auto-run{flex:0 0 auto;padding:2px 8px;font-size:10px;line-height:16px}
 /* Reserved credits: one inline number field per account. */
 .dsm-workbuddy-xdpool-reserve{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,#36373b);font-size:11px;color:var(--dsw-alias-label-dimmed,#8a97b5)}

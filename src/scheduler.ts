@@ -156,6 +156,16 @@ export interface SchedulerLogger {
 export interface AutomationJobState {
   /** `YYYY-MM-DD` of the last completed run, or undefined if it never ran. */
   lastRunDate?: string
+  /**
+   * The scheduled SLOT of the last run, as `YYYY-MM-DDTHH`.
+   *
+   * The tick de-duplicates on this rather than on the date: keying on the date
+   * alone caps every job at one run a day, which is wrong for a job with two
+   * time points — blocking the cat loop's second pass would leave the cat out
+   * until tomorrow. Per slot a job runs once in each configured hour, while a
+   * repeat tick inside the same hour is still refused.
+   */
+  lastRunSlot?: string
   /** Epoch ms of the last completed run. */
   lastRunAtMs?: number
   /** Accounts that completed without throwing. */
@@ -169,6 +179,23 @@ export interface AutomationJobState {
   /** Tasks claimed by the task job on the last run. */
   claimed: number
   /** Human-readable summary of the last run. */
+  /**
+   * What this run actually did, in the words of the task board.
+   *
+   * `message` is a count ("3 accounts, 5 tasks claimed"); this is the list a
+   * person can check off — the reward titles the pass collected. A row showing
+   * only a bare number cannot answer "did it do the thing I care about", which
+   * is the question the panel exists to answer.
+   */
+  detail?: readonly string[]
+  /**
+   * A pending milestone worth naming, when there is one.
+   *
+   * Streak tiers are why this exists: every tier reads `locked` until enough
+   * consecutive days accumulate, and "locked" on its own reads as "broken"
+   * rather than "come back in four days".
+   */
+  progress?: string
   message?: string
 }
 
@@ -328,6 +355,17 @@ export function dayKey(date: Date): string {
 }
 
 /**
+ * The scheduled SLOT `date` falls in, as `YYYY-MM-DDTHH`.
+ *
+ * The per-job run guard keys on this instead of the date, so a job configured
+ * for several hours runs in each of them while a second tick inside the same
+ * hour is still refused.
+ */
+export function slotKey(date: Date): string {
+  return `${dayKey(date)}T${String(date.getHours()).padStart(2, '0')}`
+}
+
+/**
  * Whether `now`'s local hour is one of `hours`.
  *
  * The reference panel computes a `nextFire` instant and sleeps until it; this
@@ -455,7 +493,11 @@ export class WorkBuddyScheduler {
     this.reportHours = options.reportHours ?? [10]
     this.taskHours = options.taskHours ?? [11]
     this.streakHours = options.streakHours ?? [12]
-    this.travelHours = options.travelHours ?? [12]
+    // Two passes, not one: a trip loop needs a departure AND a collection, and
+    // a cat sent out at the single pass of the day would sit there until
+    // tomorrow. Morning out, evening back — the reference panel settled on the
+    // same pair for the same reason.
+    this.travelHours = options.travelHours ?? [9, 21]
   }
 
   /** Apply a new configuration; safe to call while running. */
@@ -539,7 +581,7 @@ export class WorkBuddyScheduler {
   async runNow(kind: AutomationJobKind, force = false): Promise<AutomationJobState> {
     const today = dayKey(this.now())
     const state = this.states[kind]
-    if (!force && state.lastRunDate === today) return { ...state }
+    if (!force && state.lastRunSlot === slotKey(this.now())) return { ...state }
     this.busy = true
     try {
       await this.runJob(kind, today)
@@ -645,10 +687,13 @@ export class WorkBuddyScheduler {
     this.busy = true
     try {
       const now = this.now()
+      const slot = slotKey(now)
       const today = dayKey(now)
+      // Per SLOT, not per day: a job with two configured hours must run in both.
+      // Keying on the date is what left the cat out overnight.
       for (const kind of JOB_KINDS) {
         if (this.stopped) return
-        if (this.states[kind].lastRunDate === today) continue
+        if (this.states[kind].lastRunSlot === slot) continue
         if (!isFireHour(now, this.hoursOf(kind))) continue
         await this.runJob(kind, today)
       }
@@ -758,6 +803,8 @@ export class WorkBuddyScheduler {
     let credit = 0
     let energy = 0
     let claimed = 0
+    const detail: string[] = []
+    let progressNote: string | undefined
     
     const accounts = this.accountsInOrder()
 
@@ -779,6 +826,7 @@ export class WorkBuddyScheduler {
                 // repeat check-in pays 0, which records as a no-op.
                 this.recordEarnings(account.id, today, { checkinCredit: claim.credit })
                 if (claim.credit > 0) {
+                if (claim.credit > 0) detail.push(`签到 +${claim.credit}`)
                   this.logger.info?.(`automation checkin ${account.label}: +${claim.credit} credit`)
                 }
               } catch (error: unknown) {
@@ -801,6 +849,7 @@ export class WorkBuddyScheduler {
             credit += result.credit
             energy += result.energy
             claimed += result.claimed
+            detail.push(...result.titles)
             this.claimableSeen += result.claimableCount
             this.recordEarnings(account.id, today, { credit: result.credit, energy: result.energy, claimed: result.claimed })
             this.logger.info?.(
@@ -809,7 +858,8 @@ export class WorkBuddyScheduler {
             break
           }
           case 'streak': {
-            await this.redeemStreak(account)
+            const progress = await this.redeemStreak(account)
+            if (progress !== undefined) progressNote = progress
             break
           }
           case 'travel': {
@@ -831,6 +881,9 @@ export class WorkBuddyScheduler {
     }
 
     const state = this.states[kind]
+    // Both stamps: the slot is what the tick de-duplicates on, the date is what
+    // the card shows and what the ledger resets on.
+    state.lastRunSlot = slotKey(this.now())
     state.lastRunDate = today
     state.lastRunAtMs = this.now().getTime()
     state.ok = ok
@@ -839,6 +892,8 @@ export class WorkBuddyScheduler {
     state.energy = energy
     state.claimed = claimed
     state.message = this.summarise(kind, ok, failed, claimed, credit, energy)
+    state.detail = detail
+    state.progress = progressNote
     this.logger.info?.(`automation ${accountWord}: ${state.message}`)
   }
 
@@ -1103,6 +1158,8 @@ export class WorkBuddyScheduler {
     credit: number
     energy: number
     claimableCount: number
+    /** Reward titles collected on this pass, for the card to list. */
+    titles: readonly string[]
   }> {
     const credential = account.credential
     const tasks = await this.client.listTasks(credential)
@@ -1120,6 +1177,7 @@ export class WorkBuddyScheduler {
     let credit = 0
     let energy = 0
     let claimed = 0
+    const titles: string[] = []
     for (const task of claimable) {
       if (this.stopped) break
       const reward = await this.client.claimTaskReward(credential, task.taskCode)
@@ -1127,6 +1185,7 @@ export class WorkBuddyScheduler {
       energy += reward.energy
       if (reward.credit > 0 || reward.energy > 0) {
         claimed++
+        titles.push(task.title)
         this.logger.info?.(`automation claim ${account.label}: ${task.title} +${reward.credit}c +${reward.energy}e`)
       } else {
         // already_claimed: the reward was collected on an earlier pass.
@@ -1135,7 +1194,7 @@ export class WorkBuddyScheduler {
       if (this.delayMs > 0 && !this.stopped) await sleep(this.delayMs)
     }
 
-    return { claimed, credit, energy, claimableCount: claimable.length }
+    return { claimed, credit, energy, claimableCount: claimable.length, titles }
   }
 
   /**
@@ -1148,7 +1207,7 @@ export class WorkBuddyScheduler {
    * Everything here is idempotent: a tier already claimed is skipped by its
    * status, and a draw consumes one chance, so a replay cannot double-spend.
    */
-  private async redeemStreak(account: WorkBuddyAccount): Promise<void> {
+  private async redeemStreak(account: WorkBuddyAccount): Promise<string | undefined> {
     const credential = account.credential
     const status = await this.client.growthStreakFull(credential)
 
@@ -1182,6 +1241,18 @@ export class WorkBuddyScheduler {
       }
       if (this.delayMs > 0 && !this.stopped) await sleep(this.delayMs)
     }
+
+    // Nothing to redeem yet is the normal state, not a fault: hand back the
+    // countdown so the card can say "5 more days" instead of showing a row that
+    // looks like it silently failed.
+    const pendingTier = status.tiers.find(tier => tier.status === 'locked')
+    if (pendingTier !== undefined) {
+      const remaining = Math.max(0, pendingTier.days - status.days)
+      return remaining > 0
+        ? `${pendingTier.tier} in ${remaining}d`
+        : `${pendingTier.tier} ready`
+    }
+    return undefined
   }
 
   /**

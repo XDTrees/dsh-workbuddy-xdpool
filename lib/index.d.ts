@@ -1151,6 +1151,16 @@ interface SchedulerLogger {
 interface AutomationJobState {
   /** `YYYY-MM-DD` of the last completed run, or undefined if it never ran. */
   lastRunDate?: string;
+  /**
+   * The scheduled SLOT of the last run, as `YYYY-MM-DDTHH`.
+   *
+   * The tick de-duplicates on this rather than on the date: keying on the date
+   * alone caps every job at one run a day, which is wrong for a job with two
+   * time points — blocking the cat loop's second pass would leave the cat out
+   * until tomorrow. Per slot a job runs once in each configured hour, while a
+   * repeat tick inside the same hour is still refused.
+   */
+  lastRunSlot?: string;
   /** Epoch ms of the last completed run. */
   lastRunAtMs?: number;
   /** Accounts that completed without throwing. */
@@ -1164,6 +1174,23 @@ interface AutomationJobState {
   /** Tasks claimed by the task job on the last run. */
   claimed: number;
   /** Human-readable summary of the last run. */
+  /**
+   * What this run actually did, in the words of the task board.
+   *
+   * `message` is a count ("3 accounts, 5 tasks claimed"); this is the list a
+   * person can check off — the reward titles the pass collected. A row showing
+   * only a bare number cannot answer "did it do the thing I care about", which
+   * is the question the panel exists to answer.
+   */
+  detail?: readonly string[];
+  /**
+   * A pending milestone worth naming, when there is one.
+   *
+   * Streak tiers are why this exists: every tier reads `locked` until enough
+   * consecutive days accumulate, and "locked" on its own reads as "broken"
+   * rather than "come back in four days".
+   */
+  progress?: string;
   message?: string;
 }
 /**
@@ -1794,6 +1821,15 @@ interface PoolWebAutomationJob {
   claimed: number;
   /** One-line summary of the last run. */
   message?: string;
+  /**
+   * What the last run actually did, in the words of the task board.
+   *
+   * `message` is a count; this is the list a person can check off, which is
+   * what turns a row from "it ran" into "it did the things I care about".
+   */
+  detail?: readonly string[];
+  /** A pending milestone worth naming, e.g. the next streak tier countdown. */
+  progress?: string;
 }
 /**
  * Automation block on the status document.

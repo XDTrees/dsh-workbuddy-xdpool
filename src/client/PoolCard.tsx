@@ -953,6 +953,12 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                                       ? (t?.('row.autoNever') ?? 'not run yet')
                                       : `${job.lastRunDate} · ${job.ok}${job.failed > 0 ? `/${job.failed}` : ''}`}
                                   </span>
+                                  {job?.progress === undefined ? null
+                                    : <span className="dsm-workbuddy-xdpool-auto-job-note">{job.progress}</span>}
+                                  {job?.detail === undefined || job.detail.length === 0 ? null
+                                    : <span className="dsm-workbuddy-xdpool-auto-job-detail">
+                                        {job.detail.join(' · ')}
+                                      </span>}
                                 </div>
                             )
                           })}
