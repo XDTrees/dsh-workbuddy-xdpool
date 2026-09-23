@@ -17,7 +17,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
-import type { WorkBuddyAccountPool } from './accounts.ts'
+import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { parseRateLimitReset, WorkBuddyUpstreamClient, type UpstreamErrorKind, type WorkBuddyRegion } from './upstream.ts'
 
@@ -175,6 +175,34 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     return `http://127.0.0.1:${address.port}`
   }
 
+  /**
+   * Last balance refresh per account, so a busy account is not probed on
+   * every request. Ten minutes is well inside the window where ordinary use
+   * could cross a reserve.
+   */
+  const lastBalanceAt = new Map<string, number>()
+  const BALANCE_REFRESH_MS = 10 * 60 * 1000
+
+  /**
+   * Refresh one account known credit balance, best effort.
+   *
+   * Runs in the background after a successful request. Failures are swallowed
+   * on purpose: a reserve is a safety feature, and a flaky balance lookup must
+   * never become a failed user request or a noisy log.
+   */
+  async function refreshBalance(account: WorkBuddyAccount): Promise<void> {
+    const now = Date.now()
+    const last = lastBalanceAt.get(account.id) ?? 0
+    if (now - last < BALANCE_REFRESH_MS) return
+    lastBalanceAt.set(account.id, now)
+    try {
+      const credits = await client.fetchCredits(account.credential)
+      pool.noteCredits(account.id, credits.total)
+    } catch {
+      // Keep the previous reading; the next request tries again.
+    }
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       if (!hostIsLoopback(req.headers.host)) {
@@ -287,6 +315,10 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         // Only now is this account the one actually serving the user: a request
         // that failed over to another account must not mark the tried one as used.
         pool.noteServed(account.id)
+        // Refresh the account's balance in the background so the reserved-credit
+        // floor has a fresh reading. Deliberately NOT awaited: the response is
+        // already ready and a balance lookup must never delay the user's stream.
+        void refreshBalance(account)
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',

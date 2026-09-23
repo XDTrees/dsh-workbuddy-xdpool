@@ -20,6 +20,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
+  POOL_AUTOMATION_RUN_PATH,
+  POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
@@ -120,9 +122,19 @@ function formatDateTime(value: string | undefined): string {
  * matching hour list off the status document so the panel stays in step with
  * whatever schedule the scheduler is actually running on.
  */
+/**
+ * How long to watch a manual run before giving up on it.
+ *
+ * A pass runs one upstream call per account per job, so ~30s for a handful of
+ * accounts. The bound exists so a wedged run cannot spin the button forever;
+ * the run itself keeps going in the background either way.
+ */
+const AUTOMATION_POLL_MS = 2000
+const AUTOMATION_POLL_ATTEMPTS = 90
+
 const AUTOMATION_JOBS = ['report', 'tasks', 'checkin', 'streak'] as const
 
-type AutomationJobKind = typeof AUTOMATION_JOBS[number]
+export type AutomationJobKind = typeof AUTOMATION_JOBS[number]
 
 /** Read one job's configured hours off the status document. */
 function automationHours(status: PoolWebStatus, kind: AutomationJobKind): readonly number[] {
@@ -254,10 +266,29 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
 
   /** The document for the tab on screen; undefined until its first answer. */
   const status = statusByRegion[activeRegion]
+  /**
+   * Today's automation take, summed across accounts.
+   *
+   * Summed from the per-account counters rather than kept separately, so the
+   * panel total and the per-account lines can never disagree.
+   */
+  const automationTotals = Object.values(status?.automation?.earningsToday ?? {})
+    .reduce((sum, entry) => ({
+      credit: sum.credit + entry.credit,
+      energy: sum.energy + entry.energy,
+      claimed: sum.claimed + entry.claimed,
+      checkinCredit: sum.checkinCredit + entry.checkinCredit,
+      bonusCredit: sum.bonusCredit + entry.bonusCredit,
+      travelCredit: sum.travelCredit + entry.travelCredit,
+    }), { credit: 0, energy: 0, claimed: 0, checkinCredit: 0, bonusCredit: 0, travelCredit: 0 })
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [cooldownBusy, setCooldownBusy] = useState(false)
   const [automationBusy, setAutomationBusy] = useState(false)
+  /** The automation job currently running from the card, if any. */
+  const [automationRun, setAutomationRun] = useState<AutomationJobKind | 'all' | undefined>(undefined)
+  /** Account id whose reserved-credit floor is being saved, if any. */
+  const [reserveBusy, setReserveBusy] = useState<string | undefined>(undefined)
   const [flash, setFlash] = useState<string | undefined>(undefined)
   /** Account id whose daily claim is currently in flight. */
   const [checkinBusyId, setCheckinBusyId] = useState<string | undefined>(undefined)
@@ -292,7 +323,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * effect can key off it without restarting on every switch, and each region's
    * last answer stays in its own slot (see `statusByRegion`).
    */
-  const refresh = useCallback(async (region: PoolRegion, signal?: AbortSignal): Promise<void> => {
+  const refresh = useCallback(async (region: PoolRegion, signal?: AbortSignal): Promise<PoolWebStatus | undefined> => {
     try {
       const response = await fetch(`${POOL_STATUS_PATH}?region=${region}`, {
         headers: { accept: 'application/json' },
@@ -305,10 +336,14 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
         setStatusByRegion(prev => ({ ...prev, [region]: value as PoolWebStatus }))
         setError(undefined)
       }
+      // Returned so a caller that needs to poll a field (the automation run
+      // state) can read the fresh value instead of a stale render.
+      return value as PoolWebStatus
     } catch (cause: unknown) {
       if (mounted.current && signal?.aborted !== true) {
         setError(cause instanceof Error ? cause.message : String(cause))
       }
+      return undefined
     }
   }, [])
 
@@ -539,6 +574,86 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     }
   }
 
+  /**
+  /**
+   * Run the whole automation pass now.
+   *
+   * The route only STARTS the pass: a full run takes tens of seconds, which is
+   * far too long to hold a request open. This watches the scheduler status until
+   * the run settles, so the panel can show "running" honestly and report the
+   * result when it lands.
+   */
+  const runAutomationJob = async (): Promise<void> => {
+    setAutomationRun('all')
+    setFlash(undefined)
+    try {
+      const response = await fetch(POOL_AUTOMATION_RUN_PATH, {
+        method: 'POST',
+        headers: { 'accept': 'application/json', 'content-type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ job: 'all' }),
+      })
+      const body = await response.json() as { error?: string; started?: boolean }
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (body.started === false) {
+        // A run is already going; the status poll below reports its outcome.
+        if (mounted.current) setFlash(t?.('row.autoAlreadyRunning') ?? 'A run is already in progress')
+      }
+
+      // Poll until the scheduler reports the run finished. Bounded so a wedged
+      // run cannot leave the button spinning forever.
+      let settled = false
+      for (let attempt = 0; attempt < AUTOMATION_POLL_ATTEMPTS; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, AUTOMATION_POLL_MS))
+        if (!mounted.current) return
+        const fresh = await refresh(activeRegion)
+        if (fresh?.automation?.runInProgress === false) { settled = true; break }
+      }
+      await refresh(activeRegion)
+      if (mounted.current) {
+        setFlash(settled
+          ? (t?.('row.autoRunDone') ?? 'Automation pass finished')
+          : (t?.('row.autoRunTimeout') ?? 'Still running; check back in a moment'))
+      }
+    } catch (cause: unknown) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (mounted.current) setAutomationRun(undefined)
+    }
+  }
+
+  /**
+   * Save one account reserved-credit floor.
+   *
+   * A reserve only protects credits if the pool knows the balance, so this
+   * also refreshes the account list afterwards: the reserve badge appears
+   * as soon as the reading crosses the floor.
+   */
+  const saveCreditReserve = async (accountId: string, reserve: number): Promise<void> => {
+    setReserveBusy(accountId)
+    setFlash(undefined)
+    try {
+      const response = await fetch(POOL_CREDIT_RESERVE_PATH, {
+        method: 'POST',
+        headers: { 'accept': 'application/json', 'content-type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ accountId, reserve }),
+      })
+      const body = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      await refresh(activeRegion)
+      if (mounted.current) {
+        setFlash(reserve > 0
+          ? (t?.('row.reserveSaved', { credits: reserve }) ?? `Keeping ${reserve} credits`)
+          : (t?.('row.reserveCleared') ?? 'Reserve cleared'))
+      }
+    } catch (cause: unknown) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (mounted.current) setReserveBusy(undefined)
+    }
+  }
+
   const saveModels = async (): Promise<void> => {
     if (draft === undefined || status === undefined) return
     if (enabledCount === 0) {
@@ -674,6 +789,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         <span className="dsm-workbuddy-xdpool-dist-title">
                           {t?.('row.distTitle') ?? 'Account usage'}
                         </span>
+                        <div className="dsm-workbuddy-xdpool-dist-options">
                         {(['priority', 'balanced', 'round-robin'] as const).map(option => {
                           const active = (status.distribution ?? 'priority') === option
                           const label = option === 'priority'
@@ -699,10 +815,14 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                               className={cls}
                               onClick={() => { void setDistribution(option) }}
                             >
-                              {label}
+                              <span className="dsm-workbuddy-xdpool-dist-option-name">{label}</span>
+                              {/* The hint belongs in the button, not a tooltip:
+                                  which mode does what IS the decision. */}
+                              <span className="dsm-workbuddy-xdpool-dist-option-hint">{hint}</span>
                             </button>
                           )
                         })}
+                        </div>
                       </div>}
                 </div>
                 <div className="dsm-workbuddy-xdpool-usage-actions">
@@ -734,12 +854,29 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
               {/* Daily-points automation: the schedule and each job's last run.
                   Off by default, so the panel leads with the switch and only
                   spells out the schedule once it is on. */}
-              {status?.automation === undefined ? null
+              {/* Automation is CN-only: the international gateway has no growth/task
+                  system at all, so showing the panel there would offer a switch that
+                  can never do anything. */}
+              {activeRegion !== 'cn' || status?.automation === undefined ? null
                 : <section className="dsm-workbuddy-xdpool-auto" aria-label={t?.('row.autoTitle') ?? 'Automation'}>
                     <div className="dsm-workbuddy-xdpool-auto-head">
                       <span className="dsm-workbuddy-xdpool-auto-title">
                         {t?.('row.autoTitle') ?? 'Automation'}
                       </span>
+                        {/* One button for the whole pass rather than one per job:
+                            the jobs are ordered and share accounts, so running them
+                            one by one is never what the user means. */}
+                        {!status.automation.enabled ? null
+                          : <button
+                              type="button"
+                              className="dsm-btn dsm-btn-outline dsm-workbuddy-xdpool-auto-run"
+                              disabled={automationRun !== undefined}
+                              onClick={() => { void runAutomationJob() }}
+                            >
+                              {automationRun !== undefined
+                                ? (t?.('row.autoRunning') ?? 'Running…')
+                                : (t?.('row.autoRunAll') ?? 'Run all now')}
+                            </button>}
                       <button
                         type="button"
                         role="switch"
@@ -760,6 +897,43 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         ? (t?.('row.autoHintOn') ?? 'Reports activity, claims task rewards and checks in once a day.')
                         : (t?.('row.autoHintOff') ?? 'Off: no background requests are made for you.')}
                     </p>
+                      {/* Today's take, split by source: "we claimed tasks" and "we
+                          checked in" are different achievements, so one merged number
+                          would hide which of them actually ran. */}
+                      {automationTotals.credit === 0 && automationTotals.checkinCredit === 0
+                        && automationTotals.bonusCredit === 0 && automationTotals.travelCredit === 0
+                        ? null
+                        : <div className="dsm-workbuddy-xdpool-auto-total">
+                            <span className="dsm-workbuddy-xdpool-auto-total-label">
+                              {t?.('row.autoToday') ?? 'Today'}
+                            </span>
+                            <span className="dsm-workbuddy-xdpool-auto-total-list">
+                              {automationTotals.credit > 0
+                                ? <span className="dsm-workbuddy-xdpool-auto-total-row">
+                                    {t?.('row.autoFromTasks', { credit: automationTotals.credit, energy: automationTotals.energy, count: automationTotals.claimed })
+                                      ?? `Tasks +${automationTotals.credit}`}
+                                  </span>
+                                : null}
+                              {automationTotals.checkinCredit > 0
+                                ? <span className="dsm-workbuddy-xdpool-auto-total-row">
+                                    {t?.('row.autoFromCheckin', { credit: automationTotals.checkinCredit })
+                                      ?? `Check-in +${automationTotals.checkinCredit}`}
+                                  </span>
+                                : null}
+                              {automationTotals.bonusCredit > 0
+                                ? <span className="dsm-workbuddy-xdpool-auto-total-row">
+                                    {t?.('row.autoFromBonus', { credit: automationTotals.bonusCredit })
+                                      ?? `Streak +${automationTotals.bonusCredit}`}
+                                  </span>
+                                : null}
+                              {automationTotals.travelCredit > 0
+                                ? <span className="dsm-workbuddy-xdpool-auto-total-row">
+                                    {t?.('row.autoFromTravel', { credit: automationTotals.travelCredit })
+                                      ?? `Buddy +${automationTotals.travelCredit}`}
+                                  </span>
+                                : null}
+                            </span>
+                          </div>}
                     {status.automation.enabled
                       ? <div className="dsm-workbuddy-xdpool-auto-jobs">
                           {AUTOMATION_JOBS.map(kind => {
@@ -767,19 +941,19 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                             const hours = automationHours(status, kind)
                             const label = t?.(`row.autoJob_${kind}`) ?? kind
                             return (
-                              <div key={kind} className="dsm-workbuddy-xdpool-auto-job">
-                                <span className="dsm-workbuddy-xdpool-auto-job-name">{label}</span>
-                                <span className="dsm-workbuddy-xdpool-auto-job-when">
-                                  {hours.length === 0
-                                    ? (t?.('row.autoHourNone') ?? 'not scheduled')
-                                    : hours.map(hour => `${String(hour).padStart(2, '0')}:00`).join(' · ')}
-                                </span>
-                                <span className="dsm-workbuddy-xdpool-auto-job-last">
-                                  {job?.lastRunDate === undefined
-                                    ? (t?.('row.autoNever') ?? 'not run yet')
-                                    : `${job.lastRunDate} · ${job.ok}${job.failed > 0 ? `/${job.failed}` : ''}`}
-                                </span>
-                              </div>
+                                <div key={kind} className="dsm-workbuddy-xdpool-auto-job">
+                                  <span className="dsm-workbuddy-xdpool-auto-job-name">{label}</span>
+                                  <span className="dsm-workbuddy-xdpool-auto-job-when">
+                                    {hours.length === 0
+                                      ? (t?.('row.autoHourNone') ?? 'not scheduled')
+                                      : hours.map(hour => `${String(hour).padStart(2, '0')}:00`).join(' · ')}
+                                  </span>
+                                  <span className="dsm-workbuddy-xdpool-auto-job-last">
+                                    {job?.lastRunDate === undefined
+                                      ? (t?.('row.autoNever') ?? 'not run yet')
+                                      : `${job.lastRunDate} · ${job.ok}${job.failed > 0 ? `/${job.failed}` : ''}`}
+                                  </span>
+                                </div>
                             )
                           })}
                         </div>
@@ -856,6 +1030,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         account={account}
                         {...checkinBusyId === undefined ? {} : { checkinBusyId }}
                         onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
+                        onSaveCreditReserve={(accountId, reserve) => { void saveCreditReserve(accountId, reserve) }}
                           onToggleDisabled={(accountId, disabled) => { void toggleAccountDisabled(accountId, disabled) }}
                           {...accountBusyId === undefined ? {} : { accountBusyId }}
                         t={t}
@@ -930,6 +1105,8 @@ function AccountBlock({
   onClaimCheckin,
   accountBusyId,
   onToggleDisabled,
+  onSaveCreditReserve,
+  reserveBusyId,
 }: {
   account: PoolWebAccount
   t?: PoolCardProps['t']
@@ -939,6 +1116,9 @@ function AccountBlock({
   /** Account id whose switch is in flight, if any. */
   accountBusyId?: string
   onToggleDisabled: (accountId: string, disabled: boolean) => void
+    onSaveCreditReserve: (accountId: string, reserve: number) => void
+    /** Account id whose reserve is being saved, if any. */
+    reserveBusyId?: string
 }) {
   const isDisabled = account.disabled === true
   const isCooling = account.cooling === true
@@ -1010,6 +1190,51 @@ function AccountBlock({
           checkinBusy={checkinBusyId === account.id}
           onClaim={onClaimCheckin}
         />
+        {/* Reserved credits: keep the last N credits of an account rather than
+            spending it to zero. The pool stops picking the account once its
+            balance reaches the floor. */}
+        <CreditReserveRow
+          account={account}
+          t={t}
+          busy={reserveBusyId === account.id}
+          onSave={onSaveCreditReserve}
+        />
+        {/* What the automation got this account today, one line per source.
+            Nothing is rendered when the automation earned nothing, rather than a
+            row of zeroes that reads like a failure. */}
+        {account.automationToday === undefined
+          ? null
+          : <div className="dsm-workbuddy-xdpool-earned">
+              <span className="dsm-workbuddy-xdpool-earned-label">
+                {t?.('row.autoEarned') ?? 'Automation today'}
+              </span>
+              <span className="dsm-workbuddy-xdpool-earned-list">
+                {account.automationToday.credit > 0
+                  ? <span className="dsm-workbuddy-xdpool-earned-row">
+                      {t?.('row.autoFromTasks', { credit: account.automationToday.credit, energy: account.automationToday.energy, count: account.automationToday.claimed })
+                        ?? `Tasks +${account.automationToday.credit}`}
+                    </span>
+                  : null}
+                {account.automationToday.checkinCredit > 0
+                  ? <span className="dsm-workbuddy-xdpool-earned-row">
+                      {t?.('row.autoFromCheckin', { credit: account.automationToday.checkinCredit })
+                        ?? `Check-in +${account.automationToday.checkinCredit}`}
+                    </span>
+                  : null}
+                {account.automationToday.bonusCredit > 0
+                  ? <span className="dsm-workbuddy-xdpool-earned-row">
+                      {t?.('row.autoFromBonus', { credit: account.automationToday.bonusCredit })
+                        ?? `Streak +${account.automationToday.bonusCredit}`}
+                    </span>
+                  : null}
+                {account.automationToday.travelCredit > 0
+                  ? <span className="dsm-workbuddy-xdpool-earned-row">
+                      {t?.('row.autoFromTravel', { credit: account.automationToday.travelCredit })
+                        ?? `Buddy +${account.automationToday.travelCredit}`}
+                    </span>
+                  : null}
+              </span>
+            </div>}
       </div>
     </div>
   )
@@ -1026,6 +1251,74 @@ function AccountBlock({
  * layout the LaoDing plugin family uses, so the numbers stay scannable and the
  * claim button sits where the eye already is.
  */
+/**
+ * Reserved-credit control for one account.
+ *
+ * The value is committed on blur or Enter rather than on every keystroke:
+ * each save is a settings write plus a status refresh, and a per-character
+ * save would hammer both.
+ */
+function CreditReserveRow({
+  account,
+  t,
+  busy,
+  onSave,
+}: {
+  account: PoolWebAccount
+  t?: PoolCardProps['t']
+  busy: boolean
+  onSave: (accountId: string, reserve: number) => void
+}) {
+  const [draft, setDraft] = useState<string>(String(account.creditReserve ?? 0))
+  // Keep the field in step when the status document changes underneath it
+  // (another tab, or a refresh after saving).
+  useEffect(() => {
+    setDraft(String(account.creditReserve ?? 0))
+  }, [account.creditReserve])
+
+  const commit = (): void => {
+    const parsed = Number.parseInt(draft, 10)
+    const next = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0
+    if (next === (account.creditReserve ?? 0)) {
+      setDraft(String(next))
+      return
+    }
+    onSave(account.id, next)
+  }
+
+  return (
+    <div className="dsm-workbuddy-xdpool-reserve">
+      <span className="dsm-workbuddy-xdpool-reserve-label">
+        {t?.('row.reserveTitle') ?? 'Keep at least'}
+      </span>
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={draft}
+        disabled={busy}
+        className="dsm-workbuddy-xdpool-reserve-input"
+        aria-label={t?.('row.reserveTitle') ?? 'Keep at least'}
+        onChange={(event) => { setDraft(event.target.value) }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
+        }}
+      />
+      <span className="dsm-workbuddy-xdpool-reserve-unit">
+        {busy
+          ? (t?.('row.reserveSaving') ?? 'Saving…')
+          : (t?.('row.reserveUnit') ?? 'credits')}
+      </span>
+      {account.reserved === true
+        ? <span className="dsm-workbuddy-xdpool-reserve-badge">
+            {t?.('row.reserveHolding') ?? 'Reserved: skipped'}
+          </span>
+        : null}
+    </div>
+  )
+}
+
 function AccountStats({
   account,
   t,

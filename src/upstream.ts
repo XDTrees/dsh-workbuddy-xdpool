@@ -13,6 +13,8 @@
  */
 
 import type { WorkBuddyCredential } from './accounts.ts'
+import { createHash, randomUUID } from 'node:crypto'
+import type { MarketExpert } from './task-events.ts'
 
 /** Upstream failure classes the shim maps onto distinct HTTP answers. */
 export type UpstreamErrorKind =
@@ -138,6 +140,16 @@ const HARD_CREDIT_MARKERS = [
 /** Session-invalidation markers that mean "sign in again in the WorkBuddy app". */
 const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153']
 
+/**
+ * Markers for "already checked in today".
+ *
+ * The upstream answers a non-zero business code (and HTTP 400) when the daily
+ * check-in is repeated. That is an idempotent success, not a failure: the
+ * reward for today is already collected. Matched against the message, since
+ * the code varies by realm.
+ */
+const ALREADY_CHECKIN_MARKERS = ['已签到', 'already']
+
 /** Region for a login domain; an empty domain means CN (matching upstream tooling). */
 /** The two gateways WorkBuddy serves: the domestic one and the international one. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -229,6 +241,49 @@ function refreshHeaders(credential: WorkBuddyCredential): Record<string, string>
   }
   return headers
 }
+
+/** Desktop-client report endpoint and the UA it is fingerprinted by. */
+const DESKTOP_REPORT_PATH = '/v2/report'
+/** Theme-selection endpoint (Hp_Appearance). */
+const APPEARANCE_SET_PATH = '/v2/user-asset/appearance/set'
+/** Expert marketplace listing, used to look up REAL expert ids. */
+const MARKET_EXPERT_LIST_PATH = '/portal/operation-platform/market/expert/list'
+/** Cap on how long a chain waits for a conversation answer. */
+const CHAT_TIMEOUT_MS = 90_000
+/** How far into an SSE stream to look for the server's request id. */
+const SSE_SCAN_LIMIT = 1 << 20
+/** Server request ids look like `cmb-<32 hex>` or a bare 32 hex string. */
+const SERVER_ID_PATTERN = /"id"\s*:\s*"((?:cmb-)?[0-9a-f]{32})"/
+const DESKTOP_TASK_UA = 'WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1'
+
+/**
+ * Derive a stable 36-hex device id from the account uid.
+ *
+ * The upstream keys desktop events to a device. Deriving it from the uid keeps
+ * the same account looking like the same machine across runs, instead of a
+ * new device appearing on every call.
+ */
+function deriveDeviceId(credential: WorkBuddyCredential, salt: string): string {
+  return createHash('sha256').update(salt + ':' + (credential.uid ?? '')).digest('hex').slice(0, 36)
+}
+
+/** Narrow a loose upstream value to an object, so field reads cannot throw. */
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+}
+
+/** Read a numeric field, treating anything else as 0. */
+function numOf(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/** Local `YYYY-MM-DD`, matching how the heatmap keys its cells. */
+function dayKeyLocal(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
 
 /** Billing request headers. */
 function billingHeaders(credential: WorkBuddyCredential): Record<string, string> {
@@ -323,6 +378,18 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   if (status === 404) return 'not_found'
   if (status >= 500) return 'server'
   return 'client'
+}
+
+/**
+ * Whether an error means "today is already checked in".
+ *
+ * Callers treat this as success: the credit for the day is already banked, so
+ * reporting it as a failure would both alarm the user and hide a healthy
+ * account behind a false negative.
+ */
+export function isAlreadyCheckin(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return ALREADY_CHECKIN_MARKERS.some(marker => message.includes(marker))
 }
 
 /**
@@ -450,6 +517,48 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
 }
 
 /** One growth-centre task, flattened from the upstream's loosely-shaped entry. */
+/** One streak tier and what redeeming it pays. */
+export interface WorkBuddyStreakTier {
+  /** Tier key, e.g. `7d`. */
+  tier: string
+  /** Login days the tier needs. */
+  days: number
+  credit: number
+  energy: number
+  cards: number
+  /** Lottery draws the tier grants. */
+  chances: number
+  /** `locked` / `unlocked` / `claimed`. */
+  status: string
+}
+
+/** The growth streak as a whole: progress, tiers, makeup cards. */
+export interface WorkBuddyStreakStatus {
+  /** Current consecutive active days. */
+  days: number
+  /** Days active this month. */
+  monthTotalDays: number
+  /** Next tier key, e.g. `7d`. */
+  nextTier: string
+  /** Days still needed for `nextTier`. */
+  nextTierRemaining: number
+  /** Makeup cards in hand. */
+  makeupCards: number
+  tiers: readonly WorkBuddyStreakTier[]
+}
+
+/** One buddy trip state. */
+export interface WorkBuddyTravelState {
+  /** `idle` (can depart) / `traveling` / `arrived` (can claim). */
+  state: string
+  /** Trip id, required to claim an arrived trip. */
+  recordId: number
+  /** The once-a-day depart limit has been used. */
+  dailyLimitReached: boolean
+  /** Credits an arrived trip pays. */
+  rewardCredit: number
+}
+
 export interface WorkBuddyTask {
   /** Upstream task code; the claim path is built from it. */
   taskCode: string
@@ -485,6 +594,149 @@ export interface WorkBuddyTask {
  * there. Entries without a usable `task_code` are dropped — without one the
  * claim path cannot be built.
  */
+
+/**
+ * The event chain that scores the two Buddy-app tasks.
+ *
+ * Both tasks accept the same chain, and the chain is a pure value: building it
+ * needs no client, so callers (and tests) can hold one without a live upstream.
+ *
+ * The task text says "upgrade to the desktop client and open it from the app
+ * launcher". The scorer does not watch the UI — it watches this event sequence
+ * with the desktop fingerprint, which is why the sequence is what gets sent.
+ *
+ * Measured against the live upstream: progress 0/1 → 1/1 claimable in ~8s.
+ */
+/**
+ * A complete "desktop client ran a request successfully" event chain.
+ *
+ * Six events in the order the real client emits them: task created, message
+ * send, request send, message response, message status, request response.
+ * Several tasks are scored off this chain (or one that embeds it), because what
+ * they measure is "a real request completed", which the client only proves
+ * through this exact sequence.
+ *
+ * Measured: this chain alone lights up `RichMeow_Chat`.
+ */
+export function desktopChatEvents(
+  conversationId: string,
+  requestId: string,
+  messageId: string,
+  modelId = 'fast-model',
+  modelName = 'fast-model',
+): Record<string, unknown>[] {
+  const assistant = `${messageId}-assistant`
+  const session = { 'codebuddy.session_id': conversationId, 'codebuddy.conversation_request_id': requestId }
+  return [
+    {
+      eventCode: 'agent_task_created',
+      source: 'LOCAL', name: 'working', task_target: 'local', mode: 'craft',
+      requestModelId: modelId, requestModelName: modelName,
+      has_repo: false, repo_type: 'none', workspace_type: 'empty',
+      has_connector: false, connector_types: [],
+      has_mention: false, mention_types: [],
+      has_template: false, action: '', template_name: '',
+      has_expert: false, expert_id: '', expert_name: '', expert_industry_id: '',
+      has_skill: false, skill_names: [],
+      conversationId, messageId, buddyId: '', buddyName: '',
+    },
+    {
+      eventCode: 'chat_message_send',
+      messageId: assistant, historyCount: 0, isContextTruncated: false, currentStepCount: 1,
+      traceId: requestId, rootRequestId: requestId, parentConversationId: conversationId,
+      agentName: 'cli', agentType: 'main',
+    },
+    {
+      eventCode: 'chat_request_send',
+      inputLength: 24, isPlan: false, isAutoExecuteTerminal: false, isAutoModify: false,
+      codebaseEnable: false, maxToken: 0, maxSteps: 500, temperature: 0, maxRetries: 0,
+      mentionContexts: [], knowledgeId: [], knowledgeName: [],
+      codebaseId: '', mentionContextCount: 0, command: '', recommendId: '',
+      skillId: '', skillCount: 0, totalCount: 0,
+      traceId: requestId, rootRequestId: requestId, parentConversationId: conversationId,
+      agentName: 'cli', agentType: 'main',
+      ...session,
+    },
+    {
+      eventCode: 'chat_message_response',
+      messageId: assistant, responseModelId: modelId,
+      inputToken: 120, outputToken: 80, totalToken: 200,
+      cachedTokens: 0, cachedWriteTokens: 0, cachedMissTokens: 0,
+      isSuccessful: true, messageErrorCode: '', finishReason: 'stop',
+      firstTokenAt: Date.now(), traceId: requestId, conversationId,
+      rootRequestId: requestId, parentConversationId: conversationId,
+      agentName: 'cli', agentType: 'main',
+      ...session,
+    },
+    {
+      eventCode: 'chat_message_status',
+      messageId: assistant, messageErrorCode: '0',
+      traceId: requestId, rootRequestId: requestId, parentConversationId: conversationId,
+      agentName: 'cli', agentType: 'main',
+    },
+    {
+      eventCode: 'chat_request_response',
+      mode: 'craft', toolCallCount: 0,
+      inputToken: 120, outputToken: 80, totalToken: 200,
+      cachedTokens: 0, cachedWriteTokens: 0, cachedMissTokens: 0,
+      isSuccessful: true, messageErrorCode: '', finishReason: 'stop',
+      rootRequestId: requestId, parentConversationId: conversationId,
+    },
+  ]
+}
+
+/**
+ * A chat chain plus the two canvas events that score `create_canvas`.
+ *
+ * Worth +300, the joint largest task on the board. The canvas events ride
+ * the same metrics channel as everything else, so no real canvas is needed.
+ *
+ * Measured: three accounts scored 1/1 from this sequence.
+ */
+export function desktopCanvasEvents(conversationId: string, requestId: string): Record<string, unknown>[] {
+  const seed = requestId.slice(-8)
+  return [
+    ...desktopChatEvents(conversationId, requestId, 'msg-canvas'),
+    {
+      eventCode: 'wbx_design_canvas_task_create',
+      conversationId, requestId,
+      source: 'summon_keyword', cost: 12000, isSuccessful: true,
+    },
+    {
+      eventCode: 'wbx_design_canvas_open',
+      conversationId, requestId, id: `ardot-file-${seed}`,
+      source: 'summon_keyword', type: 'page', cost: 13000, isSuccessful: true,
+    },
+  ]
+}
+
+/**
+ * The single event that scores `automation_1` (a scheduled task was created).
+ *
+ * Measured: two accounts lit it with this event alone.
+ */
+export function desktopAutomationCreatedEvent(name: string): Record<string, unknown> {
+  return {
+    eventCode: 'automated_task_create_suc',
+    name,
+    source: 'manually', modelId: 'fast-model', modelIsThinking: true,
+    connectorCount: 0, skills: '', skillCount: 0,
+    scheduleType: 'once', mode: 'LOCAL',
+  }
+}
+
+export function buddyAppEvents(buddyId: string, buddyName: string): Record<string, unknown>[] {
+  const base = { mode: 'LOCAL', buddyId, buddyName }
+  return [
+    { ...base, eventCode: 'buddyapp_discover_click' },
+    { ...base, eventCode: 'buddyapp_show', elementId: buddyId, elementName: buddyName, position: 2 },
+    { ...base, eventCode: 'buddyapp_enter_click', elementId: buddyId, elementName: buddyName, position: 2, isFirstPage: '1' },
+    { ...base, eventCode: 'buddyapp_auth_confirm_click', elementId: buddyId, elementName: buddyName },
+    { ...base, eventCode: 'buddyapp_bindaccount_skip_click', elementId: buddyId, elementName: buddyName },
+  ]
+}
+
+
 function parseTask(value: unknown): WorkBuddyTask | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
@@ -841,6 +1093,85 @@ export class WorkBuddyUpstreamClient {
   }
 
   /**
+   * Public fingerprint fields every desktop event carries.
+   *
+   * The upstream scores a desktop-fingerprinted task only when the event looks
+   * like it came from the desktop client: the same field set, the same stable
+   * device ids, the same build. A partial map is accepted with 200 and scores
+   * nothing, so these are copied wholesale rather than trimmed.
+   *
+   * `machineId`/`sessionId` are DERIVED from the account uid, never random: a
+   * new device id on every call is itself a signal that the traffic is not a
+   * real client.
+   */
+  desktopFingerprint(credential: WorkBuddyCredential): Record<string, unknown> {
+    const now = Date.now()
+    return {
+      timezone: 'Asia/Shanghai',
+      reportDelay: 2000,
+      userId: credential.uid ?? '',
+      username: credential.nickname ?? '',
+      userNickname: credential.nickname ?? '',
+      product: 'SaaS',
+      releaseDate: 1789036585355,
+      commit: '5f9692923c93033111c51ad7b003eb80204a9b75',
+      ideName: 'WorkBuddy',
+      ideType: 'WorkBuddy',
+      ideVersion: '5.5.6',
+      machineId: deriveDeviceId(credential, 'machine'),
+      sessionId: deriveDeviceId(credential, 'session'),
+      extName: 'workbuddy-desktop',
+      extVersion: '5.5.6',
+      os: 'win32',
+      arch: 'x64',
+      osVersion: '10.0.26220',
+      cpuCores: 20,
+      memorySize: 24,
+      timestamp: now,
+      presentAt: now,
+    }
+  }
+
+  /**
+   * Send desktop-fingerprinted events to the growth system.
+   *
+   * The body is an ARRAY of events, and every event carries the full desktop
+   * fingerprint plus its own business fields. Different tasks recognise
+   * different fingerprint families (CLI / desktop / web), which is why this is
+   * separate from {@link reportActivity}: they are not interchangeable.
+   *
+   * Business fields win over the fingerprint, so a caller can override a device
+   * id to align with a real install.
+   */
+  async reportDesktopEvents(
+    credential: WorkBuddyCredential,
+    events: readonly Record<string, unknown>[],
+  ): Promise<void> {
+    if (events.length === 0) return
+    const fingerprint = this.desktopFingerprint(credential)
+    const body = events.map(event => ({ ...fingerprint, ...event }))
+    const response = await this.fetchImpl(`${chatBase(credential)}${DESKTOP_REPORT_PATH}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${credential.accessToken}`,
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json;charset=UTF-8',
+        'User-Agent': DESKTOP_TASK_UA,
+        'X-Product': 'SaaS',
+        'X-Request-ID': deriveDeviceId(credential, 'req') + String(Date.now() % 1_000_000),
+        ...credential.uid === undefined || credential.uid === '' ? {} : { 'X-User-Id': credential.uid },
+        ...credential.domain === '' ? {} : { 'X-Domain': credential.domain },
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+  }
+
+
+
+  /**
    * Report one chat-activity event to the growth system.
    *
    * The body is an ARRAY holding a single `chat_request_send` event, and every
@@ -851,6 +1182,214 @@ export class WorkBuddyUpstreamClient {
    *
    * One report per account per day is the quota the reference panel settled on;
    * a single report lights the growth streak and unlocks the `first_buddy`
+   * family, which is why this runs before the task-centre pass.
+
+  /**
+   * Send a WEB-fingerprinted event.
+   *
+   * A third fingerprint family, alongside CLI and desktop: a browser shape
+   * posted to the web origin with x-client-platform: web. Page-behaviour
+   * tasks such as `Library_read` are scored on it. Measured:
+   * `library_doc_intro_click` scored about four seconds after landing.
+   */
+  async reportWebEvent(
+    credential: WorkBuddyCredential,
+    eventCode: string,
+    pageUrl: string,
+    elementId: string,
+    elementName: string,
+  ): Promise<void> {
+    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
+    const event = {
+      eventCode,
+      timestamp: Date.now(),
+      reportDelay: 0,
+      pageURL: pageUrl,
+      elementId,
+      elementName,
+      os: 'Win32',
+      arch: '',
+      osVersion: '10.0',
+      userAgent: ua,
+      machineId: deriveDeviceId(credential, 'webmachine'),
+      userId: credential.uid ?? '',
+      userNickname: credential.nickname ?? '',
+      enterpriseId: credential.enterpriseId ?? '',
+    }
+    const response = await this.fetchImpl(`https://www.workbuddy.cn/v2/report`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${credential.accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'x-client-platform': 'web',
+        'Origin': 'https://www.workbuddy.cn',
+        'Referer': pageUrl,
+        'User-Agent': ua,
+        ...credential.uid === undefined || credential.uid === '' ? {} : { 'X-User-Id': credential.uid },
+      },
+      body: JSON.stringify([event]),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+  }
+  /**
+   * Apply an appearance theme on the account.
+   *
+   * The theme task is scored on the `appearance_skin_apply` event, not on this
+   * call — but the event alone is not enough either. The pair is what a real
+   * client produces: it PATCHes the account's selected skin, then reports the
+   * event as the settings page closes. Measured on the reference panel after
+   * the earlier "the API alone does not score" reading was corrected.
+   */
+  async setAppearanceTheme(credential: WorkBuddyCredential, resourceKey: string): Promise<void> {
+    const response = await this.fetchImpl(`${chatBase(credential)}${APPEARANCE_SET_PATH}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${credential.accessToken}`,
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json;charset=UTF-8',
+        'User-Agent': DESKTOP_TASK_UA,
+        'X-Product': 'SaaS',
+        ...credential.uid === undefined || credential.uid === '' ? {} : { 'X-User-Id': credential.uid },
+      },
+      body: JSON.stringify({ kind: 'theme', resource_key: resourceKey }),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+  }
+
+  /**
+   * The platform's expert marketplace.
+   *
+   * Needed before any expert can be summoned: the scorer verifies that the
+   * expert id exists on the platform, so a made-up id scores nothing. The
+   * response carries the display fields the summon events replay.
+   */
+  async marketExpertList(credential: WorkBuddyCredential, expertType: 'agent' | 'team' | '' = ''): Promise<readonly MarketExpert[]> {
+    const request: Record<string, unknown> = { page: 1, page_size: 20, sort_by: 'reco_rank', sort_order: 'desc' }
+    if (expertType !== '') request['expert_type'] = expertType
+    const response = await this.fetchImpl(`${chatBase(credential)}${MARKET_EXPERT_LIST_PATH}`, {
+      method: 'POST',
+      headers: {
+        ...chatHeaders(credential),
+        'User-Agent': DESKTOP_TASK_UA,
+      },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const data = asRecord(envelope.data)
+    const raw = Array.isArray(data['experts']) ? data['experts'] : []
+    const out: MarketExpert[] = []
+    for (const value of raw) {
+      const expert = asRecord(value)
+      const expertId = typeof expert['expert_id'] === 'string' ? expert['expert_id'] : ''
+      if (expertId === '') continue
+      out.push({
+        expertId,
+        expertType: typeof expert['expert_type'] === 'string' ? expert['expert_type'] : '',
+        displayName: typeof expert['display_name_zh'] === 'string' ? expert['display_name_zh'] : '',
+        profession: typeof expert['profession_zh'] === 'string' ? expert['profession_zh'] : '',
+        version: typeof expert['version'] === 'string' ? expert['version'] : '',
+        categories: Array.isArray(expert['categories'])
+          ? expert['categories'].filter((item): item is string => typeof item === 'string')
+          : [],
+      })
+    }
+    return out
+  }
+
+  /**
+   * Open a REAL desktop conversation and return the ids the server assigned.
+   *
+   * The expert and skill tasks join their events to a conversation the server
+   * has actually seen, so a locally invented `requestId` scores nothing. This
+   * starts a chat, reads the server's id out of the SSE stream, then drops the
+   * rest of the stream — the answer itself is irrelevant, only its identity is.
+   *
+   * Returns `undefined` instead of throwing when the conversation cannot be
+   * opened or carries no recognisable id, because every caller is a best-effort
+   * task chain.
+   */
+  async openConversation(
+    credential: WorkBuddyCredential,
+    expertId = '',
+    signal?: AbortSignal,
+  ): Promise<{ conversationId: string; requestId: string } | undefined> {
+    const conversationId = `wb2auto-conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const body = JSON.stringify({
+      model: 'fast-model',
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant. 当前处于中文环境，使用简体中文回答。' },
+        { role: 'user', content: '1+1等于几？直接回答。' },
+      ],
+      agent: 'cli',
+      temperature: 1,
+      stream: true,
+      stream_options: { include_usage: true },
+    })
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${chatBase(credential)}/v2/chat/completions`, {
+        method: 'POST',
+        headers: {
+          ...chatHeaders(credential),
+          'Accept': 'text/event-stream',
+          'User-Agent': DESKTOP_TASK_UA,
+          'X-Conversation-ID': conversationId,
+          'X-Request-ID': String(Date.now()) + '000000',
+          'X-Agent-Intent': 'craft',
+          'X-Agent-Type': 'main',
+          'X-IDE-Name': 'WorkBuddy',
+          'X-IDE-Type': 'WorkBuddy',
+          'X-IDE-Version': '5.5.6',
+          'x-codebuddy-request': '1',
+          ...expertId === '' ? {} : { 'X-Expert-Id': expertId },
+        },
+        body,
+        signal: signal ?? AbortSignal.timeout(CHAT_TIMEOUT_MS),
+      })
+    } catch {
+      return undefined
+    }
+    if (!response.ok || response.body === null) {
+      await response.body?.cancel().catch(() => {})
+      return undefined
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      while (buffer.length < SSE_SCAN_LIMIT) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        buffer += decoder.decode(chunk.value, { stream: true })
+        const match = SERVER_ID_PATTERN.exec(buffer)
+        if (match !== null) return { conversationId, requestId: match[1] ?? '' }
+      }
+    } catch {
+      // A truncated stream is not fatal: whatever arrived may still name the id.
+    } finally {
+      await reader.cancel().catch(() => {})
+    }
+    return undefined
+  }
+
+
+  /**
+   * Report one chat-activity event to the growth system.
+   *
+   * The body is an ARRAY holding a single chat_request_send event, and every
+   * field is filled in: a three-field minimal event is accepted with 200 and
+   * then silently dropped, so the full shape is load-bearing rather than
+   * cosmetic. userId is the one field the server actually keys on.
+   *
+   * One report per account per day is the quota the reference panel settled
+   * on; a single report lights the growth streak and unlocks the first_buddy
    * family, which is why this runs before the task-centre pass.
    */
   async reportActivity(credential: WorkBuddyCredential, conversationId?: string): Promise<void> {
@@ -939,6 +1478,188 @@ export class WorkBuddyUpstreamClient {
       : {}
     return typeof streak['days'] === 'number' ? streak['days'] as number : 0
   }
+
+  /**
+   * The full streak picture: days, tier unlock state, and what each tier pays.
+   *
+   * Read before redeeming, because the tier state is the only honest answer to
+   * "is there anything to claim": the redeem endpoint answers 403 for a locked
+   * tier, which is indistinguishable from a real failure once the response is
+   * just an error.
+   */
+  async growthStreakFull(credential: WorkBuddyCredential): Promise<WorkBuddyStreakStatus> {
+    const data = await this.growthJson(credential, 'GET', '/activity/growth/streak')
+    const streak = asRecord(data['streak'])
+    const redemption = asRecord(data['redemption_status'])
+    const cards = asRecord(data['makeup_cards'])
+    const tiers: WorkBuddyStreakTier[] = []
+    if (Array.isArray(redemption['tiers'])) {
+      for (const entry of redemption['tiers']) {
+        const tier = asRecord(entry)
+        const name = typeof tier['tier'] === 'string' ? tier['tier'] : ''
+        if (name === '') continue
+        tiers.push({
+          tier: name,
+          days: numOf(tier['days']),
+          credit: numOf(tier['credit']),
+          energy: numOf(tier['energy']),
+          cards: numOf(tier['cards']),
+          chances: numOf(tier['chances']),
+          // The flat status fields are the authoritative unlock state; the
+          // per-tier entry does not carry one of its own.
+          status: String(redemption[`tier_${name}_status`] ?? ''),
+        })
+      }
+    }
+    return {
+      days: numOf(streak['days']),
+      monthTotalDays: numOf(streak['month_total_days']),
+      nextTier: typeof streak['next_tier'] === 'string' ? streak['next_tier'] : '',
+      nextTierRemaining: numOf(streak['next_tier_remaining']),
+      makeupCards: numOf(cards['balance']),
+      tiers,
+    }
+  }
+
+  /**
+   * Redeem one unlocked streak tier.
+   *
+   * A locked tier answers 403 ("连续登录天数不足"); callers check the status from
+   * {@link growthStreakFull} first, so this only throws for genuine failures.
+   * The client token is the upstream's idempotency key — a fresh one per attempt
+   * keeps a retry from being read as a duplicate of the last one.
+   */
+  async redeemStreakTier(credential: WorkBuddyCredential, tier: string): Promise<void> {
+    await this.growthJson(credential, 'POST', '/activity/growth/redeem', {
+      tier,
+      client_token: randomUUID(),
+    })
+  }
+
+  /** How many lottery draws are available right now. */
+  async lotteryChances(credential: WorkBuddyCredential): Promise<number> {
+    const data = await this.growthJson(credential, 'GET', '/activity/growth/lottery/summary')
+    return numOf(data['chances'])
+  }
+
+  /**
+   * Draw the lottery once.
+   *
+   * Returns the raw prize payload: its shape is set by the running campaign, so
+   * it is passed through rather than modelled.
+   */
+  async lotteryDraw(credential: WorkBuddyCredential): Promise<unknown> {
+    return this.growthJson(credential, 'POST', '/activity/growth/lottery/draw', {
+      client_token: randomUUID(),
+    })
+  }
+
+  /**
+   * The buddy profile, or undefined when the account has no buddy yet.
+   *
+   * `data.buddy` is null / absent / an empty object depending on how far the
+   * account got, and all three mean the same thing to a caller: adopt first.
+   */
+  async buddyInfo(credential: WorkBuddyCredential): Promise<{ instanceId: number; name: string } | undefined> {
+    const data = await this.growthJson(credential, 'GET', '/activity/growth/buddy/info')
+    const buddy = asRecord(data['buddy'])
+    if (Object.keys(buddy).length === 0) return undefined
+    return { instanceId: numOf(buddy['instance_id']), name: String(buddy['name'] ?? '') }
+  }
+
+  /** Agree to the buddy terms. Idempotent upstream. */
+  async buddyAgree(credential: WorkBuddyCredential): Promise<void> {
+    await this.growthJson(credential, 'POST', '/activity/growth/buddy/agreement', { agree: true })
+  }
+
+  /**
+   * Adopt the first buddy.
+   *
+   * Gated upstream on having reported activity that day: without it the answer
+   * is 400 "first_buddy task not completed yet". Callers treat that as "not yet"
+   * rather than an error, which is why it is thrown as-is for them to classify.
+   */
+  async buddyAdoptFirst(credential: WorkBuddyCredential): Promise<void> {
+    await this.growthJson(credential, 'POST', '/activity/growth/buddy/first', {})
+  }
+
+  /** Current travel state for the account's buddy. */
+  async buddyTravelStatus(credential: WorkBuddyCredential): Promise<WorkBuddyTravelState> {
+    const data = await this.growthJson(credential, 'GET', '/activity/growth/buddy/travel/status')
+    return {
+      state: typeof data['state'] === 'string' ? data['state'] : '',
+      recordId: numOf(data['record_id']),
+      dailyLimitReached: data['daily_limit_reached'] === true,
+      rewardCredit: numOf(data['reward_credit']),
+    }
+  }
+
+  /**
+   * Send the buddy travelling.
+   *
+   * The location is always 4 (古镇客栈): the four locations have identical
+   * reward and duration ranges, so there is nothing to optimise.
+   */
+  async buddyTravelDepart(credential: WorkBuddyCredential, locationId = 4): Promise<void> {
+    await this.growthJson(credential, 'POST', '/activity/growth/buddy/travel/depart', { location_id: locationId })
+  }
+
+  /**
+   * Collect an arrived trip's reward.
+   *
+   * `recordId` is required and comes from the status read; the upstream rejects
+   * a claim without it.
+   */
+  async buddyTravelClaim(credential: WorkBuddyCredential, recordId: number): Promise<number> {
+    const data = await this.growthJson(credential, 'POST', '/activity/growth/buddy/travel/claim', {
+      record_id: recordId,
+    })
+    // A missing reward field is not a failure: the trip is collected either way.
+    return numOf(data['reward_credit'])
+  }
+
+  /** Whether yesterday is a gap in the activity heatmap. */
+  async heatmapYesterdayMissed(credential: WorkBuddyCredential): Promise<boolean> {
+    const data = await this.growthJson(credential, 'GET', '/activity/growth/heatmap')
+    if (!Array.isArray(data['cells'])) return false
+    const yesterday = new Date(Date.now() - 86_400_000)
+    const key = dayKeyLocal(yesterday)
+    for (const entry of data['cells']) {
+      const cell = asRecord(entry)
+      if (cell['date'] === key) return numOf(cell['score']) === 0
+    }
+    return false
+  }
+
+  /** Spend one makeup card on a date. Idempotent for an already-filled date. */
+  async useMakeupCard(credential: WorkBuddyCredential, date: string): Promise<void> {
+    await this.growthJson(credential, 'POST', '/activity/growth/makeup-cards/use', { date })
+  }
+
+  /**
+   * Call a growth-domain endpoint and return its unwrapped `data`.
+   *
+   * These endpoints live on the chat host with the billing header set, and
+   * carry the same envelope as everything else. Centralised here because every
+   * growth call needs the identical envelope check.
+   */
+  private async growthJson(
+    credential: WorkBuddyCredential,
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+  ): Promise<Record<string, unknown>> {
+    const response = await this.fetchImpl(`${chatBase(credential)}${path}`, {
+      method,
+      headers: billingHeaders(credential),
+      ...body === undefined ? {} : { body: JSON.stringify(body) },
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    return asRecord(envelope.data)
+  }
+
 
   /** Legacy thin wrapper kept for `status`/`doctor`: returns raw envelope data. */
   async credits(credential: WorkBuddyCredential): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> {

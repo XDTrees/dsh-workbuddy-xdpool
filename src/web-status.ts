@@ -23,9 +23,11 @@ import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
-import type { AutomationStatus } from './scheduler.ts'
+import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
+  POOL_AUTOMATION_RUN_PATH,
+  POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
   POOL_MODELS_SAVE_PATH,
   POOL_RESET_COOLDOWN_PATH,
@@ -34,6 +36,8 @@ import {
   type PoolWebAccount,
   type PoolWebAccountToggle,
   type PoolWebAutomationJob,
+  type PoolWebCreditReserve,
+  type PoolWebAutomationRun,
   type PoolWebCheckin,
   type PoolWebModel,
   type PoolWebModelSelection,
@@ -60,6 +64,21 @@ export interface PoolStatusRouteOptions {
    * reports the automation as off instead of showing a broken panel.
    */
   scheduler?: () => AutomationStatus
+  /**
+  /**
+   * Start a manual pass, for the card's "run now" button.
+   *
+   * Returns whether a run STARTED, not its result: a pass takes tens of
+   * seconds, so it runs in the background and the card polls the scheduler
+   * status for progress and earnings.
+   */
+  runAutomation?: (job: string, force: boolean) => boolean
+  /**
+   * Persist one account's reserved-credit floor. Same settings document as every
+   * other card write, so it survives a restart and is re-applied after a scan.
+   * Absent without a settings service: the route then answers 503.
+   */
+  setCreditReserve?: (accountId: string, reserve: number) => Promise<void> | void
   /**
    * Persist the user's model selection. Provided by the host half, which owns
    * the settings section; absent when the plugin runs without a settings
@@ -204,7 +223,42 @@ function parseAccountToggle(
   return { accountId, disabled }
 }
 
-function toWebAccount(account: WorkBuddyAccount, disabled: boolean): PoolWebAccount {
+/**
+ * Parse a manual-run request.
+ *
+ * The job name is checked against the real job list rather than passed through:
+ * an unknown name would otherwise reach the scheduler and silently do nothing,
+ * which reads to the user as a broken button.
+ */
+/**
+ * Parse a reserved-credit update.
+ *
+ * The account must already be known, for the same reason the disable route
+ * checks: an unknown id would sit in the settings file forever, attached to
+ * nothing the card can act on. A negative or non-finite floor is rejected
+ * rather than coerced.
+ */
+function parseCreditReserve(
+  body: Record<string, unknown>,
+  known: (id: string) => boolean,
+): PoolWebCreditReserve | undefined {
+  const accountId = typeof body['accountId'] === 'string' ? body['accountId'].trim() : ''
+  const raw = body['reserve']
+  if (accountId === '' || typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return undefined
+  if (!known(accountId)) return undefined
+  return { accountId, reserve: Math.floor(raw) }
+}
+
+function parseAutomationRun(body: Record<string, unknown>): PoolWebAutomationRun | undefined {
+  const job = typeof body['job'] === 'string' ? body['job'].trim() : ''
+  // 'all' runs the whole ordered pass, which is what the single button means.
+  if (job !== 'all' && !isAutomationJobKind(job)) return undefined
+  const force = body['force']
+  if (force !== undefined && typeof force !== 'boolean') return undefined
+  return { job, ...force === undefined ? {} : { force } }
+}
+
+function toWebAccount(account: WorkBuddyAccount, disabled: boolean, reserve: number, reserved: boolean): PoolWebAccount {
   const now = Date.now()
   const cooling = account.cooldownUntilMs > now
   const modelCooldowns = Object.entries(account.modelCooldowns)
@@ -223,6 +277,8 @@ function toWebAccount(account: WorkBuddyAccount, disabled: boolean): PoolWebAcco
     ...cooling ? { cooldownUntil: new Date(account.cooldownUntilMs).toISOString() } : {},
     ...modelCooldowns.length === 0 ? {} : { modelCooldowns },
     disabled,
+    creditReserve: reserve,
+    reserved,
     rateLimitHits: account.rateLimitHits,
   }
 }
@@ -284,10 +340,22 @@ export async function poolWebStatus(
   const now = Date.now()
 
   for (const account of accounts) {
-    const row = toWebAccount(account, deps.pool.isDisabled(account.id))
+    const row = toWebAccount(
+      account,
+      deps.pool.isDisabled(account.id),
+      deps.pool.creditReserveOf(account.id),
+      deps.pool.isReserved(account.id),
+    )
+    // Today's automation take for this account, when the host wired a scheduler.
+    // Absent means "earned nothing today", which the card renders as silence.
+    const earned = deps.scheduler?.().earningsToday[account.id]
+    if (earned !== undefined) Object.assign(row, { automationToday: earned })
     if (!row.cooling) {
       try {
         const credits = await deps.client.fetchCredits(account.credential)
+        // Feed the pool too: the reserve check reads the last known balance, and
+        // the card refresh is the most frequent place we learn it.
+        deps.pool.noteCredits(account.id, credits.total)
         Object.assign(row, { credits: {
           total: credits.total,
           packages: credits.packages,
@@ -348,13 +416,17 @@ export async function poolWebStatus(
     reportHours: [],
     taskHours: [],
     streakHours: [],
+    travelHours: [],
     jobs: {
       checkin: emptyAutomationJob(),
       report: emptyAutomationJob(),
       tasks: emptyAutomationJob(),
       streak: emptyAutomationJob(),
+      travel: emptyAutomationJob(),
     },
     claimableSeen: 0,
+    earningsToday: {},
+    runInProgress: false,
   }
 
   return {
@@ -382,6 +454,7 @@ export async function poolWebStatus(
     regions,
     shim,
     automation,
+    creditReserves: deps.pool.creditReservesInOrder(),
   }
 }
 
@@ -520,7 +593,70 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
       },
     })
 
+    /**
+     * Run one automation job on demand.
+     *
+     * POST only, loopback origin only, and the job name must be one of the four
+     * real jobs, so the card cannot name an arbitrary job. This exists so the
+     * automation is verifiable without waiting for its scheduled hour.
+     */
+    const disposeAutomationRun = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_AUTOMATION_RUN_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.runAutomation === undefined) {
+          return json(res, 503, { error: 'automation is not available in this build' })
+        }
+        try {
+          const body = await readJsonBody(req)
+          const run = parseAutomationRun(body)
+          if (run === undefined) return json(res, 400, { error: 'invalid automation run payload' })
+          // Start, do not await: the pass runs for tens of seconds and the card
+          // polls the status document for progress and earnings. Holding this
+          // request open would time out and read as a hung button.
+          const started = deps.runAutomation(run.job, run.force === true)
+          json(res, 200, { ok: true, job: run.job, started })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+
+
+    /**
+     * Set or clear one account's reserved-credit floor.
+     *
+     * POST only, loopback origin only, and the id must already be a known
+     * account: the card cannot invent an id, and a stale tab must not leave
+     * orphan keys in the settings file.
+     */
+    const disposeCreditReserve = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_CREDIT_RESERVE_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.setCreditReserve === undefined) {
+          return json(res, 503, { error: 'settings service unavailable; the reserve cannot be saved' })
+        }
+        try {
+          const body = await readJsonBody(req)
+          const known = new Set(deps.pool.list().map(account => account.id))
+          const parsed = parseCreditReserve(body, id => known.has(id))
+          if (parsed === undefined) return json(res, 400, { error: 'invalid credit reserve payload' })
+          await deps.setCreditReserve(parsed.accountId, parsed.reserve)
+          json(res, 200, { ok: true, ...parsed })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+
     return () => {
+      disposeAutomationRun()
+      disposeCreditReserve()
       disposeCheckin()
       disposeAccountDisable()
       disposeModelsSave()

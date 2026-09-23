@@ -25,6 +25,49 @@ export const POOL_MODELS_SAVE_PATH = '/plugins/dsh-workbuddy-xdpool/models/save'
 /** Switch one account in or out of the pool (card toggle). */
 export const POOL_ACCOUNT_DISABLE_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/disabled'
 
+/** Run one automation job immediately, so the card can verify it on demand. */
+export const POOL_AUTOMATION_RUN_PATH = '/plugins/dsh-workbuddy-xdpool/automation/run'
+
+/** Set or clear one account's reserved-credit floor. */
+export const POOL_CREDIT_RESERVE_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/credit-reserve'
+
+/** Body of the reserve route: exactly one account per request. */
+export interface PoolWebCreditReserve {
+  /** Pool account id, as reported in `PoolWebAccount.id`. */
+  accountId: string
+  /** Credits to keep. 0 clears the reserve. */
+  reserve: number
+}
+
+/** Body of the "run now" endpoint: exactly one job per request. */
+export interface PoolWebAutomationRun {
+  /** Which job to run: checkin / report / tasks / streak. */
+  job: string
+  /**
+   * Re-run even if the job already ran today. Every job is idempotent, so this
+   * only costs upstream calls; it is what a second button press means.
+   */
+  force?: boolean
+}
+
+/** Result of a manual run, echoing the job's refreshed state. */
+export interface PoolWebAutomationRunResult {
+  ok: true
+  job: string
+  /** Accounts that finished without error. */
+  okCount: number
+  /** Accounts that failed (each one skipped, the run continued). */
+  failed: number
+  /** Credits claimed by a task run. */
+  credit: number
+  /** Energy claimed by a task run. */
+  energy: number
+  /** Tasks claimed by a task run. */
+  claimed: number
+  /** One-line summary of the run. */
+  message?: string
+}
+
 /** One pool account's row, token-free. */
 export interface PoolWebAccount {
   id: string
@@ -50,6 +93,24 @@ export interface PoolWebAccount {
    */
   disabled: boolean
   rateLimitHits: number
+  /**
+   * Credits the user asked to keep for this account. The pool stops picking the
+   * account once its balance reaches the reserve, so this many credits survive.
+   * 0 means the account may be spent down as before.
+   */
+  creditReserve: number
+  /**
+   * Whether the account is held back purely by its reserve right now. Kept
+   * distinct from `cooling`: a reserved account is healthy and simply
+   * protected, which is a different thing to tell the user than rate-limited.
+   */
+  reserved: boolean
+  /**
+   * What the automation earned for this account today. Absent when it earned
+   * nothing (or the automation never ran for it), so the card can stay quiet
+   * instead of printing a row of zeroes.
+   */
+  automationToday?: PoolWebAutomationEarnings
   /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
   lastUsedAt?: string
   /** Aggregated credit summary for the account, read-only. */
@@ -180,6 +241,8 @@ export interface PoolWebStatus {
   shim: { running: boolean; baseUrl?: string }
   /** Daily-points automation state, so the card can show what ran and when. */
   automation: PoolWebAutomation
+  /** Per-account credit floors currently in force, keyed by account id. */
+  creditReserves: Readonly<Record<string, number>>
 }
 
 /** One automation job's last run, as shown on the card. */
@@ -222,9 +285,39 @@ export interface PoolWebAutomation {
     report: PoolWebAutomationJob
     tasks: PoolWebAutomationJob
     streak: PoolWebAutomationJob
+    travel: PoolWebAutomationJob
   }
   /** Claimable tasks seen on the most recent task pass, across accounts. */
   claimableSeen: number
+  /**
+   * Whether a manual run is in flight. The card polls this to know when to
+   * stop showing progress and report the result.
+   */
+  runInProgress: boolean
+  /**
+   * Per-account credits/energy/tasks the automation earned TODAY, keyed by
+   * account id. An account that earned nothing is simply absent, so the card
+   * can say "nothing yet" instead of showing a bare zero.
+   */
+  earningsToday: Readonly<Record<string, PoolWebAutomationEarnings>>
+}
+
+/** Today's automation take for one account. */
+export interface PoolWebAutomationEarnings {
+  /** Credits claimed from the task centre today. */
+  credit: number
+  /** Energy claimed from the task centre today. */
+  energy: number
+  /** Tasks claimed today. */
+  claimed: number
+  /** Credits collected from check-in today. */
+  checkinCredit: number
+  /** Credits from streak redemption and the lottery today. */
+  bonusCredit: number
+  /** Credits from buddy adoption and the travel loop today. */
+  travelCredit: number
+  /** Local date the counters belong to (YYYY-MM-DD). */
+  date: string
 }
 
 

@@ -379,6 +379,25 @@ export class WorkBuddyAccountPool {
    */
   private disabledIds = new Set<string>()
   /**
+   * Per-account credit floor, keyed by account id. 0 (or absent) means "spend
+   * it all".
+   *
+   * A reserved balance is protection, not a hard limit the upstream knows
+   * about: the pool simply stops picking that account once its last known
+   * balance is at or below the floor, so the user keeps a cushion instead of
+   * draining every account to zero.
+   */
+  private creditReserves = new Map<string, number>()
+  /**
+   * Last known credit balance per account, epoch ms aside.
+   *
+   * Refreshed in the background after a successful request, so a pick can
+   * consult it. An account with no reading is treated as usable: refusing to
+   * pick an account just because its balance has not been checked yet would
+   * strand a healthy pool, and the first 402 still cools it as before.
+   */
+  private creditBalances = new Map<string, number>()
+  /**
    * Last time each account served a request, epoch ms. Drives the idle term
    * of the priority-mode weighting below: an account that just served loses to
    * one that has been idle, so a small pool stops hammering a single account.
@@ -413,6 +432,8 @@ export class WorkBuddyAccountPool {
     exhaustCooldownMs?: number
     distribution?: AccountDistribution
     disabledAccountIds?: readonly string[]
+    /** Per-account credit floor, keyed by account id. Absent keeps the current map. */
+    creditReserves?: Readonly<Record<string, number>>
   }): void {
     if (options.authDirs !== undefined && options.authDirs.length > 0) {
       this.authDirs = options.authDirs
@@ -429,6 +450,8 @@ export class WorkBuddyAccountPool {
     if (options.disabledAccountIds !== undefined) {
       this.disabledIds = new Set(options.disabledAccountIds)
     }
+    // Reserves are replaced wholesale so the map mirrors the saved document.
+    if (options.creditReserves !== undefined) this.setCreditReserves(options.creditReserves)
   }
 
   /** Rescan the auth directories and merge newly discovered accounts. */
@@ -498,6 +521,14 @@ export class WorkBuddyAccountPool {
       // Switched off on the card: never serves a request, but still listed so
       // the card can switch it back on.
       if (this.disabledIds.has(account.id)) return false
+      // Reserved credits: stop picking an account once its last known balance
+      // reached the floor the user set for it. An account with no reading stays
+      // in play (see creditBalances), so an unprobed pool is not stranded.
+      const reserve = this.creditReserves.get(account.id)
+      if (reserve !== undefined && reserve > 0) {
+        const balance = this.creditBalances.get(account.id)
+        if (balance !== undefined && balance <= reserve) return false
+      }
       if (account.cooldownUntilMs > now) return false
       if (modelId !== undefined && (account.modelCooldowns[modelId] ?? 0) > now) return false
       // A region-scoped caller (one of the two providers) must never pick
@@ -631,6 +662,65 @@ export class WorkBuddyAccountPool {
   noteServed(accountId: string): void {
     if (!this.accounts.some(account => account.id === accountId)) return
     this.lastUsedAt.set(accountId, Date.now())
+  }
+
+  /**
+   * Record an account latest known credit balance.
+   *
+   * Called after a request and by the card balance refresh, so the reserve
+   * check has something to compare against. A reading for an unknown account is
+   * dropped: `scan()` rebuilds the account list and a stale id would otherwise
+   * accumulate forever.
+   */
+  noteCredits(accountId: string, balance: number): void {
+    if (!Number.isFinite(balance)) return
+    if (!this.accounts.some(account => account.id === accountId)) return
+    this.creditBalances.set(accountId, balance)
+  }
+
+  /** Last known balance for one account, or undefined when never read. */
+  creditsOf(accountId: string): number | undefined {
+    return this.creditBalances.get(accountId)
+  }
+
+  /** The credit floor the user set for one account; 0 when unset. */
+  creditReserveOf(accountId: string): number {
+    return this.creditReserves.get(accountId) ?? 0
+  }
+
+  /**
+   * Replace every reserve. Called from settings on each apply, so the map
+   * mirrors the saved document exactly instead of accumulating old keys.
+   */
+  setCreditReserves(reserves: Readonly<Record<string, number>>): void {
+    const next = new Map<string, number>()
+    for (const [id, value] of Object.entries(reserves)) {
+      if (Number.isFinite(value) && value > 0) next.set(id, Math.floor(value))
+    }
+    this.creditReserves = next
+  }
+
+  /** Every reserve currently in force, keyed by account id. */
+  creditReservesInOrder(): Record<string, number> {
+    const out: Record<string, number> = {}
+    for (const account of this.accounts) {
+      const reserve = this.creditReserves.get(account.id)
+      if (reserve !== undefined && reserve > 0) out[account.id] = reserve
+    }
+    return out
+  }
+
+  /**
+   * Whether an account is held back only by its reserve.
+   *
+   * Separates "resting to protect credits" from every other reason an account
+   * is out of rotation, which is what the card shows the user.
+   */
+  isReserved(accountId: string): boolean {
+    const reserve = this.creditReserves.get(accountId)
+    if (reserve === undefined || reserve <= 0) return false
+    const balance = this.creditBalances.get(accountId)
+    return balance !== undefined && balance <= reserve
   }
 
   /**

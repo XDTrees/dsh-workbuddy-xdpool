@@ -63,13 +63,16 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-usage-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .dsm-workbuddy-xdpool-usage-hint{padding-left:19px;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
 /* Distribution switch: priority (drain one) vs round-robin (spread). */
-.dsm-workbuddy-xdpool-dist{display:flex;align-items:center;gap:8px;padding-left:19px;flex-wrap:wrap}
+.dsm-workbuddy-xdpool-dist{display:flex;flex-direction:column;gap:6px;padding-left:19px;margin-top:8px}
 .dsm-workbuddy-xdpool-dist-title{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
-.dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:999px;padding:2px 10px;font-size:11px;line-height:18px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s}
+.dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;text-align:left;display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:44px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:8px;padding:6px 10px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s}
 .dsm-workbuddy-xdpool-dist-option:hover:not(:disabled):not(.dsm-workbuddy-xdpool-dist-option-active){color:var(--dsw-alias-label-primary,#e6e6e6);border-color:var(--dsw-alias-label-dimmed,#777)}
 .dsm-workbuddy-xdpool-dist-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
 .dsm-workbuddy-xdpool-dist-option-active{background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.14));border-color:var(--dsw-alias-state-success-primary,#22a06b);color:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-xdpool-dist-option:disabled{cursor:default;opacity:.6}
+.dsm-workbuddy-xdpool-dist-option-name{font-size:11px;line-height:16px;font-weight:600}
+.dsm-workbuddy-xdpool-dist-option-hint{font-size:10px;line-height:14px;opacity:.8}
+.dsm-workbuddy-xdpool-dist-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .dsm-workbuddy-xdpool-usage-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* Account list (each account = a labeled subpanel, same as dingminhua). */
@@ -200,9 +203,28 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-auto-switch:disabled{opacity:.5;cursor:not-allowed}
 .dsm-workbuddy-xdpool-auto-switch-on{border-color:#28c8b4;color:#28c8b4;background:rgba(40,200,180,.12)}
 .dsm-workbuddy-xdpool-auto-hint{margin:6px 0 0;color:var(--dsw-alias-label-dimmed,#8a97b5);font-size:11px;line-height:1.5}
+.dsm-workbuddy-xdpool-auto-total{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:8px;padding:6px 8px;border-radius:8px;background:rgba(40,200,180,.08);font-size:11px}
+.dsm-workbuddy-xdpool-auto-total-label{color:var(--dsw-alias-label-dimmed,#8a97b5)}
+.dsm-workbuddy-xdpool-auto-total{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding:6px 8px;border-radius:8px;background:rgba(40,200,180,.08);font-size:11px}
+.dsm-workbuddy-xdpool-auto-total-list{display:flex;flex-direction:column;gap:2px}
+.dsm-workbuddy-xdpool-auto-total-row{color:#28c8b4;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-earned{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,#36373b);font-size:11px}
+.dsm-workbuddy-xdpool-earned-label{color:var(--dsw-alias-label-dimmed,#8a97b5)}
+.dsm-workbuddy-xdpool-earned-list{display:flex;flex-direction:column;gap:2px}
+.dsm-workbuddy-xdpool-earned-row{color:#28c8b4;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-earned-value{color:#28c8b4;font-weight:600;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-auto-jobs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
-.dsm-workbuddy-xdpool-auto-job{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dsw-alias-label-dimmed,#8a97b5)}
+.dsm-workbuddy-xdpool-auto-job{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-dimmed,#8a97b5)}
 .dsm-workbuddy-xdpool-auto-job-name{flex:0 0 72px;color:var(--dsw-alias-label-primary,#e8e8ea)}
 .dsm-workbuddy-xdpool-auto-job-when{flex:1 1 auto;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-auto-job-last{flex:0 0 auto;text-align:right;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-auto-run{flex:0 0 auto;padding:2px 8px;font-size:10px;line-height:16px}
+/* Reserved credits: one inline number field per account. */
+.dsm-workbuddy-xdpool-reserve{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,#36373b);font-size:11px;color:var(--dsw-alias-label-dimmed,#8a97b5)}
+.dsm-workbuddy-xdpool-reserve-label{flex:0 0 auto}
+.dsm-workbuddy-xdpool-reserve-input{width:76px;padding:2px 6px;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,#e8e8ea);font:inherit;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-reserve-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-xdpool-reserve-input:disabled{opacity:.6}
+.dsm-workbuddy-xdpool-reserve-unit{flex:0 0 auto}
+.dsm-workbuddy-xdpool-reserve-badge{flex:0 0 auto;padding:1px 7px;border-radius:999px;background:rgba(232,90,90,.14);color:#e85a5a;font-size:10px}
 `.trim()

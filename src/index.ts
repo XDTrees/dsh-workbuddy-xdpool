@@ -20,9 +20,14 @@ import {
   createWorkBuddyAdapter,
   type WorkBuddyAdapter,
 } from './adapter.ts'
-import { WorkBuddyScheduler, type AutomationOptions } from './scheduler.ts'
+import { WorkBuddyScheduler, type AutomationJobKind, type AutomationLedger, type AutomationOptions } from './scheduler.ts'
 import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 import { buildStatus } from './status.ts'
+export {
+  AUTOMATION_JOB_KINDS, AUTOMATION_TICK_MS, EVENT_SCORE_WAIT_MS, WorkBuddyScheduler, dayKey,
+  isAutomationJobKind, isFireHour,
+  type AutomationLedger, type AutomationRunSummary, type AutomationStatus, type SchedulerLogger,
+} from './scheduler.ts'
 import { regionOf, WorkBuddyUpstreamClient, type WorkBuddyRegion } from './upstream.ts'
 import { registerPoolStatusRoute } from './web-status.ts'
 
@@ -40,9 +45,19 @@ export {
   type WorkBuddyCredential,
 } from './accounts.ts'
 export { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, type WorkBuddyModelInfo } from './catalog.ts'
-export { WorkBuddyUpstreamClient, classifyUpstreamError, parseRateLimitReset, type UpstreamErrorKind } from './upstream.ts'
+export { WorkBuddyUpstreamClient, buddyAppEvents, classifyUpstreamError, desktopAutomationCreatedEvent, desktopCanvasEvents, desktopChatEvents, parseRateLimitReset, type UpstreamErrorKind } from './upstream.ts'
+export {
+  APPEARANCE_THEME_KEY, BUDDY_APP_ID, BUDDY_APP_NAME, LIBRARY_DOC_URL, LIGHTHOUSE_EXPERT_ID,
+  PLAYBOOK_CASE_ID, PLAYBOOK_CASE_NAME, SKILL_ID, SKILL_NAME, TEMPLATE_PRESETS,
+  appearanceChain, automationChain, buddyAppChain, canvasChain, chatChain, expertActualUseEvent,
+  expertChatEvents, expertSummonEvents, libraryReadChain, playbookChain, skillChain, templateChain,
+  templateChains,
+  type ExpertUseMode, type MarketExpert, type TaskEventChain, type TaskEventTransport,
+} from './task-events.ts'
 export { buildStatus, formatStatus, formatRates, type WorkBuddyStatus, type AccountStatus } from './status.ts'
 export {
+  POOL_AUTOMATION_RUN_PATH,
+  POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
   POOL_MODELS_SAVE_PATH,
   POOL_RESET_COOLDOWN_PATH,
@@ -55,6 +70,11 @@ export {
   type PoolWebStatus,
 } from './status-paths.ts'
 export type { ModelSelection } from './catalog.ts'
+
+// The card half talks to these routes over HTTP; exporting the registrar and
+// its option shape lets a probe mount the real table instead of trusting that
+// a registration landed outside the teardown closure.
+export { poolWebStatus, registerPoolStatusRoute, type PoolStatusRouteOptions } from './web-status.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'llm-workbuddy-xdpool'
@@ -79,11 +99,16 @@ export interface Config {
   /**
    * How the pool spreads requests across accounts.
    *
-   * `priority` (default) drains one account before moving to the next, which
-   * is what a pool of your own accounts is for. `round-robin` splits the
-   * spend evenly instead. Absent reads as `priority`.
+   * - `priority` (default) drains one account before moving to the next, which
+   *   is what a pool of your own accounts is for.
+   * - `round-robin` walks the pool in order, so the spend splits evenly.
+   * - `balanced` draws at random, weighting whichever account has been idle
+   *   longest. Spend still spreads, but without a fixed order, so one unhealthy
+   *   account cannot pin the pool to itself.
+   *
+   * Absent reads as `priority`.
    */
-  distribution?: 'priority' | 'round-robin'
+  distribution?: 'priority' | 'round-robin' | 'balanced'
   /**
    * Account ids switched off on the card. A disabled account is never picked
    * to serve a request, but it stays in the pool and on the card so it can be
@@ -91,6 +116,12 @@ export interface Config {
    * survive re-scans (see WorkBuddyAccountPool.disabledIds).
    */
   disabledAccountIds?: string[]
+  /**
+   * Per-account credit floor, keyed by account id. The pool stops picking an
+   * account once its last known balance reaches this value, so the reserved
+   * credits survive. Absent or 0 spends the account down as before.
+   */
+  creditReserves?: Record<string, number>
   /**
    * Model ids enabled in the picker. Absent means "every model the catalog
    * advertises" — an unconfigured install should never present an empty model
@@ -123,6 +154,13 @@ export interface Config {
    * fresh install with background traffic.
    */
   automation?: AutomationConfig
+  /**
+   * The automation's daily earnings ledger, written by the scheduler itself.
+   *
+   * It lives in settings rather than only in memory so a host restart mid-day
+   * does not wipe what the automation already earned.
+   */
+  automationEarnings?: AutomationLedger
 }
 
 /** One region's saved model selection. */
@@ -155,6 +193,8 @@ export interface AutomationConfig {
   taskHours?: number[]
   /** Hours at which streak redemption runs. */
   streakHours?: number[]
+  /** Hours at which the buddy travel loop runs. */
+  travelHours?: number[]
   /** How long an account rests after its credits run out, in milliseconds. */
   exhaustCooldownMs?: number
 }
@@ -177,6 +217,7 @@ export function automationOptions(automation: AutomationConfig | undefined): Aut
     ...automation?.reportHours === undefined ? {} : { reportHours: automation.reportHours },
     ...automation?.taskHours === undefined ? {} : { taskHours: automation.taskHours },
     ...automation?.streakHours === undefined ? {} : { streakHours: automation.streakHours },
+    ...automation?.travelHours === undefined ? {} : { travelHours: automation.travelHours },
   }
 }
 
@@ -212,6 +253,7 @@ const automationSchema = z.object({
   reportHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for the activity report (runs before tasks)'),
   taskHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for task enrolment and claiming'),
   streakHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for streak redemption'),
+  travelHours: z.array(z.number().step(1).min(0).max(23)).description('Local hours for the buddy travel loop'),
   exhaustCooldownMs: z.number().step(1).min(1000).description('How long a spent account rests, in milliseconds'),
 })
 
@@ -233,14 +275,16 @@ export const modelSelectionKeyFor = (region: 'cn' | 'global'): string =>
 export const Config: z<Config> = z.object({
   authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app own location)'),
   cooldownMs: z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds'),
-  distribution: z.union(['priority', 'round-robin']).default('priority').description('How requests are spread: priority (drain one) or round-robin'),
+  distribution: z.union(['priority', 'round-robin', 'balanced']).default('priority').description('How requests are spread: priority (drain one), round-robin (in order), or balanced (idle-weighted random)'),
   disabledAccountIds: z.array(z.string()).default([]).description('Account ids excluded from the pool (empty = every discovered account participates)'),
+  creditReserves: z.dict(z.number().step(1).min(0)).default({}).description('Per-account credit floor: stop using an account once its balance reaches this value'),
   enabledModelIds: z.array(z.string()).default([]).description('Legacy shared model-id list; used by a region that has no per-region selection yet'),
   imageModelIds: z.array(z.string()).default([]).description('Legacy shared image-id list; used by a region that has no per-region selection yet'),
   contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Legacy shared context budgets; used by a region with no per-region selection yet'),
   modelSelectionCn: modelSelectionSchema.description('Model selection for the domestic gateway'),
   modelSelectionGlobal: modelSelectionSchema.description('Model selection for the international gateway'),
   automation: automationSchema.description('Daily points automation (activity report, task claiming, check-in)'),
+  automationEarnings: z.any().description('Automation earnings ledger (written by the scheduler)')
 
 })
 
@@ -328,7 +372,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     onChange() { applyConfigFromSource() },
   }
   const applyConfigFromSource = (): void => {
-    const { authFile, cooldownMs, distribution, disabledAccountIds, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal, automation } = current()
+    const { authFile, cooldownMs, distribution, disabledAccountIds, creditReserves, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal, automation } = current()
     core.pool.applyConfig({
       ...authFile === undefined
         ? {}
@@ -338,6 +382,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       // drains one account at a time rather than splitting the spend.
       distribution: distribution ?? 'priority',
       ...disabledAccountIds === undefined ? {} : { disabledAccountIds },
+      // Reserves travel with every other pool option, so a save on the card is
+      // in force without a host restart.
+      ...creditReserves === undefined ? {} : { creditReserves },
       // How long a spent account rests also shapes the automation: the task pass
       // skips a cooling account, so a short window means fewer accounts are
       // excluded when a job runs.
@@ -424,6 +471,21 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
+  // Persist the automation's daily earnings ledger through the same settings
+  // path everything else uses. Without this the ledger lives only in memory, so
+  // a host restart mid-day would show nothing for rewards the automation had
+  // genuinely collected.
+  //
+  // The scheduler restores it in its own constructor, which runs before the
+  // settings source is installed, so the read here re-primes it: a ledger saved
+  // earlier today is folded back in as soon as the document is available.
+  core.scheduler.setEarningsPersistence((ledger) => {
+    setSetting('automationEarnings', ledger)
+  })
+  const storedLedger = current().automationEarnings
+  if (storedLedger !== undefined) core.scheduler.applyEarningsLedger(storedLedger)
+
+
   // One shim per region. Each carries its own ephemeral port and secret, and
   // each is scoped to its gateway's accounts, so the two providers are fully
   // independent: a failing region cannot take the other one down with it.
@@ -464,6 +526,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     // The automation is pool-wide, not per region, so both routes read the same
     // scheduler snapshot.
     scheduler: () => core.scheduler.status(),
+    // Starts the pass in the background and returns immediately: a full run takes
+    // tens of seconds, and the card polls the status document for the result.
+    runAutomation: (_job: string, _force: boolean) => core.scheduler.startRunAll(),
     // The settings section owns the model selection; this is the write half of
     // the card's save round-trip. It goes through `settingsScope.set` (below)
     // so the change lands in the same document the model picker reads.
@@ -488,6 +553,16 @@ export function apply(ctx: Context, config: Config = {}): void {
         : currentIds.filter(id => id !== accountId)
       setSetting('disabledAccountIds', next)
     },
+      // Set one account's reserved-credit floor. Also a read-modify-write:
+      // the card sends a single account, so two tabs editing different
+      // accounts cannot overwrite each other. A zero clears the entry rather
+      // than storing it, so the settings file only names real reserves.
+      setCreditReserve: (accountId, reserve) => {
+        const next = { ...current().creditReserves ?? {} }
+        if (reserve > 0) next[accountId] = reserve
+        else delete next[accountId]
+        setSetting('creditReserves', next)
+      },
   }))
   api = {
     ...core,
