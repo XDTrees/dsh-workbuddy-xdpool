@@ -5,6 +5,7 @@
 ##   - 文件名必须与 npm 侧「Workflow filename」一致：release.yml
 ##   - id-token: write 是 OIDC 的唯一硬要求，删掉就退化成需要 token
 ##   - registry-url 指向官方 registry（本机 .npmrc 默认是淘宝镜像，必须覆盖）
+##   - contents: write 是建 Release 需要的：GitHub Release 与 tag 是两回事
 ##   - package-manager-cache: false —— 官方要求在发布构建里禁用缓存。
 ##     注意这是 setup-node v7 才有的输入：v4 上它不存在，会报
 ##     "Unexpected input(s) 'package-manager-cache'" 并静默失效。
@@ -21,7 +22,7 @@ on:
 
 permissions:
   id-token: write # OIDC：npm 据此确认「是本人授权的 workflow」
-  contents: read
+  contents: write # 建 GitHub Release 需要写权限（只读会 403）
 
 concurrency:
   group: release-${{ github.ref }}
@@ -102,3 +103,26 @@ jobs:
       - name: Publish to npm
         # OIDC 自动生效；npm CLI 会先尝试 OIDC，再回退到传统 token
         run: npm publish --ignore-scripts --access public
+
+      - name: Create the GitHub release
+        # 只推 tag 不会在 Releases 页面产生条目——那需要一个 Release 对象。
+        # 缺了这一步，npm 上有新版而 Releases 页面停在上一个版本，
+        # 看页面的人会以为没发。正文从 CHANGELOG 抽同版本那一段。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          node -e '
+            const { readFileSync, writeFileSync } = require("node:fs")
+            const lines = readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/)
+            const at = lines.findIndex(l => l.startsWith("## " + process.argv[1] + " "))
+            if (at < 0) { console.error("no CHANGELOG section for " + process.argv[1]); process.exit(1) }
+            const rest = lines.slice(at + 1)
+            const end = rest.findIndex(l => l.startsWith("## "))
+            writeFileSync("release-body.md", (end < 0 ? rest : rest.slice(0, end)).join("\n").trim() + "\n")
+          ' "$VERSION"
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes-file release-body.md \
+            --verify-tag
