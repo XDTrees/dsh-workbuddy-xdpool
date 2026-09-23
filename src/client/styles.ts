@@ -80,6 +80,13 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-account{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:14px;background:var(--dsw-alias-bg-layer-2,#24262c)}
 .dsm-workbuddy-xdpool-account-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
 .dsm-workbuddy-xdpool-account-label{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:14px;font-weight:600;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-workbuddy-xdpool-account-head{display:flex;align-items:center;gap:8px;min-width:0}
+/* Account switched off on the card: still listed (so it can be turned back on) but visually muted. */
+.dsm-workbuddy-xdpool-account-off{opacity:.55}
+/* Small pill switch: "in rotation" vs "off". Native checkbox styled by the label. */
+.dsm-workbuddy-xdpool-account-toggle{display:inline-flex;align-items:center;gap:5px;flex:none;cursor:pointer;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11px;line-height:16px;white-space:nowrap}
+.dsm-workbuddy-xdpool-account-toggle input{margin:0;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
+.dsm-workbuddy-xdpool-account-toggle:hover{color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-account-tags{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .dsm-workbuddy-xdpool-account-tag{padding:1px 8px;border-radius:999px;font-size:11px;line-height:18px;background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.12));color:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-xdpool-account-tag-cooling{background:var(--dsw-alias-state-warning-subtle,rgba(217,119,6,.15));color:var(--dsw-alias-state-warning-primary,#d97706)}

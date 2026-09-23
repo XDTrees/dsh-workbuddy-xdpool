@@ -228,7 +228,7 @@ export declare function workbuddyAccountId(credential: Pick<WorkBuddyCredential,
 /** Every directory the pool should scan, in probe order. */
 export declare function candidateAuthDirs(env?: NodeJS.ProcessEnv): string[];
 /** How the pool chooses which account serves the next request. */
-type AccountDistribution = 'priority' | 'round-robin';
+type AccountDistribution = 'priority' | 'round-robin' | 'balanced';
 interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
   logger?: {
@@ -256,10 +256,6 @@ interface AccountPoolOptions {
    */
   distribution?: AccountDistribution;
 }
-/**
- * Read-only pool of every discovered WorkBuddy account, with rate-limit
- * cooldown and round-robin failover.
- */
 export declare class WorkBuddyAccountPool {
   private readonly logger;
   private authDirs;
@@ -272,6 +268,24 @@ export declare class WorkBuddyAccountPool {
   private cursor;
   private lastScanAtMs;
   private preferredId;
+  /**
+   * Account ids the user switched off on the card.
+   *
+   * Disabling is a user preference rather than a property of the credential:
+   * `scan()` rebuilds every account object from the auth files, so the set
+   * lives on the pool and is re-applied from settings after each scan.
+   */
+  private disabledIds;
+  /**
+   * Last time each account served a request, epoch ms. Drives the idle term
+   * of the priority-mode weighting below: an account that just served loses to
+   * one that has been idle, so a small pool stops hammering a single account.
+   *
+   * In-memory on purpose: it only biases the next pick, so a cold start that
+   * treats every account as idle is the right default. Not keyed by id lookup
+   * misses because a removed account simply disappears from the map on re-scan.
+   */
+  private lastUsedAt;
   private refreshInflight;
   constructor(options?: AccountPoolOptions);
   /**
@@ -283,6 +297,7 @@ export declare class WorkBuddyAccountPool {
     authDirs?: readonly string[];
     cooldownMs?: number;
     distribution?: AccountDistribution;
+    disabledAccountIds?: readonly string[];
   }): void;
   /** Rescan the auth directories and merge newly discovered accounts. */
   scan(): Promise<WorkBuddyAccount[]>;
@@ -298,6 +313,22 @@ export declare class WorkBuddyAccountPool {
    * model, e.g. CLI diagnostics).
    */
   private available;
+  /** Round-robin: the legacy cursor walk, kept for the distribution that asks for it. */
+  private pickRoundRobin;
+  /**
+   * Priority mode: weighted random over the eligible accounts.
+   *
+   * The weight is an idle bonus — `1 + min(idleHours * perHour, max)` — so an
+   * account that has never served (or has been idle for a while) outranks one
+   * that just answered. Reference panel logic drops its success-rate term
+   * entirely because a lifetime error counter penalises an account forever;
+   * instantaneous health is already handled by cooldowns, which is why those
+   * accounts never reach this list.
+   *
+   * A pool with no idle history (fresh process) hashes to equal weights, which
+   * spreads the very first picks instead of always returning index 0.
+   */
+  private pickByWeight;
   /**
    * Pick the account to serve a request.
    *
@@ -323,6 +354,10 @@ export declare class WorkBuddyAccountPool {
   /** How the pool currently spreads requests. Shown on the card. */
   currentDistribution(): AccountDistribution;
   prefer(accountId: string | undefined): void;
+  /** Whether the user switched this account off on the card. */
+  isDisabled(accountId: string): boolean;
+  /** Every account id the user switched off, in discovery order. */
+  disabledIdsInOrder(): string[];
   /** Best-effort refresh of one account after a session-dead upstream answer. */
   refreshAccount(accountId: string): Promise<void>;
   /**
@@ -572,6 +607,11 @@ interface PoolWebAccount {
     modelId: string;
     until: string;
   }>;
+  /**
+   * Whether the user switched this account off. A disabled account never
+   * serves a request, but it stays listed so the card can switch it back on.
+   */
+  disabled: boolean;
   rateLimitHits: number;
   /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
   lastUsedAt?: string;
@@ -657,7 +697,6 @@ interface PoolWebModel {
   /** Whether this model is currently enabled in the picker. */
   enabled: boolean;
 }
-/** The user's saved model selection, echoed back so the card can diff a draft. */
 interface PoolWebModelSelection {
   /** Absent = every model is enabled. */
   enabledModelIds?: readonly string[];
@@ -697,7 +736,7 @@ interface PoolWebStatus {
  */
 type PoolRegion = 'cn' | 'global';
 /** How the pool spreads requests across its accounts. */
-type PoolDistribution = 'priority' | 'round-robin';
+type PoolDistribution = 'priority' | 'round-robin' | 'balanced';
 //#endregion
 //#region src/index.d.ts
 /** Stable Cordis plugin name. */
@@ -725,6 +764,13 @@ export interface Config {
    * spend evenly instead. Absent reads as `priority`.
    */
   distribution?: 'priority' | 'round-robin';
+  /**
+   * Account ids switched off on the card. A disabled account is never picked
+   * to serve a request, but it stays in the pool and on the card so it can be
+   * switched back on. Ids are the pool's stable per-credential keys, which
+   * survive re-scans (see WorkBuddyAccountPool.disabledIds).
+   */
+  disabledAccountIds?: string[];
   /**
    * Model ids enabled in the picker. Absent means "every model the catalog
    * advertises" — an unconfigured install should never present an empty model

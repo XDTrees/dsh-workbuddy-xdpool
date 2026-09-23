@@ -84,6 +84,13 @@ export interface Config {
    */
   distribution?: 'priority' | 'round-robin'
   /**
+   * Account ids switched off on the card. A disabled account is never picked
+   * to serve a request, but it stays in the pool and on the card so it can be
+   * switched back on. Ids are the pool's stable per-credential keys, which
+   * survive re-scans (see WorkBuddyAccountPool.disabledIds).
+   */
+  disabledAccountIds?: string[]
+  /**
    * Model ids enabled in the picker. Absent means "every model the catalog
    * advertises" — an unconfigured install should never present an empty model
    * list just because the key is missing.
@@ -153,6 +160,7 @@ export const Config: z<Config> = z.object({
   authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app own location)'),
   cooldownMs: z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds'),
   distribution: z.union(['priority', 'round-robin']).default('priority').description('How requests are spread: priority (drain one) or round-robin'),
+  disabledAccountIds: z.array(z.string()).default([]).description('Account ids excluded from the pool (empty = every discovered account participates)'),
   enabledModelIds: z.array(z.string()).default([]).description('Legacy shared model-id list; used by a region that has no per-region selection yet'),
   imageModelIds: z.array(z.string()).default([]).description('Legacy shared image-id list; used by a region that has no per-region selection yet'),
   contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Legacy shared context budgets; used by a region with no per-region selection yet'),
@@ -238,7 +246,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     onChange() { applyConfigFromSource() },
   }
   const applyConfigFromSource = (): void => {
-    const { authFile, cooldownMs, distribution, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal } = current()
+    const { authFile, cooldownMs, distribution, disabledAccountIds, enabledModelIds, imageModelIds, contextBudgets, modelSelectionCn, modelSelectionGlobal } = current()
     core.pool.applyConfig({
       ...authFile === undefined
         ? {}
@@ -247,6 +255,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // Absent reads as priority, so an install that never opened the card
       // drains one account at a time rather than splitting the spend.
       distribution: distribution ?? 'priority',
+      ...disabledAccountIds === undefined ? {} : { disabledAccountIds },
     })
     // The model selection travels the same settings path as the pool options:
     // the card writes it through the settings section and each catalog filters
@@ -348,6 +357,16 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...selection.imageModelIds === undefined ? {} : { imageModelIds: [...selection.imageModelIds] },
         ...selection.contextBudgets === undefined ? {} : { contextBudgets: { ...selection.contextBudgets } },
       })
+    },
+    // Flip one account in or out of the pool. Read-modify-write rather than a
+    // full overwrite: the card sends one account per request, so two tabs
+    // toggling different accounts cannot clobber each other.
+    setAccountDisabled: (accountId, disabled) => {
+      const currentIds = current().disabledAccountIds ?? []
+      const next = disabled
+        ? currentIds.includes(accountId) ? currentIds : [...currentIds, accountId]
+        : currentIds.filter(id => id !== accountId)
+      setSetting('disabledAccountIds', next)
     },
   }))
   api = {

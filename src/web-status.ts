@@ -24,12 +24,14 @@ import type { WorkBuddyCatalog } from './catalog.ts'
 import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import {
+  POOL_ACCOUNT_DISABLE_PATH,
   POOL_CHECKIN_PATH,
   POOL_MODELS_SAVE_PATH,
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
   POOL_STATUS_PATH,
   type PoolWebAccount,
+  type PoolWebAccountToggle,
   type PoolWebCheckin,
   type PoolWebModel,
   type PoolWebModelSelection,
@@ -37,7 +39,7 @@ import {
   type PoolRegion,
 } from './status-paths.ts'
 
-export { POOL_CHECKIN_PATH, POOL_MODELS_SAVE_PATH, POOL_RESET_COOLDOWN_PATH, POOL_RESCAN_PATH, POOL_STATUS_PATH }
+export { POOL_ACCOUNT_DISABLE_PATH, POOL_CHECKIN_PATH, POOL_MODELS_SAVE_PATH, POOL_RESET_COOLDOWN_PATH, POOL_RESCAN_PATH, POOL_STATUS_PATH }
 export type { PoolWebStatus }
 
 /** Constructor dependencies — a narrow slice of the pool runtime. */
@@ -59,6 +61,12 @@ export interface PoolStatusRouteOptions {
    * international tab each own their list and must never overwrite each other.
    */
   saveSelection?: (region: PoolRegion, selection: PoolWebModelSelection) => Promise<void> | void
+  /**
+   * Persist one account switch. Same settings document as every other card
+   * write, so it survives a restart and is re-applied after each re-scan.
+   * Absent without a settings service: the route then answers 503.
+   */
+  setAccountDisabled?: (accountId: string, disabled: boolean) => Promise<void> | void
 }
 
 /** Redact token-like content before it crosses to the browser. */
@@ -157,7 +165,26 @@ function parseSelection(body: Record<string, unknown>): PoolWebModelSelection | 
   return out
 }
 
-function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
+/**
+ * Validate the account-toggle body. Returns undefined for anything malformed so
+ * the route answers 400 instead of writing a half-applied switch.
+ *
+ * The id must name a currently known account: accepting an arbitrary string
+ * would let a stale tab (or a renamed credential) leave orphan ids in the
+ * settings file that no card can ever switch back off.
+ */
+function parseAccountToggle(
+  body: Record<string, unknown>,
+  known: (id: string) => boolean,
+): PoolWebAccountToggle | undefined {
+  const accountId = typeof body['accountId'] === 'string' ? body['accountId'].trim() : ''
+  const disabled = body['disabled']
+  if (accountId === '' || typeof disabled !== 'boolean') return undefined
+  if (!known(accountId)) return undefined
+  return { accountId, disabled }
+}
+
+function toWebAccount(account: WorkBuddyAccount, disabled: boolean): PoolWebAccount {
   const now = Date.now()
   const cooling = account.cooldownUntilMs > now
   const modelCooldowns = Object.entries(account.modelCooldowns)
@@ -175,6 +202,7 @@ function toWebAccount(account: WorkBuddyAccount): PoolWebAccount {
     cooling,
     ...cooling ? { cooldownUntil: new Date(account.cooldownUntilMs).toISOString() } : {},
     ...modelCooldowns.length === 0 ? {} : { modelCooldowns },
+    disabled,
     rateLimitHits: account.rateLimitHits,
   }
 }
@@ -236,7 +264,7 @@ export async function poolWebStatus(
   const now = Date.now()
 
   for (const account of accounts) {
-    const row = toWebAccount(account)
+    const row = toWebAccount(account, deps.pool.isDisabled(account.id))
     if (!row.cooling) {
       try {
         const credits = await deps.client.fetchCredits(account.credential)
@@ -421,8 +449,33 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
         }
       },
     })
+    // Flip one account in or out of rotation. POST only, loopback origin only,
+    // and the id must already be a known account — the card cannot invent one.
+    const disposeAccountDisable = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_ACCOUNT_DISABLE_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.setAccountDisabled === undefined) {
+          return json(res, 503, { error: 'settings service unavailable; the account switch cannot be saved' })
+        }
+        try {
+          const body = await readJsonBody(req)
+          const known = new Set(deps.pool.list().map(account => account.id))
+          const toggle = parseAccountToggle(body, id => known.has(id))
+          if (toggle === undefined) return json(res, 400, { error: 'invalid account toggle payload' })
+          await deps.setAccountDisabled(toggle.accountId, toggle.disabled)
+          json(res, 200, { ok: true, ...toggle })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+
     return () => {
       disposeCheckin()
+      disposeAccountDisable()
       disposeModelsSave()
       disposeReset()
       disposeRescan()

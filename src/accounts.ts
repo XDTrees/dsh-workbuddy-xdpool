@@ -293,7 +293,7 @@ export function candidateAuthDirs(env: NodeJS.ProcessEnv = process.env): string[
 }
 
 /** How the pool chooses which account serves the next request. */
-export type AccountDistribution = 'priority' | 'round-robin'
+export type AccountDistribution = 'priority' | 'round-robin' | 'balanced'
 
 export interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
@@ -323,6 +323,30 @@ export interface AccountPoolOptions {
  * Read-only pool of every discovered WorkBuddy account, with rate-limit
  * cooldown and round-robin failover.
  */
+/** Idle bonus per hour an account has been unused (reference-panel default). */
+const IDLE_WEIGHT_PER_HOUR = 0.5
+/** Ceiling for the idle bonus, so an idle account cannot dominate forever. */
+const IDLE_WEIGHT_MAX = 5
+
+/**
+ * Weight one account by how long it has been idle.
+ *
+ * The base of 1 keeps every eligible account in play: an account that served a
+ * moment ago still has a small chance, so a single unhealthy account cannot pin
+ * the pool to itself, and the weights never sum to zero.
+ *
+ * `lastUsedAt === undefined` means "never used in this process", which earns the
+ * full bonus: on a fresh start every account ties, and the weighted draw spreads
+ * the first requests instead of always picking the first entry.
+ */
+function idleWeight(lastUsedAt: number | undefined, now: number): number {
+  if (lastUsedAt === undefined) return 1 + IDLE_WEIGHT_MAX
+  const hours = (now - lastUsedAt) / 3_600_000
+  // A clock jump backwards would produce a negative idle term; clamp to 0.
+  const idle = Math.min(Math.max(hours, 0) * IDLE_WEIGHT_PER_HOUR, IDLE_WEIGHT_MAX)
+  return 1 + idle
+}
+
 export class WorkBuddyAccountPool {
   private readonly logger: AccountPoolOptions['logger']
   private authDirs: readonly string[]
@@ -335,6 +359,24 @@ export class WorkBuddyAccountPool {
   private cursor = 0
   private lastScanAtMs = 0
   private preferredId: string | undefined
+  /**
+   * Account ids the user switched off on the card.
+   *
+   * Disabling is a user preference rather than a property of the credential:
+   * `scan()` rebuilds every account object from the auth files, so the set
+   * lives on the pool and is re-applied from settings after each scan.
+   */
+  private disabledIds = new Set<string>()
+  /**
+   * Last time each account served a request, epoch ms. Drives the idle term
+   * of the priority-mode weighting below: an account that just served loses to
+   * one that has been idle, so a small pool stops hammering a single account.
+   *
+   * In-memory on purpose: it only biases the next pick, so a cold start that
+   * treats every account as idle is the right default. Not keyed by id lookup
+   * misses because a removed account simply disappears from the map on re-scan.
+   */
+  private lastUsedAt = new Map<string, number>()
   private refreshInflight = new Map<string, Promise<void>>()
 
   constructor(options: AccountPoolOptions = {}) {
@@ -357,6 +399,7 @@ export class WorkBuddyAccountPool {
     authDirs?: readonly string[]
     cooldownMs?: number
     distribution?: AccountDistribution
+    disabledAccountIds?: readonly string[]
   }): void {
     if (options.authDirs !== undefined && options.authDirs.length > 0) {
       this.authDirs = options.authDirs
@@ -366,6 +409,9 @@ export class WorkBuddyAccountPool {
     }
     if (options.distribution !== undefined) {
       this.distribution = options.distribution
+    }
+    if (options.disabledAccountIds !== undefined) {
+      this.disabledIds = new Set(options.disabledAccountIds)
     }
   }
 
@@ -420,7 +466,6 @@ export class WorkBuddyAccountPool {
   list(region?: WorkBuddyRegion): readonly WorkBuddyAccount[] {
     if (region === undefined) return this.accounts
     return this.accounts.filter(account => regionOf(account.credential.domain) === region)
-    return this.accounts
   }
 
   /**
@@ -434,6 +479,9 @@ export class WorkBuddyAccountPool {
    */
   private available(now: number, modelId?: string, region?: WorkBuddyRegion): WorkBuddyAccount[] {
     return this.accounts.filter(account => {
+      // Switched off on the card: never serves a request, but still listed so
+      // the card can switch it back on.
+      if (this.disabledIds.has(account.id)) return false
       if (account.cooldownUntilMs > now) return false
       if (modelId !== undefined && (account.modelCooldowns[modelId] ?? 0) > now) return false
       // A region-scoped caller (one of the two providers) must never pick
@@ -441,6 +489,42 @@ export class WorkBuddyAccountPool {
       if (region !== undefined && regionOf(account.credential.domain) !== region) return false
       return true
     })
+  }
+
+  /** Round-robin: the legacy cursor walk, kept for the distribution that asks for it. */
+  private pickRoundRobin(pool: readonly WorkBuddyAccount[]): WorkBuddyAccount | undefined {
+    const index = this.cursor % pool.length
+    const account = pool[index]
+    if (account === undefined) return undefined
+    this.cursor = (index + 1) % pool.length
+    return account
+  }
+
+  /**
+   * Priority mode: weighted random over the eligible accounts.
+   *
+   * The weight is an idle bonus — `1 + min(idleHours * perHour, max)` — so an
+   * account that has never served (or has been idle for a while) outranks one
+   * that just answered. Reference panel logic drops its success-rate term
+   * entirely because a lifetime error counter penalises an account forever;
+   * instantaneous health is already handled by cooldowns, which is why those
+   * accounts never reach this list.
+   *
+   * A pool with no idle history (fresh process) hashes to equal weights, which
+   * spreads the very first picks instead of always returning index 0.
+   */
+  private pickByWeight(pool: readonly WorkBuddyAccount[]): WorkBuddyAccount | undefined {
+    if (pool.length === 1) return pool[0]
+    const now = Date.now()
+    const weights = pool.map((account) => idleWeight(this.lastUsedAt.get(account.id), now))
+    const total = weights.reduce((sum, weight) => sum + weight, 0)
+    if (!Number.isFinite(total) || total <= 0) return pool[0]
+    let roll = Math.random() * total
+    for (let index = 0; index < pool.length; index += 1) {
+      roll -= weights[index] ?? 0
+      if (roll < 0) return pool[index]
+    }
+    return pool[pool.length - 1]
   }
 
   /**
@@ -472,25 +556,29 @@ export class WorkBuddyAccountPool {
     }
     if (pool.length === 0) return undefined
 
-    // The user's explicit pick leads; otherwise the discovery order stands.
+    // An explicit pick wins outright when it is eligible. Reordering the list
+    // is not enough now that priority mode draws by weight: the user asked for
+    // one account, so the draw should not be able to pick another.
     if (this.preferredId !== undefined) {
-      const preferredIndex = pool.findIndex(account => account.id === this.preferredId)
-      if (preferredIndex > 0) {
-        const [preferred] = pool.splice(preferredIndex, 1)
-        if (preferred !== undefined) pool = [preferred, ...pool]
+      const preferred = pool.find(account => account.id === this.preferredId)
+      if (preferred !== undefined) {
+        this.lastUsedAt.set(preferred.id, Date.now())
+        await this.ensureFresh(preferred)
+        return preferred
       }
     }
 
-    // `pool` is already filtered to accounts that can serve this model right
-    // now, so the head is the highest-priority account that is not cooling.
-    const index = this.distribution === 'round-robin'
-      ? this.cursor % pool.length
-      : 0
-    const account = pool[index]
+    // `priority` keeps the original behaviour: the head of the ordered list
+    // answers until it is limited, which is what a pool of your own accounts is
+    // for. `round-robin` walks the cursor. `balanced` draws by weight so a quiet
+    // pool spreads across accounts instead of draining the first one.
+    const account = this.distribution === 'round-robin'
+      ? this.pickRoundRobin(pool)
+      : this.distribution === 'balanced'
+        ? this.pickByWeight(pool)
+        : pool[0]
     if (account === undefined) return undefined
-    if (this.distribution === 'round-robin') {
-      this.cursor = (index + 1) % pool.length
-    }
+    this.lastUsedAt.set(account.id, Date.now())
     await this.ensureFresh(account)
     return account
   }
@@ -503,6 +591,16 @@ export class WorkBuddyAccountPool {
 
   prefer(accountId: string | undefined): void {
     this.preferredId = accountId
+  }
+
+  /** Whether the user switched this account off on the card. */
+  isDisabled(accountId: string): boolean {
+    return this.disabledIds.has(accountId)
+  }
+
+  /** Every account id the user switched off, in discovery order. */
+  disabledIdsInOrder(): string[] {
+    return this.accounts.filter(account => this.disabledIds.has(account.id)).map(account => account.id)
   }
 
   /** Best-effort refresh of one account after a session-dead upstream answer. */

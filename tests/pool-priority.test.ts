@@ -7,6 +7,8 @@
  *    moving on, and hands traffic straight back to it once its cooldown lifts —
  *    a round-robin split the spend evenly and left the head account half-used.
  * 2. Round-robin, for users who prefer an even spread. Selectable at runtime.
+ * 3. Balanced, which draws from every eligible account with a weighting that
+ *    favours whichever has been idle longest. Also selectable at runtime.
  * 3. Credential freshness. When one account has several credential files, the
  *    pool must keep the one the upstream actually accepts. The stored
  *    `expiresAt` cannot answer that: the upstream never rewrites it when it
@@ -86,7 +88,8 @@ describe('account priority', () => {
 
     const first = await pool.acquire()
     expect(first).toBeDefined()
-    // Repeat acquisitions must not walk the pool: that is round-robin.
+    // Priority drains one account before moving on: repeat acquisitions must not
+    // walk the pool (that is round-robin, or balanced).
     for (let i = 0; i < 4; i += 1) {
       expect((await pool.acquire())!.id).toBe(first!.id)
     }
@@ -135,6 +138,70 @@ describe('account priority', () => {
   })
 })
 
+describe('balanced distribution', () => {
+  /** A pool configured for the weighted draw. */
+  async function balancedPool(): Promise<WorkBuddyAccountPool> {
+    const pool = new WorkBuddyAccountPool({
+      authDirs: [await threeAccounts()],
+      distribution: 'balanced',
+    })
+    await pool.scan()
+    return pool
+  }
+
+  it('spreads a quiet pool across accounts instead of draining one', async () => {
+    const pool = await balancedPool()
+    // Priority would return the head account every time; the weighted draw must
+    // visit more than one account across a handful of requests.
+    const seen = new Set<string>()
+    for (let i = 0; i < 12; i += 1) seen.add((await pool.acquire())!.id)
+    expect(seen.size).toBeGreaterThan(1)
+  })
+
+  it('always answers from an eligible account', async () => {
+    const pool = await balancedPool()
+    const all = new Set(pool.list().map(account => account.id))
+    for (let i = 0; i < 8; i += 1) {
+      const picked = await pool.acquire()
+      expect(picked).toBeDefined()
+      expect(all.has(picked!.id)).toBe(true)
+    }
+  })
+
+  it('never picks a cooling account while a healthy one exists', async () => {
+    const pool = await balancedPool()
+    const [head] = pool.list()
+    pool.penalize(head!.id, Date.now() + 60_000)
+    for (let i = 0; i < 6; i += 1) {
+      expect((await pool.acquire())!.id).not.toBe(head!.id)
+    }
+  })
+
+  it('brings a cooled account back into the draw once its cooldown lifts', async () => {
+    const pool = await balancedPool()
+    const head = pool.list()[0]!
+
+    pool.penalize(head.id, Date.now() + 60_000)
+    expect((await pool.acquire())!.id).not.toBe(head.id)
+
+    // Eligible again — but the draw is weighted, so assert the set rather than
+    // the head: it can win again, it is just not guaranteed to.
+    pool.resetCooldowns()
+    const seen = new Set<string>()
+    for (let i = 0; i < 30; i += 1) seen.add((await pool.acquire())!.id)
+    expect(seen.has(head.id)).toBe(true)
+  })
+
+  it('still honours an explicit pick over the weighted draw', async () => {
+    const pool = await balancedPool()
+    const target = pool.list()[2]!
+    pool.prefer(target.id)
+    for (let i = 0; i < 5; i += 1) {
+      expect((await pool.acquire())!.id).toBe(target.id)
+    }
+  })
+})
+
 describe('round-robin distribution', () => {
   it('rotates across accounts when the switch is set to round-robin', async () => {
     const pool = new WorkBuddyAccountPool({
@@ -159,13 +226,22 @@ describe('round-robin distribution', () => {
 
     pool.applyConfig({ distribution: 'round-robin' })
     expect(pool.currentDistribution()).toBe('round-robin')
-    const seen = new Set<string>()
-    for (let i = 0; i < 3; i += 1) seen.add((await pool.acquire())!.id)
-    expect(seen.size).toBe(3)
+    const rotated = new Set<string>()
+    for (let i = 0; i < 3; i += 1) rotated.add((await pool.acquire())!.id)
+    // Round-robin is a strict rotation: three requests, three accounts.
+    expect(rotated.size).toBe(3)
 
     // Back to priority: the head account is authoritative again.
     pool.applyConfig({ distribution: 'priority' })
+    expect(pool.currentDistribution()).toBe('priority')
     expect((await pool.acquire())!.id).toBe(head)
+
+    // Balanced swaps in at runtime too, and is no longer a single-account drain.
+    pool.applyConfig({ distribution: 'balanced' })
+    expect(pool.currentDistribution()).toBe('balanced')
+    const spread = new Set<string>()
+    for (let i = 0; i < 12; i += 1) spread.add((await pool.acquire())!.id)
+    expect(spread.size).toBeGreaterThan(1)
   })
 })
 

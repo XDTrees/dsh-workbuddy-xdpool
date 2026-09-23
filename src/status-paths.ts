@@ -22,6 +22,9 @@ export const POOL_CHECKIN_PATH = '/plugins/dsh-workbuddy-xdpool/checkin'
 /** Plugin-owned model-selection save endpoint (writes the settings section). */
 export const POOL_MODELS_SAVE_PATH = '/plugins/dsh-workbuddy-xdpool/models/save'
 
+/** Switch one account in or out of the pool (card toggle). */
+export const POOL_ACCOUNT_DISABLE_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/disabled'
+
 /** One pool account's row, token-free. */
 export interface PoolWebAccount {
   id: string
@@ -41,6 +44,11 @@ export interface PoolWebAccount {
    * `hy3` normal).
    */
   modelCooldowns?: ReadonlyArray<{ modelId: string; until: string }>
+  /**
+   * Whether the user switched this account off. A disabled account never
+   * serves a request, but it stays listed so the card can switch it back on.
+   */
+  disabled: boolean
   rateLimitHits: number
   /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
   lastUsedAt?: string
@@ -133,6 +141,14 @@ export interface PoolWebModel {
 }
 
 /** The user's saved model selection, echoed back so the card can diff a draft. */
+/** Body of the account enable/disable route: exactly one account per request. */
+export interface PoolWebAccountToggle {
+  /** Pool account id, as reported in `PoolWebAccount.id`. */
+  accountId: string
+  /** `true` switches the account off; `false` puts it back in rotation. */
+  disabled: boolean
+}
+
 export interface PoolWebModelSelection {
   /** Absent = every model is enabled. */
   enabledModelIds?: readonly string[]
@@ -172,5 +188,5 @@ export interface PoolWebStatus {
 export type PoolRegion = 'cn' | 'global'
 
 /** How the pool spreads requests across its accounts. */
-export type PoolDistribution = 'priority' | 'round-robin'
+export type PoolDistribution = 'priority' | 'round-robin' | 'balanced'
 

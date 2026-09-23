@@ -19,6 +19,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
+  POOL_ACCOUNT_DISABLE_PATH,
   POOL_CHECKIN_PATH,
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
@@ -229,6 +230,8 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const [flash, setFlash] = useState<string | undefined>(undefined)
   /** Account id whose daily claim is currently in flight. */
   const [checkinBusyId, setCheckinBusyId] = useState<string | undefined>(undefined)
+  /** Account id whose enable/disable switch is in flight, if any. */
+  const [accountBusyId, setAccountBusyId] = useState<string | undefined>(undefined)
   /**
    * Draft model selection. `undefined` means "no local edits"; once a checkbox
    * is touched the draft takes over and is what the Save button posts. Discard
@@ -354,6 +357,38 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (mounted.current) setCheckinBusyId(undefined)
+    }
+  }
+
+  /**
+   * Switch one account in or out of the pool.
+   *
+   * The id travels in the body and the host validates it against the accounts it
+   * really knows, so a stale tab cannot write an orphan id. Disabling only stops
+   * the account from being picked — it stays listed so it can be turned back on —
+   * and the change is saved through the settings section, so it survives a
+   * restart and is re-applied after every re-scan.
+   */
+  const toggleAccountDisabled = async (accountId: string, disabled: boolean): Promise<void> => {
+    setAccountBusyId(accountId)
+    setFlash(undefined)
+    try {
+      const response = await fetch(POOL_ACCOUNT_DISABLE_PATH, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ accountId, disabled }),
+      })
+      const body = await response.json().catch(() => undefined) as { error?: string } | undefined
+      if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
+      await refresh(activeRegion)
+    } catch (cause: unknown) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      if (mounted.current) {
+          setError(t?.('row.accountToggleError', { message }) ?? `Could not switch the account: ${message}`)
+      }
+    } finally {
+      if (mounted.current) setAccountBusyId(undefined)
     }
   }
 
@@ -566,14 +601,20 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         <span className="dsm-workbuddy-xdpool-dist-title">
                           {t?.('row.distTitle') ?? 'Account usage'}
                         </span>
-                        {(['priority', 'round-robin'] as const).map(option => {
+                        {(['priority', 'balanced', 'round-robin'] as const).map(option => {
                           const active = (status.distribution ?? 'priority') === option
                           const label = option === 'priority'
                             ? (t?.('row.distPriority') ?? 'Priority')
-                            : (t?.('row.distRoundRobin') ?? 'Round-robin')
+                            : option === 'balanced'
+                              ? (t?.('row.distBalanced') ?? 'Balanced')
+                              : (t?.('row.distRoundRobin') ?? 'Round-robin')
                           const hint = option === 'priority'
                             ? (t?.('row.distPriorityHint') ?? '')
-                            : (t?.('row.distRoundRobinHint') ?? '')
+                            : option === 'balanced'
+                              ? (t?.('row.distBalancedHint') ?? '')
+                              : (t?.('row.distRoundRobinHint') ?? '')
+                          const cls = 'dsm-workbuddy-xdpool-dist-option'
+                            + (active ? ' dsm-workbuddy-xdpool-dist-option-active' : '')
                           return (
                             <button
                               key={option}
@@ -582,7 +623,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                               aria-checked={active}
                               title={hint}
                               disabled={!modelsEditable}
-                              className={`dsm-workbuddy-xdpool-dist-option${active ? ' dsm-workbuddy-xdpool-dist-option-active' : ''}`}
+                              className={cls}
                               onClick={() => { void setDistribution(option) }}
                             >
                               {label}
@@ -666,6 +707,8 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         {...status.activeAccountId === undefined ? {} : { activeAccountId: status.activeAccountId }}
                         {...checkinBusyId === undefined ? {} : { checkinBusyId }}
                         onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
+                          onToggleDisabled={(accountId, disabled) => { void toggleAccountDisabled(accountId, disabled) }}
+                          {...accountBusyId === undefined ? {} : { accountBusyId }}
                         t={t}
                       />
                     ))}
@@ -737,6 +780,8 @@ function AccountBlock({
   t,
   checkinBusyId,
   onClaimCheckin,
+  accountBusyId,
+  onToggleDisabled,
 }: {
   account: PoolWebAccount
   activeAccountId?: string
@@ -744,8 +789,12 @@ function AccountBlock({
   /** Account id whose claim is in flight, if any. */
   checkinBusyId?: string
   onClaimCheckin: (accountId: string) => void
+  /** Account id whose switch is in flight, if any. */
+  accountBusyId?: string
+  onToggleDisabled: (accountId: string, disabled: boolean) => void
 }) {
   const isActive = account.id === activeAccountId
+  const isDisabled = account.disabled === true
   const isCooling = account.cooling === true
   const cooldownUntil = account.cooldownUntil !== undefined ? Date.parse(account.cooldownUntil) : undefined
   const modelCooldowns = account.modelCooldowns ?? []
@@ -760,9 +809,23 @@ function AccountBlock({
       : null
 
   return (
-    <div className="dsm-workbuddy-xdpool-account">
+    <div className={isDisabled ? 'dsm-workbuddy-xdpool-account dsm-workbuddy-xdpool-account-off' : 'dsm-workbuddy-xdpool-account'}>
       <div className="dsm-workbuddy-xdpool-account-copy">
-        <span className="dsm-workbuddy-xdpool-account-label">{account.label}</span>
+          <div className="dsm-workbuddy-xdpool-account-head">
+            <span className="dsm-workbuddy-xdpool-account-label">{account.label}</span>
+            <label
+              className="dsm-workbuddy-xdpool-account-toggle"
+              title={t?.('row.accountToggleHint') ?? 'Include this account in the pool'}
+            >
+              <input
+                type='checkbox'
+                checked={!isDisabled}
+                disabled={accountBusyId === account.id}
+                onChange={(event) => { onToggleDisabled(account.id, !event.target.checked) }}
+              />
+              {isDisabled ? (t?.('row.accountOff') ?? 'Off') : (t?.('row.accountInRotation') ?? 'In rotation')}
+            </label>
+          </div>
         <div className="dsm-workbuddy-xdpool-account-tags">
           {tag === null ? null : <span className={tag.cls}>{tag.text}</span>}
         </div>
