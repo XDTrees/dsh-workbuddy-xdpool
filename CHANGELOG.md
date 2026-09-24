@@ -4,6 +4,23 @@
 
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 1.4.1 (2026-09-24)
+
+### 修了：hy3 超长对话还是会弹 400
+
+1.4.0 让溢出消息能被 Harness 认出、并给 shim 加了本地压缩，但 hy3 仍然会爆。根因是
+**窗口值写错了**：catalog 里 hy3 的 `contextWindow` 填的是 `200_000`，而它真实上限远小于
+此。shim 压缩时按「估算 token 数的一半」设预算（约 100K），DSH 压力触发也按 200K 算，
+两侧都以为 200K 够用，所以压缩到 100K 仍远超真实窗口，重试再次溢出。
+
+修法：
+- catalog 里 hy3 的窗口改为真实值 `32_000`（同步把 `maxOutputTokens` 从 128K 调到 8K）；
+- `recoverFromContextOverrun` 不再用「估算一半」，而是用模型**真实**窗口算预算
+  （`realWindow * 0.8 - 2048`），并在调用处把 catalog 的窗口传进去。
+
+这样无论 DSH 外层还是 shim 内层，都按真实窗口压缩，不会再把压过的 prompt 发到真实窗口之外。
+- 新增 `context-budget-real-window.test.ts` 钉住这个回归（含「hy3 不再声明 200K」）。
+
 ## 1.4.0 (2026-09-24)
 
 ### 长对话不再撞死在上下文上限上

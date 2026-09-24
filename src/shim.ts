@@ -377,6 +377,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         client,
         pool,
         maxAttempts,
+        contextWindow: modelId === undefined
+          ? undefined
+          : catalog.current().find(m => m.id === modelId)?.contextWindow,
       })
       if (recovered.ok) {
         await serveSuccessfulStream(res, recovered.account, recovered.result, logger, refreshBalance, pool)
@@ -487,6 +490,8 @@ export interface RecoverOptions {
   client: WorkBuddyUpstreamClient
   pool: WorkBuddyAccountPool
   maxAttempts: number
+  /** True context window for the model, so the budget fits the real limit. */
+  contextWindow?: number
 }
 
 export type RecoverResult =
@@ -519,7 +524,14 @@ async function recoverFromContextOverrun(options: RecoverOptions): Promise<Recov
   // budget from the failing prompt: aim for roughly half of it, which leaves
   // headroom for the model's own answer.
   const overrunTokens = estimateMessagesTokens(messages)
-  const budget = Math.max(512, Math.floor(overrunTokens / 2))
+  // Use the model's REAL context window when known (from the catalog); only
+  // fall back to half the prompt when it is unknown. A wrong (too-large) window
+  // was the bug: hy3 mis-declared at 200K made us compact to ~100K, still far
+  // above the real limit, so the retry overran again.
+  const realWindow = options.contextWindow
+  const budget = realWindow !== undefined && realWindow > 0
+    ? Math.max(512, Math.floor(realWindow * 0.8) - 2048)
+    : Math.max(512, Math.floor(overrunTokens / 2))
 
   logger?.warn(
     `dsh-workbuddy-xdpool: context overrun on ${modelId ?? '(no model)'} `
