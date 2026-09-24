@@ -14,6 +14,16 @@ import { WorkBuddyAccountPool } from '../src/accounts.ts'
 import { WorkBuddyScheduler } from '../src/scheduler.ts'
 import type { WorkBuddyUpstreamClient } from '../src/upstream.ts'
 
+/**
+ * Build an instant from BEIJING wall-clock parts (see the note in
+ * scheduler.test.ts): the scheduler keys its day and hour in Asia/Shanghai, so
+ * expectations must not be built in the host timezone or they differ between a
+ * developer machine and CI.
+ */
+function beijing(year: number, monthIndex: number, day: number, hour = 0, minute = 0): Date {
+  return new Date(Date.UTC(year, monthIndex, day, hour - 8, minute))
+}
+
 /** Write a fake auth directory holding `count` CN accounts. */
 async function fakeAuthDir(count: number): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'wbp-earn-'))
@@ -65,13 +75,13 @@ async function harness(count: number): Promise<{
 describe('automation earnings per account', () => {
   it('starts empty', async () => {
     const { pool, client } = await harness(2)
-    const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => new Date(2026, 8, 23, 11, 0, 0) })
+    const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => beijing(2026, 8, 23, 11, 0, 0) })
     expect(scheduler.status().earningsToday).toEqual({})
   })
 
   it('records per-account credit, energy and task counts', async () => {
     const { pool, client } = await harness(2)
-    const when = new Date(2026, 8, 23, 11, 0, 0)
+    const when = beijing(2026, 8, 23, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, {
       enabled: true,
       taskHours: [11],
@@ -101,7 +111,7 @@ describe('automation earnings per account', () => {
 
   it('accumulates across passes in the same day', async () => {
     const { pool, client } = await harness(1)
-    const when = new Date(2026, 8, 23, 11, 0, 0)
+    const when = beijing(2026, 8, 23, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => when, logger: {} })
     const id = pool.list()[0]!.id
     const recorder = scheduler as unknown as {
@@ -122,7 +132,7 @@ describe('automation earnings per account', () => {
 
   it('resets when the local day rolls over', async () => {
     const { pool, client } = await harness(1)
-    const day1 = new Date(2026, 8, 23, 23, 30, 0)
+    const day1 = beijing(2026, 8, 23, 23, 30, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => day1, logger: {} })
     const id = pool.list()[0]!.id
     const recorder = scheduler as unknown as {
@@ -133,7 +143,7 @@ describe('automation earnings per account', () => {
 
     // Same scheduler, next day: the counters must start over rather than
     // reporting yesterday's total under today's date.
-    ;(scheduler as unknown as { now: () => Date }).now = () => new Date(2026, 8, 24, 0, 5, 0)
+    ;(scheduler as unknown as { now: () => Date }).now = () => beijing(2026, 8, 24, 0, 5, 0)
     expect(scheduler.status().earningsToday).toEqual({})
 
     recorder.recordEarnings(id, '2026-09-24', { credit: 30, energy: 2, claimed: 1 })
@@ -150,7 +160,7 @@ describe('automation earnings per account', () => {
 
   it('does not create an entry for a pass that earned nothing', async () => {
     const { pool, client } = await harness(2)
-    const when = new Date(2026, 8, 23, 11, 0, 0)
+    const when = beijing(2026, 8, 23, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => when, logger: {} })
     const id = pool.list()[0]!.id
     ;(scheduler as unknown as {
@@ -163,7 +173,7 @@ describe('automation earnings per account', () => {
 describe('earnings by source', () => {
   it('records check-in credits on their own line', async () => {
     const { pool, client } = await harness(1)
-    const when = new Date(2026, 8, 23, 9, 0, 0)
+    const when = beijing(2026, 8, 23, 9, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => when, logger: {} })
     const id = pool.list()[0]!.id
     ;(scheduler as unknown as {
@@ -180,7 +190,7 @@ describe('earnings by source', () => {
 
   it('keeps each source separate when several run the same day', async () => {
     const { pool, client } = await harness(1)
-    const when = new Date(2026, 8, 23, 12, 0, 0)
+    const when = beijing(2026, 8, 23, 12, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => when, logger: {} })
     const id = pool.list()[0]!.id
     const recorder = scheduler as unknown as {
@@ -204,7 +214,7 @@ describe('earnings by source', () => {
 
   it('treats a repeat check-in paying nothing as a no-op', async () => {
     const { pool, client } = await harness(1)
-    const when = new Date(2026, 8, 23, 9, 0, 0)
+    const when = beijing(2026, 8, 23, 9, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => when, logger: {} })
     const id = pool.list()[0]!.id
     ;(scheduler as unknown as {
@@ -219,7 +229,7 @@ describe('earnings ledger persistence', () => {
     const saved: { date: string; accounts: Record<string, unknown> }[] = []
     const scheduler = new WorkBuddyScheduler(pool, client, {
       enabled: true,
-      now: () => new Date(2026, 8, 23, 11, 0, 0),
+      now: () => beijing(2026, 8, 23, 11, 0, 0),
       logger: {},
       saveEarnings: (ledger) => saved.push(ledger as never),
     })
@@ -235,7 +245,7 @@ describe('earnings ledger persistence', () => {
   it('keeps today ledger across a restart', async () => {
     const { pool, client } = await harness(1)
     const id = pool.list()[0]!.id
-    const when = new Date(2026, 8, 23, 11, 0, 0)
+    const when = beijing(2026, 8, 23, 11, 0, 0)
     const first = new WorkBuddyScheduler(pool, client, { enabled: true, now: () => when, logger: {} })
     ;(first as unknown as {
       recordEarnings(id: string, today: string, d: Record<string, number>): void
@@ -257,7 +267,7 @@ describe('earnings ledger persistence', () => {
     const id = pool.list()[0]!.id
     const scheduler = new WorkBuddyScheduler(pool, client, {
       enabled: true,
-      now: () => new Date(2026, 8, 24, 9, 0, 0),
+      now: () => beijing(2026, 8, 24, 9, 0, 0),
       logger: {},
       loadEarnings: () => ({
         date: '2026-09-23',

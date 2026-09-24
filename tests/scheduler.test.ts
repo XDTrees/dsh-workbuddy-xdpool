@@ -20,9 +20,23 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { WorkBuddyAccountPool } from '../src/accounts.ts'
 import type { WorkBuddyCredential } from '../src/accounts.ts'
-import { WorkBuddyScheduler, dayKey, isFireHour } from '../src/scheduler.ts'
-import { AUTOMATION_JOB_KINDS } from '../src/scheduler.ts'
+import { AUTOMATION_JOB_KINDS, WorkBuddyScheduler, dayKey, isFireHour, slotKey } from '../src/scheduler.ts'
 import type { WorkBuddyTask, WorkBuddyUpstreamClient } from '../src/upstream.ts'
+
+/**
+ * Build an instant from BEIJING wall-clock parts.
+ *
+ * The scheduler interprets every configured hour in Asia/Shanghai (that is how
+ * the activity windows are defined), while `new Date(y, m, d, h, min)` builds in
+ * the HOST timezone. Using the latter made these tests pass on a UTC+8 machine
+ * and fail on a UTC one — the same code, a different answer, purely because CI
+ * and the developer sat in different zones. Constructing the instant explicitly
+ * from Beijing parts makes the expectation independent of where the suite runs.
+ */
+function beijing(year: number, monthIndex: number, day: number, hour = 0, minute = 0): Date {
+  // Asia/Shanghai is UTC+8 with no daylight saving, so the offset is fixed.
+  return new Date(Date.UTC(year, monthIndex, day, hour - 8, minute))
+}
 
 /** Write a fake auth directory holding `count` CN accounts. */
 async function fakeAuthDir(count: number, domain = ''): Promise<string> {
@@ -303,13 +317,23 @@ async function harness(
 
 describe('scheduler hour matching', () => {
   it('fires only inside a configured hour', () => {
-    const at10 = new Date(2026, 8, 7, 10, 30, 0)
+    const at10 = beijing(2026, 8, 7, 10, 30, 0)
     expect(isFireHour(at10, [10])).toBe(true)
     expect(isFireHour(at10, [9, 21])).toBe(false)
   })
 
-  it('keys the day in local time', () => {
-    expect(dayKey(new Date(2026, 8, 7, 23, 59, 0))).toBe('2026-09-07')
+  it('keys the day in the scheduling timezone, not the host one', () => {
+    expect(dayKey(beijing(2026, 8, 7, 23, 59, 0))).toBe('2026-09-07')
+  })
+
+  it('answers the same hour regardless of the host timezone', () => {
+    // The regression this guards: host-local construction made one instant read
+    // as 10:00 on a UTC+8 machine and as 18:00 on a UTC one, so the suite passed
+    // for the developer and failed in CI without any code difference.
+    const at10Beijing = beijing(2026, 8, 7, 10, 30)
+    expect(isFireHour(at10Beijing, [10])).toBe(true)
+    expect(isFireHour(at10Beijing, [18])).toBe(false)
+    expect(slotKey(at10Beijing).endsWith('T10')).toBe(true)
   })
 })
 
@@ -349,19 +373,19 @@ describe('scheduler runs', () => {
     const { pool, upstream } = await harness(1)
     upstream.buddy = { instanceId: 1, name: 'TestCat' }
     upstream.travel = { state: 'idle', recordId: 0, dailyLimitReached: false, rewardCredit: 0 }
-    const morning = new Date(2026, 8, 7, 9, 0, 0)
+    const morning = beijing(2026, 8, 7, 9, 0, 0)
     const scheduler = build(pool, upstream, morning, { travel: [9, 21] })
 
     await tickAt(scheduler, morning)
     expect(upstream.calls.filter(call => call === 'travelDepart')).toHaveLength(1)
 
     // Same hour again: the slot guard must still refuse a repeat.
-    await tickAt(scheduler, new Date(2026, 8, 7, 9, 30, 0))
+    await tickAt(scheduler, beijing(2026, 8, 7, 9, 30, 0))
     expect(upstream.calls.filter(call => call === 'travelDepart')).toHaveLength(1)
 
     // The evening slot: this is the pass the date guard used to swallow.
     upstream.travel = { state: "arrived", recordId: 7, dailyLimitReached: true, rewardCredit: 10 }
-    await tickAt(scheduler, new Date(2026, 8, 7, 21, 0, 0))
+    await tickAt(scheduler, beijing(2026, 8, 7, 21, 0, 0))
     expect(upstream.calls).toContain('travelClaim')
   })
   it('records what a pass actually claimed, so the card can list it', async () => {
@@ -371,7 +395,7 @@ describe('scheduler runs', () => {
       tasks: [parsed('Buddy_App', { current: 0, target: 1, claimable: false, acceptStatus: 'accepted' })],
     })
     upstream.tasks = [{ ...upstream.tasks[0]!, title: '进入任一小助手应用' }]
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = build(pool, upstream, when, { tasks: [11] })
 
     await tickAt(scheduler, when)
@@ -383,7 +407,7 @@ describe('scheduler runs', () => {
     // countdown the row looks like it silently failed.
     const { pool, upstream } = await harness(1)
     upstream.streak = { ...upstream.streak, days: 3 }
-    const when = new Date(2026, 8, 7, 12, 0, 0)
+    const when = beijing(2026, 8, 7, 12, 0, 0)
     const scheduler = build(pool, upstream, when, { streak: [12] })
 
     await tickAt(scheduler, when)
@@ -394,7 +418,7 @@ describe('scheduler runs', () => {
   })
   it('runs the task pass once per day and not twice', async () => {
     const { pool, upstream } = await harness(2)
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = build(pool, upstream, when, { tasks: [11] })
 
     await tickAt(scheduler, when)
@@ -418,7 +442,7 @@ describe('scheduler runs', () => {
     // 15:00 — the app was closed at 11. It must run NOW rather than skip the day,
     // which is the whole point of the catch-up rule (a laptop that slept through
     // the hour used to lose the check-in entirely).
-    const when = new Date(2026, 8, 7, 15, 0, 0)
+    const when = beijing(2026, 8, 7, 15, 0, 0)
     const scheduler = build(pool, upstream, when, { tasks: [11] })
     await tickAt(scheduler, when)
     expect(upstream.calls).toContain('listTasks')
@@ -427,12 +451,12 @@ describe('scheduler runs', () => {
 
   it('does not repeat a caught-up slot on the next tick', async () => {
     const { pool, upstream } = await harness(1)
-    const when = new Date(2026, 8, 7, 15, 0, 0)
+    const when = beijing(2026, 8, 7, 15, 0, 0)
     const scheduler = build(pool, upstream, when, { tasks: [11] })
     await tickAt(scheduler, when)
     const afterFirst = upstream.calls.length
     // Same hour, same day: the slot is spent, so nothing new is dispatched.
-    await tickAt(scheduler, new Date(2026, 8, 7, 15, 30, 0))
+    await tickAt(scheduler, beijing(2026, 8, 7, 15, 30, 0))
     expect(upstream.calls.length).toBe(afterFirst)
   })
 
@@ -445,7 +469,7 @@ describe('scheduler runs', () => {
         parsed('done', { claimable: false }),
       ],
     })
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = build(pool, upstream, when, { tasks: [11] })
     await tickAt(scheduler, when)
 
@@ -460,7 +484,7 @@ describe('scheduler runs', () => {
 
   it('runs the report pass and reads the streak back', async () => {
     const { pool, upstream } = await harness(1)
-    const when = new Date(2026, 8, 7, 10, 0, 0)
+    const when = beijing(2026, 8, 7, 10, 0, 0)
     // Only the report job is due here: the others are pinned to a LATER hour so
     // the catch-up rule cannot pull them into this tick.
     const scheduler = build(pool, upstream, when, { report: [10], tasks: [22], checkin: [22], streak: [22], travel: [22] })
@@ -471,7 +495,7 @@ describe('scheduler runs', () => {
 
   it('runs report before tasks when both are due', async () => {
     const { pool, upstream } = await harness(1)
-    const when = new Date(2026, 8, 7, 10, 0, 0)
+    const when = beijing(2026, 8, 7, 10, 0, 0)
     // Both jobs share the 10:00 hour, so ordering is observable.
     const scheduler = build(pool, upstream, when, { report: [10], tasks: [10] })
     await tickAt(scheduler, when)
@@ -499,35 +523,35 @@ describe('scheduler runs', () => {
   }
 
   it('sends the buddy chain for both buddy tasks', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('Buddy_App')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(desktopCodes(upstream)).toContain('buddyapp_bindaccount_skip_click')
   })
 
   it('sends the canvas chain for create_canvas', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('create_canvas')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(desktopCodes(upstream)).toContain('wbx_design_canvas_open')
   })
 
   it('sends the automation event for automation_1', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('automation_1')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(desktopCodes(upstream)).toContain('automated_task_create_suc')
   })
 
   it('sends the playbook chain for playbook_prompt', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('playbook_prompt')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(desktopCodes(upstream)).toContain('playbook_prompt_send')
   })
 
   it('sends FIVE template groups, since the task counts distinct templates', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('template_5', 5)
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     const used = desktopCodes(upstream).filter(code => code === 'template_used')
@@ -535,7 +559,7 @@ describe('scheduler runs', () => {
   })
 
   it('sets the skin before reporting the apply for Hp_Appearance', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('Hp_Appearance')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(upstream.calls).toContain('setAppearance:theme-tkmw7j')
@@ -543,7 +567,7 @@ describe('scheduler runs', () => {
   })
 
   it('routes Library_read through the WEB channel, not the desktop one', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('Library_read')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     // The scorer keys this task to the web fingerprint: sending it as a desktop
@@ -553,7 +577,7 @@ describe('scheduler runs', () => {
   })
 
   it('opens a real conversation for skill_1 before reporting the skill', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('skill_1')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(upstream.calls.some(call => call.startsWith('openConversation:'))).toBe(true)
@@ -561,7 +585,7 @@ describe('scheduler runs', () => {
   })
 
   it('skips skill_1 rather than inventing an id when no conversation opens', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('skill_1')
     upstream.conversations = []
     await build(pool, upstream, when, { tasks: [11] }).runAll()
@@ -570,7 +594,7 @@ describe('scheduler runs', () => {
   })
 
   it('looks up real experts and uses one per expert_5 slot', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('expert_5', 5)
     upstream.experts = {
       agent: [
@@ -596,7 +620,7 @@ describe('scheduler runs', () => {
         { expertId: 'ex_t3', expertType: 'team', displayName: 'T3', profession: 'p', version: '1.0.0', categories: [] },
       ],
     }
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const logs: string[] = []
     const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
       enabled: true,
@@ -612,7 +636,7 @@ describe('scheduler runs', () => {
     expect(uses).toHaveLength(3)
   })
   it('asks for teams, not agents, for Expert_team_use_3', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('Expert_team_use_3', 3)
     upstream.experts = {
       agent: [{ expertId: 'ex_a', expertType: 'agent', displayName: 'A', profession: 'pa', version: '1.0.0', categories: [] }],
@@ -624,7 +648,7 @@ describe('scheduler runs', () => {
   })
 
   it('reports the lighthouse expert as LOCAL', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('Expert_lighthouse')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     const use = upstream.desktopEvents.flat().find(event => event['eventCode'] === 'expert_actual_use')
@@ -633,7 +657,7 @@ describe('scheduler runs', () => {
   })
 
   it('sends nothing for a task whose target is already met', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     // Progress at the target means the chain already scored: replaying it would
     // burn the chain again on every tick for no reward.
     const { pool, upstream } = await oneTask('playbook_prompt', 1, 1)
@@ -643,7 +667,7 @@ describe('scheduler runs', () => {
   })
 
   it('sends nothing for a task with no chain at all', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await oneTask('Model_chat_GLM5.2')
     await build(pool, upstream, when, { tasks: [11] }).runAll()
     expect(desktopCodes(upstream)).toHaveLength(0)
@@ -651,7 +675,7 @@ describe('scheduler runs', () => {
   })
 
   it('keeps going when one chain cannot be built', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1, {
       tasks: [
         parsed('skill_1', { current: 0, target: 1, claimable: false, acceptStatus: 'accepted' }),
@@ -675,7 +699,7 @@ describe('scheduler account gating', () => {
 
   it('never calls upstream for a global account', async () => {
     const { pool, upstream } = await harness(1, { domain: 'workbuddy.ai' })
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
       enabled: true,
       taskHours: [11],
@@ -696,7 +720,7 @@ describe('scheduler account gating', () => {
     expect(disabled).toBeDefined()
     pool.applyConfig({ disabledAccountIds: [disabled!.id] })
 
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
       enabled: true,
       taskHours: [11],
@@ -716,7 +740,7 @@ describe('scheduler account gating', () => {
     const cooling = pool.list()[0]
     pool.penalizeExhausted(cooling!.id)
 
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
       enabled: true,
       taskHours: [11],
@@ -734,7 +758,7 @@ describe('scheduler account gating', () => {
     const { pool, upstream } = await harness(2)
     // The first account's task read blows up; the second must still be paid out.
     upstream.firstUid = pool.list()[0]?.credential.uid
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
       enabled: true,
       taskHours: [11],
@@ -757,7 +781,7 @@ describe('scheduler account gating', () => {
 describe('scheduler stays off unless enabled', () => {
   it('does not call upstream while disabled', async () => {
     const { pool, upstream } = await harness(1)
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
       enabled: false,
       taskHours: [11],
@@ -803,7 +827,7 @@ describe('manual run-all', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 11, 0, 0),
+      now: () => beijing(2026, 8, 23, 11, 0, 0),
       logger: {},
     })
     const summary = await scheduler.runAll()
@@ -825,7 +849,7 @@ describe('manual run-all', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 11, 0, 0),
+      now: () => beijing(2026, 8, 23, 11, 0, 0),
       logger: {},
     })
     await scheduler.runAll()
@@ -849,7 +873,7 @@ describe('manual run-all', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 9, 0, 0),
+      now: () => beijing(2026, 8, 23, 9, 0, 0),
       logger: {},
     })
     // The upstream answers an error for a repeat check-in, but the day is
@@ -872,7 +896,7 @@ describe('manual run-all', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 9, 0, 0),
+      now: () => beijing(2026, 8, 23, 9, 0, 0),
       logger: {},
     })
     const summary = await scheduler.runAll()
@@ -897,7 +921,7 @@ describe('event-scored tasks', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 11, 0, 0),
+      now: () => beijing(2026, 8, 23, 11, 0, 0),
       logger: {},
     })
     await scheduler.runAll()
@@ -919,7 +943,7 @@ describe('event-scored tasks', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 11, 0, 0),
+      now: () => beijing(2026, 8, 23, 11, 0, 0),
       logger: {},
     })
     await scheduler.runAll()
@@ -941,7 +965,7 @@ describe('event-scored tasks', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 11, 0, 0),
+      now: () => beijing(2026, 8, 23, 11, 0, 0),
       logger: {},
     })
     await scheduler.runAll()
@@ -962,13 +986,13 @@ describe('streak redemption and travel', () => {
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
-      now: () => new Date(2026, 8, 23, 12, 0, 0),
+      now: () => beijing(2026, 8, 23, 12, 0, 0),
       logger: {},
     })
   }
 
   it('skips a locked tier instead of trying to redeem it', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     // Default fake has every tier locked, which is the normal state most days.
     await build(pool, upstream, when, { tasks: [11] }).runAll()
@@ -978,7 +1002,7 @@ describe('streak redemption and travel', () => {
   })
 
   it('redeems an unlocked tier and draws the chances it grants', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     upstream.streak.tiers = [
       { tier: '7d', days: 7, credit: 0, energy: 2, cards: 1, chances: 2, status: 'unlocked' },
@@ -990,7 +1014,7 @@ describe('streak redemption and travel', () => {
   })
 
   it('does not re-redeem a tier that is already claimed', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     upstream.streak.tiers = [
       { tier: '7d', days: 7, credit: 0, energy: 2, cards: 1, chances: 1, status: 'claimed' },
@@ -1000,7 +1024,7 @@ describe('streak redemption and travel', () => {
   })
 
   it('claims an arrived trip', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     upstream.buddy = { instanceId: 1, name: 'TestCat' }
     upstream.travel = { state: 'arrived', recordId: 987, dailyLimitReached: false, rewardCredit: 10 }
@@ -1011,7 +1035,7 @@ describe('streak redemption and travel', () => {
   })
 
   it('departs only from an idle buddy that has not hit the daily limit', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     upstream.buddy = { instanceId: 1, name: 'TestCat' }
     upstream.travel = { state: 'idle', recordId: 0, dailyLimitReached: false, rewardCredit: 0 }
@@ -1021,7 +1045,7 @@ describe('streak redemption and travel', () => {
   })
 
   it('leaves a travelling buddy alone', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     upstream.buddy = { instanceId: 1, name: 'TestCat' }
     upstream.travel = { state: 'traveling', recordId: 5, dailyLimitReached: true, rewardCredit: 0 }
@@ -1032,7 +1056,7 @@ describe('streak redemption and travel', () => {
   })
 
   it('tries to adopt when the account has no buddy', async () => {
-    const when = new Date(2026, 8, 7, 11, 0, 0)
+    const when = beijing(2026, 8, 7, 11, 0, 0)
     const { pool, upstream } = await harness(1)
     upstream.buddy = undefined
     await build(pool, upstream, when, { tasks: [11] }).runAll()
