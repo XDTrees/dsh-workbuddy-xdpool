@@ -19,7 +19,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Readable } from 'node:stream'
 import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
-import { parseRateLimitReset, WorkBuddyUpstreamClient, type UpstreamErrorKind, type WorkBuddyRegion } from './upstream.ts'
+import { parseRateLimitReset, WorkBuddyUpstreamClient, type ChatStreamResult, type UpstreamErrorKind, type WorkBuddyRegion } from './upstream.ts'
+import { compactWithSummary, estimateMessagesTokens, hardTruncate, type ChatMessage } from './context-budget.ts'
 
 export interface ShimLogger {
   info?(...args: unknown[]): void
@@ -108,7 +109,8 @@ function writeOpenAIError(res: ServerResponse, status: number, kind: string, mes
 
 /** True when an upstream failure body means the request overran the model's
  *  context window (OpenAI `context_length_exceeded`, WorkBuddy code 11115 /
- *  "input length too long"). Surfaced as a friendly hint, never auto-truncated. */
+ *  "input length too long"). The shim answers it by compacting the conversation
+ *  in place and retrying once; see `recoverFromContextOverrun`. */
 function isContextTooLong(body: string): boolean {
   if (body.includes('context_length_exceeded')) return true
   if (body.includes('input length too long')) return true
@@ -311,30 +313,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       const result = await client.chatStream(account.credential, prepared, controller.signal)
 
       if (result.ok) {
-        logger?.info?.(`dsh-workbuddy-xdpool: served by ${account.label}`)
-        // Only now is this account the one actually serving the user: a request
-        // that failed over to another account must not mark the tried one as used.
-        pool.noteServed(account.id)
-        // Refresh the account's balance in the background so the reserved-credit
-        // floor has a fresh reading. Deliberately NOT awaited: the response is
-        // already ready and a balance lookup must never delay the user's stream.
-        void refreshBalance(account)
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
-          'X-Accel-Buffering': 'no',
-        })
-        let sawDone = false
-        const body = Readable.fromWeb(result.response.body as Parameters<typeof Readable.fromWeb>[0])
-        body.on('data', (chunk: Buffer) => {
-          if (chunk.includes('[DONE]')) sawDone = true
-        })
-        body.on('error', (error: unknown) => {
-          logger?.warn('dsh-workbuddy-xdpool: upstream stream failed mid-flight', error)
-          if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
-        })
-        body.pipe(res)
+        await serveSuccessfulStream(res, account, result, logger, refreshBalance, pool)
         return
       }
 
@@ -376,21 +355,35 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       writeOpenAIError(res, 500, 'internal', 'chat request exhausted without a result')
       return
     }
-    // A context-window overrun is a clear, actionable condition — surface a
-    // friendly hint instead of a bare upstream echo. The provider must NOT
-    // silently truncate or summarise the user's conversation (that drops
-    // context and can answer wrongly); the right move is telling the user.
+    // A context-window overrun has two layers of defence, and this is the inner
+    // one. The Harness runs its own `compaction-basic` BEFORE dispatch, driven by
+    // the context window each model advertises — but that window is a guess for
+    // an upstream routed through a shim, so a prompt can still arrive too large.
+    // When it does, compact in place here and retry once; if even that cannot fit,
+    // emit the message the Harness classifies as an overflow (see
+    // `contextOverflowMessage`) so its OUTER recovery path gets a chance to
+    // shrink the history and retry at the agent level.
+    //
+    // The two layers are complementary, not redundant: this one keeps a single
+    // turn alive without the Harness ever seeing a failure, and the outer one
+    // survives the case where a shim-side compaction still will not fit.
     if (isContextTooLong(last.message)) {
-      const subject = modelId === undefined
-        ? 'the conversation exceeds this model\'s context window'
-        : `the conversation exceeds ${modelId}'s context window`
-      writeOpenAIError(
-        res,
-        400,
-        'context_length_exceeded',
-        `${subject}. Shorten the conversation, start a new chat, or pick a model with a larger window ` +
-          `(e.g. hy4-preview).`,
-      )
+      const recovered = await recoverFromContextOverrun({
+        raw,
+        modelId,
+        controller,
+        region,
+        logger,
+        client,
+        pool,
+        maxAttempts,
+      })
+      if (recovered.ok) {
+        await serveSuccessfulStream(res, recovered.account, recovered.result, logger, refreshBalance, pool)
+        return
+      }
+      // The wording is a contract with the Harness; see `contextOverflowMessage`.
+      writeOpenAIError(res, 400, 'context_length_exceeded', contextOverflowMessage(modelId, recovered.detail))
       return
     }
     writeOpenAIError(
@@ -412,4 +405,198 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         server.once('error', reject)
       }),
   }
+}
+
+/**
+ * Build the overflow message the Harness must recognize.
+ *
+ * This is deliberately NOT free-form prose. `dsh-compaction-basic` decides
+ * whether to compact-and-retry by running the text that reaches it through
+ * `isContextWindowExceededError()` (`@deepseek-ai/dsh-llm`), whose matcher
+ * accepts only specific phrasings:
+ *
+ *   - `context_length_exceeded` / `context window exceeded`
+ *   - `maximum context length`
+ *   - `<input|prompt|request|messages> too large|long for ... context`
+ *   - `<input|prompt|request> exceeds the ... context window`
+ *
+ * The obvious friendly sentence ("the conversation exceeds this model's
+ * context window") matches NONE of them, and neither does the WorkBuddy
+ * upstream's own "input length too long" / code 11115. Emitting either meant
+ * the Harness saw an unclassifiable 400, skipped its recovery path, and
+ * surfaced a dead turn — the bug this function exists to prevent.
+ *
+ * The leading clause carries the machine-matched wording; the trailing clause
+ * is what a human reads. Keep both in sync with
+ * `tests/context-overflow-contract.test.ts`.
+ */
+export function contextOverflowMessage(modelId: string | undefined, detail = ''): string {
+  const subject = modelId === undefined ? 'the model' : `model ${modelId}`
+  const note = detail === '' ? '' : ` (${detail})`
+  return `This model's maximum context length was exceeded: the prompt is too large for `
+    + `${subject}, and the conversation could not be compacted in place${note}. `
+    + `Compact the conversation, or start a new chat.`
+}
+
+/**
+ * Serve one already-successful upstream stream as an SSE response.
+ *
+ * Extracted so the context-overrun recovery path reuses the exact same
+ * bookkeeping (noteServed + background balance refresh) as a first-try hit.
+ */
+async function serveSuccessfulStream(
+  res: ServerResponse,
+  account: WorkBuddyAccount,
+  result: Extract<ChatStreamResult, { ok: true }>,
+  logger: ShimLogger | undefined,
+  refreshBalance: (account: WorkBuddyAccount) => Promise<void>,
+  pool: WorkBuddyAccountPool,
+): Promise<void> {
+  logger?.info?.(`dsh-workbuddy-xdpool: served by ${account.label}`)
+  // Only now is this account the one actually serving the user: a request
+  // that failed over to another account must not mark the tried one as used.
+  pool.noteServed(account.id)
+  // Refresh the balance in the background so the reserved-credit floor has a
+  // fresh reading. Deliberately NOT awaited: the response is already ready and
+  // a balance lookup must never delay the user's stream.
+  void refreshBalance(account)
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  let sawDone = false
+  const body = Readable.fromWeb(result.response.body as Parameters<typeof Readable.fromWeb>[0])
+  body.on('data', (chunk: Buffer) => {
+    if (chunk.includes('[DONE]')) sawDone = true
+  })
+  body.on('error', (error: unknown) => {
+    logger?.warn('dsh-workbuddy-xdpool: upstream stream failed mid-flight', error)
+    if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
+  })
+  body.pipe(res)
+}
+
+export interface RecoverOptions {
+  raw: string
+  modelId: string | undefined
+  controller: AbortController
+  region: WorkBuddyRegion | undefined
+  logger: ShimLogger | undefined
+  client: WorkBuddyUpstreamClient
+  pool: WorkBuddyAccountPool
+  maxAttempts: number
+}
+
+export type RecoverResult =
+  | { ok: true; account: WorkBuddyAccount; result: Extract<ChatStreamResult, { ok: true }> }
+  | { ok: false; detail: string }
+
+/**
+ * Compact an over-long conversation and retry it once.
+ *
+ * Strategy, in order:
+ *  1. drop the oldest turns, keeping system messages and the newest exchange;
+ *  2. ask the model to summarise the dropped turns and splice that summary in;
+ *  3. hard-truncate as a last resort.
+ *
+ * Returns `ok: false` only when even a truncated prompt still overran — the
+ * caller then surfaces the original actionable 400.
+ */
+async function recoverFromContextOverrun(options: RecoverOptions): Promise<RecoverResult> {
+  const { raw, modelId, controller, region, logger, client, pool, maxAttempts } = options
+  const parsed = client.parseChatBody(raw)
+  if (parsed === undefined) return { ok: false, detail: 'request body was not parseable JSON' }
+  const rawMessages = parsed['messages']
+  if (!Array.isArray(rawMessages)) return { ok: false, detail: 'request carried no messages array' }
+  const messages = rawMessages.filter(
+    (value): value is ChatMessage => typeof value === 'object' && value !== null && !Array.isArray(value),
+  )
+  if (messages.length === 0) return { ok: false, detail: 'request carried no usable messages' }
+
+  // The upstream reports the overrun but not the window size, so derive a
+  // budget from the failing prompt: aim for roughly half of it, which leaves
+  // headroom for the model's own answer.
+  const overrunTokens = estimateMessagesTokens(messages)
+  const budget = Math.max(512, Math.floor(overrunTokens / 2))
+
+  logger?.warn(
+    `dsh-workbuddy-xdpool: context overrun on ${modelId ?? '(no model)'} `
+      + `(~${overrunTokens} tokens); compacting to ~${budget} and retrying once`,
+  )
+
+  let summary: string | undefined
+  let compacted: ChatMessage[] = messages
+  let compactionDetail = ''
+  try {
+    const summariser = await pool.acquire(modelId, region)
+    if (summariser === undefined) {
+      compactionDetail = 'no account available to summarise with'
+    } else {
+      const outcome = await compactWithSummary(
+        messages,
+        { budget, keepRecent: 6 },
+        {
+          complete: async (request, signal) => {
+            const body = client.buildChatBody(
+              { ...parsed, stream: true, max_tokens: Math.max(256, Math.floor(budget / 2)) },
+              request,
+            )
+            return await client.completeChat(summariser.credential, body, signal ?? controller.signal)
+          },
+        },
+        controller.signal,
+      )
+      compacted = outcome.messages
+      summary = outcome.summary
+      if (outcome.skipped !== undefined) compactionDetail = outcome.skipped
+    }
+  } catch (error: unknown) {
+    // Summarisation is best-effort; fall through to truncation.
+    compactionDetail = `summarisation failed: ${String(error)}`
+  }
+
+  // Whatever the summariser managed, make sure the prompt now fits.
+  if (estimateMessagesTokens(compacted) > budget) {
+    compacted = hardTruncate(compacted, budget).messages
+  }
+  if (summary === undefined && estimateMessagesTokens(compacted) >= overrunTokens) {
+    return { ok: false, detail: compactionDetail === '' ? 'compaction could not reduce the prompt' : compactionDetail }
+  }
+
+  const retryBody = client.buildChatBody(parsed, compacted)
+  const tried: string[] = []
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (controller.signal.aborted) return { ok: false, detail: 'client disconnected' }
+    const account = await pool.acquire(modelId, region)
+    if (account === undefined) return { ok: false, detail: 'no account available after compaction' }
+    tried.push(account.label)
+    const result = await client.chatStream(account.credential, retryBody, controller.signal)
+    if (result.ok) {
+      logger?.info?.(
+        `dsh-workbuddy-xdpool: recovered from context overrun on ${modelId ?? '(no model)'} `
+          + `(summarised: ${summary === undefined ? 'no' : 'yes'})`,
+      )
+      return { ok: true, account, result }
+    }
+    if (isContextTooLong(result.message)) {
+      // Still too long even after compaction: give up rather than loop.
+      return { ok: false, detail: 'prompt still exceeded the window after compaction' }
+    }
+    if (result.kind === 'session_dead') {
+      await pool.refreshAccount(account.id)
+      continue
+    }
+    if (result.kind === 'hard_credit') {
+      pool.penalizeExhausted(account.id)
+      continue
+    }
+    if (result.kind === 'soft_rate') {
+      pool.penalize(account.id, parseRateLimitReset(result.message), modelId)
+      continue
+    }
+    return { ok: false, detail: `upstream ${result.kind} after compaction` }
+  }
+  return { ok: false, detail: `no account served the compacted request (tried ${tried.length})` }
 }

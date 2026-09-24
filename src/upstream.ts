@@ -15,6 +15,7 @@
 import type { WorkBuddyCredential } from './accounts.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import type { MarketExpert } from './task-events.ts'
+import type { ChatMessage } from './context-budget.ts'
 
 /** Upstream failure classes the shim maps onto distinct HTTP answers. */
 export type UpstreamErrorKind =
@@ -129,6 +130,9 @@ const GLOBAL_CONFIG_PATH = '/v3/config'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
 
+/** Cap on the reassembled compaction reply, guarding against a runaway stream. */
+const COMPLETION_TEXT_LIMIT = 64 * 1024
+
 /** Insufficient-credit markers, ASCII lowercase plus the original Chinese. */
 const HARD_CREDIT_MARKERS = [
   'insufficient credit', 'no credit', 'credit exhausted', 'out of credit',
@@ -137,8 +141,20 @@ const HARD_CREDIT_MARKERS = [
   '积分不足', '额度不足', '余额不足', '积分用完', '额度用尽', '没有积分',
 ]
 
-/** Session-invalidation markers that mean "sign in again in the WorkBuddy app". */
-const SESSION_DEAD_MARKERS = ['Offline user session not found', '12153']
+/** Session-invalidation markers that mean "this credential is dead; use another".
+ *  Kept alongside the HTTP-status rule in `classifyUpstreamError`: the status is
+ *  enough for a direct 401/403, but some failures arrive wrapped in a 200
+ *  envelope or a 4xx the gateway words differently. Adding the English and
+ *  Chinese phrasings the upstream actually uses keeps those recoverable too —
+ *  an unmatched one fell through to `client`, which is terminal in the shim
+ *  and pinned the pool to the first account (the "API 密钥无效" bug). */
+const SESSION_DEAD_MARKERS = [
+  'Offline user session not found', '12153',
+  'api key is invalid', 'invalid api key', 'invalid_api_key',
+  'api密钥无效', '密钥无效', '无效的密钥',
+  'unauthorized', 'token expired', 'token is invalid',
+  'login expired', 'please login', '未登录', '登录已失效', '重新登录',
+]
 
 /**
  * Markers for "already checked in today".
@@ -357,12 +373,98 @@ function envelopeError(status: number, envelope: Envelope): Error {
 }
 
 /**
+ * Read an OpenAI-style SSE chat stream and concatenate the assistant text.
+ *
+ * The upstream always streams (`stream: true` is forced on every chat body),
+ * so a non-streaming internal call has to reassemble the deltas itself. Only
+ * `choices[0].delta.content` is collected; reasoning deltas are dropped
+ * because a compaction summary needs the final answer, not the scratchpad.
+ */
+async function readCompletionText(body: ReadableStream<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = body.getReader()
+  let buffer = ''
+  let text = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // Frames are separated by a blank line; keep the trailing partial.
+      let split = buffer.indexOf('\n\n')
+      while (split !== -1) {
+        const frame = buffer.slice(0, split)
+        buffer = buffer.slice(split + 2)
+        text += contentOfFrame(frame)
+        if (text.length > COMPLETION_TEXT_LIMIT) return text.slice(0, COMPLETION_TEXT_LIMIT)
+        split = buffer.indexOf('\n\n')
+      }
+    }
+    if (buffer.trim() !== '') text += contentOfFrame(buffer)
+  } finally {
+    reader.releaseLock?.()
+  }
+  return text
+}
+
+/** Pull `choices[0].delta.content` (or a non-streaming `message.content`) out of one SSE frame. */
+function contentOfFrame(frame: string): string {
+  let out = ''
+  for (const rawLine of frame.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (!line.startsWith('data:')) continue
+    const payload = line.slice(5).trim()
+    if (payload === '' || payload === '[DONE]') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(payload)
+    } catch {
+      continue
+    }
+    if (typeof parsed !== 'object' || parsed === null) continue
+    const choices = (parsed as Record<string, unknown>)['choices']
+    if (!Array.isArray(choices) || choices.length === 0) continue
+    const choice = choices[0] as Record<string, unknown>
+    const delta = choice['delta']
+    if (typeof delta === 'object' && delta !== null) {
+      const content = (delta as Record<string, unknown>)['content']
+      if (typeof content === 'string') out += content
+    }
+    const message = choice['message']
+    if (typeof message === 'object' && message !== null) {
+      const content = (message as Record<string, unknown>)['content']
+      if (typeof content === 'string') out += content
+    }
+    // Some gateways wrap the answer in an OpenAI-compatible envelope.
+    const data = (parsed as Record<string, unknown>)['data']
+    if (typeof data === 'object' && data !== null) {
+      const inner = (data as Record<string, unknown>)['content']
+      if (typeof inner === 'string') out += inner
+    }
+  }
+  return out
+}
+
+/**
  * Classify an upstream failure from its HTTP status and body excerpt.
  * Body markers win over status, because the upstream reuses 400/200 for
  * several distinct conditions.
  */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
   if (status === 402) return 'hard_credit'
+  // An HTTP 401/403 from either gateway means THIS credential is no longer
+  // accepted — a stale sign-in, a revoked token, or a key the upstream has
+  // dropped. It says nothing about the other accounts in the pool, so it must
+  // be classified as recoverable (`session_dead`: refresh the token, then move
+  // on to the next account).
+  //
+  // Falling through to the generic `client` branch was the bug behind
+  // "API 密钥无效": `client` is terminal in the shim loop (it breaks instead of
+  // rotating), so one bad credential pinned the pool to the first account and
+  // every remaining account went unused. Status alone is enough here: the
+  // upstream words 401/403 inconsistently, and marker-only matching let
+  // "api密钥无效" / "invalid api key" / "unauthorized" slip through.
+  if (status === 401 || status === 403) return 'session_dead'
   const lower = body.toLowerCase()
   for (const marker of HARD_CREDIT_MARKERS) {
     if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return 'hard_credit'
@@ -837,6 +939,55 @@ export class WorkBuddyUpstreamClient {
       }
     }
     return JSON.stringify(obj)
+  }
+
+  /**
+   * Parse a raw OpenAI chat body without normalising it.
+   *
+   * The compactor needs the message array as objects, while `chatStream` only
+   * accepts the serialised string form.
+   */
+  parseChatBody(raw: string): Record<string, unknown> | undefined {
+    let body: unknown
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined
+    return body as Record<string, unknown>
+  }
+
+  /** Re-serialise `base` with a rewritten `messages` array, still normalised. */
+  buildChatBody(base: Record<string, unknown>, messages: readonly ChatMessage[]): string {
+    return this.prepareChatBody(JSON.stringify({ ...base, messages }))
+  }
+
+  /**
+   * Run one NON-streaming completion and return the assistant text.
+   *
+   * Used only for internal compaction (summarising dropped turns). The chat
+   * endpoint itself always streams, so this reassembles the SSE frames into a
+   * single string. Throws on any failure: the compactor then falls back to
+   * plain truncation rather than failing the user's turn.
+   */
+  async completeChat(
+    credential: WorkBuddyCredential,
+    prepared: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const response = await this.fetchImpl(`${chatBase(credential)}/v2/chat/completions`, {
+      method: 'POST',
+      headers: chatHeaders(credential),
+      body: prepared,
+      ...signal === undefined ? {} : { signal },
+    })
+    if (!response.ok) {
+      const text = (await response.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT)
+      throw new Error(`compaction upstream http ${response.status}: ${text}`)
+    }
+    if (response.body === null) throw new Error('compaction upstream returned no body')
+    return await readCompletionText(response.body)
   }
 
   /** Forward one chat completion. Never throws for upstream failures. */

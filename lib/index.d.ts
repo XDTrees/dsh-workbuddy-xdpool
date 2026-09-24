@@ -164,6 +164,32 @@ export declare function expertActualUseEvent(expert: MarketExpert, conversationI
  */
 export declare function expertChatEvents(expert: MarketExpert, conversationId: string, requestId: string): Record<string, unknown>[];
 //#endregion
+//#region src/context-budget.d.ts
+/**
+ * Context-window budgeting for the WorkBuddy shim.
+ *
+ * The upstream answers `context_length_exceeded` (business code 11115) when a
+ * request overruns the model's window. Rather than bouncing that back to the
+ * user as a dead turn, the shim compacts the conversation on the fly:
+ *
+ *  1. estimate the prompt cost locally (cheap, no round trip);
+ *  2. drop the oldest turns while keeping `system` + the newest exchange;
+ *  3. if that still overruns, ask the model itself to summarise the middle of
+ *     the conversation and splice that summary back in as a system message.
+ *
+ * Everything here is pure and synchronous-free except `summarizeMessages`,
+ * which the caller drives through an injected chat function so this module
+ * stays testable without a network.
+ *
+ * @module dsh-workbuddy-xdpool/context-budget
+ */
+/** One OpenAI chat message, narrowed to the fields we must preserve. */
+interface ChatMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+//#endregion
 //#region src/upstream.d.ts
 /** Upstream failure classes the shim maps onto distinct HTTP answers. */
 type UpstreamErrorKind = 'hard_credit' | 'soft_rate' | 'session_dead' | 'not_found' | 'server' | 'client';
@@ -388,6 +414,24 @@ export declare class WorkBuddyUpstreamClient {
    * business code 11128), and flatten `tool_choice` into its string form.
    */
   prepareChatBody(raw: string): string;
+  /**
+   * Parse a raw OpenAI chat body without normalising it.
+   *
+   * The compactor needs the message array as objects, while `chatStream` only
+   * accepts the serialised string form.
+   */
+  parseChatBody(raw: string): Record<string, unknown> | undefined;
+  /** Re-serialise `base` with a rewritten `messages` array, still normalised. */
+  buildChatBody(base: Record<string, unknown>, messages: readonly ChatMessage[]): string;
+  /**
+   * Run one NON-streaming completion and return the assistant text.
+   *
+   * Used only for internal compaction (summarising dropped turns). The chat
+   * endpoint itself always streams, so this reassembles the SSE frames into a
+   * single string. Throws on any failure: the compactor then falls back to
+   * plain truncation rather than failing the user's turn.
+   */
+  completeChat(credential: WorkBuddyCredential, prepared: string, signal?: AbortSignal): Promise<string>;
   /** Forward one chat completion. Never throws for upstream failures. */
   chatStream(credential: WorkBuddyCredential, prepared: string, signal?: AbortSignal): Promise<ChatStreamResult>;
   /** POST the token-refresh endpoint; the caller merges the outcome. */

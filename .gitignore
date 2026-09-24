@@ -21,3 +21,6 @@ release-body.md
 
 # 待处理的截图暂存
 .shot-*.png
+
+# Local deployment backups of lib/ (never commit these)
+_backup-lib-*/
