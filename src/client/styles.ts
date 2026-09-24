@@ -198,31 +198,27 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-auto{margin-top:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;background:var(--dsw-alias-bg-module-platform,#202126)}
 .dsm-workbuddy-xdpool-auto-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .dsm-workbuddy-xdpool-auto-title{color:var(--dsw-alias-label-primary,#e8e8ea);font-size:12px;font-weight:600}
-.dsm-workbuddy-xdpool-auto-switch{padding:3px 12px;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:999px;background:transparent;color:var(--dsw-alias-label-dimmed,#8a97b5);font-size:11px;cursor:pointer;transition:color .16s,border-color .16s,background .16s}
+.dsm-workbuddy-xdpool-auto-switch{padding:3px 12px;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;cursor:pointer;transition:color .16s,border-color .16s,background .16s}
 .dsm-workbuddy-xdpool-auto-switch:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777);color:var(--dsw-alias-label-primary,#e8e8ea)}
 .dsm-workbuddy-xdpool-auto-switch:disabled{opacity:.5;cursor:not-allowed}
 .dsm-workbuddy-xdpool-auto-switch-on{border-color:#28c8b4;color:#28c8b4;background:rgba(40,200,180,.12)}
-.dsm-workbuddy-xdpool-auto-hint{margin:6px 0 0;color:var(--dsw-alias-label-dimmed,#8a97b5);font-size:11px;line-height:1.5}
+.dsm-workbuddy-xdpool-auto-hint{margin:6px 0 0;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;line-height:1.6}
 .dsm-workbuddy-xdpool-auto-total{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:8px;padding:6px 8px;border-radius:8px;background:rgba(40,200,180,.08);font-size:11px}
-.dsm-workbuddy-xdpool-auto-total-label{color:var(--dsw-alias-label-dimmed,#8a97b5)}
+.dsm-workbuddy-xdpool-auto-total-label{color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px}
 .dsm-workbuddy-xdpool-auto-total{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding:6px 8px;border-radius:8px;background:rgba(40,200,180,.08);font-size:11px}
 .dsm-workbuddy-xdpool-auto-total-list{display:flex;flex-direction:column;gap:2px}
 .dsm-workbuddy-xdpool-auto-total-row{color:#28c8b4;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-earned{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,#36373b);font-size:11px}
-.dsm-workbuddy-xdpool-earned-label{color:var(--dsw-alias-label-dimmed,#8a97b5)}
+.dsm-workbuddy-xdpool-earned-label{color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px}
 .dsm-workbuddy-xdpool-earned-list{display:flex;flex-direction:column;gap:2px}
 .dsm-workbuddy-xdpool-earned-row{color:#28c8b4;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-earned-value{color:#28c8b4;font-weight:600;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-xdpool-auto-jobs{margin-top:8px;display:flex;flex-direction:column;gap:4px}
-.dsm-workbuddy-xdpool-auto-job{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-dimmed,#8a97b5)}
-.dsm-workbuddy-xdpool-auto-job-name{flex:0 0 72px;color:var(--dsw-alias-label-primary,#e8e8ea)}
-.dsm-workbuddy-xdpool-auto-job-when{flex:1 1 auto;font-variant-numeric:tabular-nums}
-.dsm-workbuddy-xdpool-auto-job-last{flex:0 0 auto;text-align:right;font-variant-numeric:tabular-nums}
-/* The job detail wraps to its own full-width line: it is a list of reward
-   titles, which needs the whole row rather than a cramped right-hand slot. */
-.dsm-workbuddy-xdpool-auto-job-detail{flex:1 1 100%;color:var(--dsw-alias-label-secondary,#b8bcc4);line-height:1.5;word-break:break-word}
-.dsm-workbuddy-xdpool-auto-job-note{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#b8bcc4)}
-.dsm-workbuddy-xdpool-auto-run{flex:0 0 auto;padding:2px 8px;font-size:10px;line-height:16px}
+.dsm-workbuddy-xdpool-auto-job{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-xdpool-auto-job-name{flex:0 0 auto;min-width:72px;color:var(--dsw-alias-label-primary,#e8e8ea);font-weight:500}
+.dsm-workbuddy-xdpool-auto-job-when{flex:1 1 auto;color:var(--dsw-alias-label-secondary,#c6c9d0);font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-auto-job-last{flex:0 0 auto;text-align:right;color:var(--dsw-alias-label-secondary,#c6c9d0);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsm-workbuddy-xdpool-auto-job-note{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#c6c9d0)}
 /* Reserved credits: one inline number field per account. */
 .dsm-workbuddy-xdpool-reserve{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,#36373b);font-size:11px;color:var(--dsw-alias-label-dimmed,#8a97b5)}
 .dsm-workbuddy-xdpool-reserve-label{flex:0 0 auto}

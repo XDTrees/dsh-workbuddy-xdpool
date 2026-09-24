@@ -15,6 +15,11 @@ import { readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { regionOf, type WorkBuddyRegion } from './upstream.ts'
+import {
+  isEncryptedFieldWrapper,
+  openEncryptedField,
+  readAtRestKey,
+} from './at-rest.ts'
 
 /** Minimal upstream surface the pool needs to refresh a token (no circular import). */
 export interface TokenRefresher {
@@ -127,11 +132,76 @@ function optionalString(value: unknown): string | undefined {
 }
 
 /**
+ * Read one string-valued field that may arrive as a plain string (older builds)
+ * or as the desktop app's `$wbEncrypted` envelope. The app started encrypting
+ * `accessToken` / `refreshToken` / `nickname` in 5.6.0 on BOTH macOS and Windows
+ * — the earlier "Windows first" reading was wrong, and it is why a signed-in Mac
+ * showed no account at all: the value is an object, `typeof === 'string'` failed,
+ * and the parser reported "no credential" for a perfectly good sign-in.
+ *
+ * `decrypt` is injected rather than called here so this parser stays synchronous
+ * and testable; the async key fetch lives in `readCredential`. A field that IS
+ * encrypted but could not be opened is reported as `failed` rather than as an
+ * empty string — the caller must tell the user the app is missing or unreachable,
+ * not send them to sign in again (the one action that cannot help).
+ */
+/**
+ * Marker for "the credential is encrypted and we could not obtain the key".
+ *
+ * Carried as a `code` rather than left to `instanceof` because the value crosses
+ * the packaged-plugin boundary; the same convention the sibling error types use.
+ * This is deliberately NOT "not signed in": the user IS signed in, and telling
+ * them to sign in again sends them to the one action that cannot help.
+ */
+export const ENCRYPTED_CREDENTIAL_CODE = 'ENCRYPTED_CREDENTIAL'
+
+export class WorkBuddyEncryptedCredentialError extends Error {
+  readonly code = ENCRYPTED_CREDENTIAL_CODE
+  constructor(sourcePath: string) {
+    super(
+      `workbuddy: ${sourcePath} holds encrypted credentials but the desktop app could not provide the key. `
+        + 'Install the WorkBuddy desktop app (or point WORKBUDDY_APP_EXECUTABLE at it) — signing in again will not help.',
+    )
+    this.name = 'WorkBuddyEncryptedCredentialError'
+  }
+}
+
+/** True when a thrown value is the encrypted-credential marker (cross-bundle safe). */
+export function isEncryptedCredentialError(value: unknown): boolean {
+  return typeof value === 'object' && value !== null
+    && (value as { code?: unknown }).code === ENCRYPTED_CREDENTIAL_CODE
+}
+
+function decryptableString(
+  value: unknown,
+  decrypt: ((field: unknown) => string) | undefined,
+): { value: string; encrypted: boolean; failed: boolean } {
+  if (typeof value === 'string') return { value, encrypted: false, failed: false }
+  if (isEncryptedFieldWrapper(value)) {
+    if (decrypt === undefined) return { value: '', encrypted: true, failed: true }
+    try {
+      return { value: decrypt(value), encrypted: true, failed: false }
+    } catch {
+      return { value: '', encrypted: true, failed: true }
+    }
+  }
+  return { value: '', encrypted: false, failed: false }
+}
+
+/**
  * Parse a WorkBuddy auth document. Accepts the nested desktop shape
  * `{"auth":{...},"account":{...}}` and the flat panel shape; returns undefined
  * when there is no usable access token.
+ *
+ * `decrypt` opens the desktop app's `$wbEncrypted` field wrapper (5.6.0+, both
+ * platforms). Absent means "plain-string builds only", which is what every
+ * caller without an at-rest key should pass.
  */
-export function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyCredential | undefined {
+export function parseWorkBuddyAuth(
+  text: string,
+  sourcePath: string,
+  decrypt?: (field: unknown) => string,
+): WorkBuddyCredential | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -154,7 +224,14 @@ export function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyC
     identity = document
   }
 
-  const accessToken = typeof auth['accessToken'] === 'string' ? auth['accessToken'] : ''
+  const accessField = decryptableString(auth['accessToken'], decrypt)
+  // An encrypted-but-unopenable credential must NOT be reported as a readable
+  // one with an empty token: the caller has to distinguish "not signed in" from
+  // "signed in, but the app holding the key is missing".
+  if (accessField.encrypted && accessField.failed) {
+    throw new WorkBuddyEncryptedCredentialError(sourcePath)
+  }
+  const accessToken = accessField.value
   if (accessToken === '') return undefined
 
   // Skip documents whose refresh window has already closed: they cannot recover.
@@ -173,11 +250,13 @@ export function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyC
 
   return {
     accessToken,
-    refreshToken: typeof auth['refreshToken'] === 'string' ? auth['refreshToken'] : '',
+    refreshToken: decryptableString(auth['refreshToken'], decrypt).value,
     expiresAtMs: typeof auth['expiresAt'] === 'number' ? expiryToMs(auth['expiresAt']) : 0,
     ...refreshExpiresAtMs === undefined ? {} : { refreshExpiresAtMs },
     ...lastRefreshAtMs === undefined ? {} : { lastRefreshAtMs },
-    ...optionalString(identity['nickname']) === undefined ? {} : { nickname: optionalString(identity['nickname']) },
+    ...optionalString(decryptableString(identity['nickname'], decrypt).value) === undefined
+      ? {}
+      : { nickname: optionalString(decryptableString(identity['nickname'], decrypt).value) },
     ...optionalString(identity['uin']) === undefined ? {} : { uin: optionalString(identity['uin']) },
     ...optionalString(identity['uid']) === undefined ? {} : { uid: optionalString(identity['uid']) },
     ...optionalString(identity['enterpriseId']) === undefined
@@ -273,10 +352,39 @@ async function authFilesIn(dir: string): Promise<string[]> {
 }
 
 async function readCredential(path: string): Promise<WorkBuddyCredential | undefined> {
+  let text: string
   try {
-    return parseWorkBuddyAuth(await readFile(path, 'utf8'), path)
+    text = await readFile(path, 'utf8')
   } catch {
     return undefined
+  }
+  // Fetch the app's at-rest key once per process, and only when the document
+  // actually carries an encrypted field: plain-string builds must not spawn the
+  // app at all. A missing key leaves `decrypt` undefined, which turns an
+  // encrypted field into a thrown `WorkBuddyEncryptedCredentialError` instead of
+  // a silent "no credential".
+  const decrypt = text.includes('"$wbEncrypted"') ? await encryptedFieldOpener() : undefined
+  try {
+    return parseWorkBuddyAuth(text, path, decrypt)
+  } catch (error: unknown) {
+    if (isEncryptedCredentialError(error)) throw error
+    return undefined
+  }
+}
+
+/**
+ * Build the field opener, or undefined when the app cannot supply its key.
+ *
+ * Split out so the key lookup is testable without a real desktop install, and so
+ * a lookup failure degrades to "encrypted, unopenable" rather than to a parse
+ * error that would look like a corrupt file.
+ */
+async function encryptedFieldOpener(): Promise<((field: unknown) => string) | undefined> {
+  const key = await readAtRestKey().catch(() => undefined)
+  if (key === undefined) return undefined
+  return (field: unknown) => {
+    if (!isEncryptedFieldWrapper(field)) throw new Error('workbuddy: not an encrypted field wrapper')
+    return openEncryptedField(field, key)
   }
 }
 

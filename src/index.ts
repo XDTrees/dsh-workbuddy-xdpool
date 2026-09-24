@@ -437,37 +437,56 @@ export function apply(ctx: Context, config: Config = {}): void {
    * the browser; the catalog re-reads through `onChange` either way.
    */
   /**
-   * Write one key of the plugin's own settings section. Only ever called with the
-   * model-selection keys, the distribution, and the disabled-account list, so the
-   * settings file cannot be steered from the browser; the catalogs and the pool
-   * re-read through `onChange` either way.
+   * Persist one settings key, then VERIFY it landed.
    *
-   * `set` returns a promise, so a rejection must be caught explicitly: a bare
-   * `void write.call(...)` swallows it, and the card then looks like it saved
-   * while the value never reached the settings file.
+   * The settings service resolves `set()` even when the write did not stick, so a
+   * fire-and-forget call reports success while the file keeps the old value — and
+   * the card then shows a value that silently reverts on the next read. That is
+   * exactly the "I typed a reserve, reopened, and it still says 0" report: the
+   * write was reported as saved but never reached the document. Every write now
+   * awaits the setter and re-reads the document; a mismatch throws so the caller
+   * surfaces a real error instead of claiming success.
+   *
+   * `expected` is what the caller believes it just wrote. Comparison goes through
+   * a JSON round-trip so key order cannot cause a false mismatch.
    */
-  const setSetting = (key: string, value: unknown): void => {
+/**
+ * Deep equality that ignores key order, used to verify a settings write.
+ *
+ * `JSON.stringify` is key-order sensitive, so comparing two equal objects whose
+ * keys were inserted in a different order would report a false "not persisted"
+ * failure — and a false failure on a write that DID land is as harmful as a
+ * false success: it sends the user chasing a bug that is not there.
+ */
+function stableJsonEqual(left: unknown, right: unknown): boolean {
+  return canonicalJson(left) === canonicalJson(right)
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+    return `{${entries.join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+  const setSetting = async (key: string, value: unknown, expected?: unknown): Promise<void> => {
     if (value === undefined) return
     const write = settingsService?.set
     if (write === undefined) {
-      ctx.logger.warn?.(
-`dsh-workbuddy-xdpool: no settings writer; ` + key + ` was not saved`
-)
-      return
+      throw new Error(`settings service unavailable; ${key} was not saved`)
     }
-    try {
-      const result = write.call(settingsService, key, value) as Promise<void> | undefined
-      if (result !== undefined && typeof result.then === 'function') {
-        result.catch((error: unknown) => {
-          ctx.logger.warn?.(
-`dsh-workbuddy-xdpool: failed to persist ` + key
-, error)
-        })
+    // Await it: a rejection must reach the caller, not only the log.
+    await write.call(settingsService, key, value)
+    // A resolved set() is NOT proof the document changed.
+    if (expected !== undefined) {
+      const stored = (current() as Record<string, unknown>)[key]
+      if (!stableJsonEqual(stored, expected)) {
+        throw new Error(`settings field "${key}" was not persisted`)
       }
-    } catch (error: unknown) {
-      ctx.logger.warn?.(
-`dsh-workbuddy-xdpool: failed to persist ` + key
-, error)
     }
   }
 
@@ -479,8 +498,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   // The scheduler restores it in its own constructor, which runs before the
   // settings source is installed, so the read here re-primes it: a ledger saved
   // earlier today is folded back in as soon as the document is available.
-  core.scheduler.setEarningsPersistence((ledger) => {
-    setSetting('automationEarnings', ledger)
+  core.scheduler.setEarningsPersistence(async (ledger) => {
+    await setSetting('automationEarnings', ledger, ledger)
   })
   const storedLedger = current().automationEarnings
   if (storedLedger !== undefined) core.scheduler.applyEarningsLedger(storedLedger)
@@ -536,32 +555,33 @@ export function apply(ctx: Context, config: Config = {}): void {
     // The region is written to its own key: saving the domestic tab must never
     // rewrite the international picker, because the two gateways advertise
     // different rosters and the user curates them separately.
-    saveSelection: (region, selection) => {
-      setSetting(modelSelectionKeyFor(region), {
+    saveSelection: async (region, selection) => {
+      const payload = {
         ...selection.enabledModelIds === undefined ? {} : { enabledModelIds: [...selection.enabledModelIds] },
         ...selection.imageModelIds === undefined ? {} : { imageModelIds: [...selection.imageModelIds] },
         ...selection.contextBudgets === undefined ? {} : { contextBudgets: { ...selection.contextBudgets } },
-      })
+      }
+      await setSetting(modelSelectionKeyFor(region), payload, payload)
     },
     // Flip one account in or out of the pool. Read-modify-write rather than a
     // full overwrite: the card sends one account per request, so two tabs
     // toggling different accounts cannot clobber each other.
-    setAccountDisabled: (accountId, disabled) => {
+    setAccountDisabled: async (accountId, disabled) => {
       const currentIds = current().disabledAccountIds ?? []
       const next = disabled
         ? currentIds.includes(accountId) ? currentIds : [...currentIds, accountId]
         : currentIds.filter(id => id !== accountId)
-      setSetting('disabledAccountIds', next)
+      await setSetting('disabledAccountIds', next, next)
     },
       // Set one account's reserved-credit floor. Also a read-modify-write:
       // the card sends a single account, so two tabs editing different
       // accounts cannot overwrite each other. A zero clears the entry rather
       // than storing it, so the settings file only names real reserves.
-      setCreditReserve: (accountId, reserve) => {
+      setCreditReserve: async (accountId, reserve) => {
         const next = { ...current().creditReserves ?? {} }
         if (reserve > 0) next[accountId] = reserve
         else delete next[accountId]
-        setSetting('creditReserves', next)
+        await setSetting('creditReserves', next, next)
       },
   }))
   api = {

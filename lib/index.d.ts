@@ -764,8 +764,12 @@ export declare function defaultDesktopAuthDirs(platform?: NodeJS.Platform, home?
  * Parse a WorkBuddy auth document. Accepts the nested desktop shape
  * `{"auth":{...},"account":{...}}` and the flat panel shape; returns undefined
  * when there is no usable access token.
+ *
+ * `decrypt` opens the desktop app's `$wbEncrypted` field wrapper (5.6.0+, both
+ * platforms). Absent means "plain-string builds only", which is what every
+ * caller without an at-rest key should pass.
  */
-export declare function parseWorkBuddyAuth(text: string, sourcePath: string): WorkBuddyCredential | undefined;
+export declare function parseWorkBuddyAuth(text: string, sourcePath: string, decrypt?: (field: unknown) => string): WorkBuddyCredential | undefined;
 export declare function workbuddyAccountId(credential: Pick<WorkBuddyCredential, 'uin' | 'uid' | 'nickname'>): string;
 /** Every directory the pool should scan, in probe order. */
 export declare function candidateAuthDirs(env?: NodeJS.ProcessEnv): string[];
@@ -1332,7 +1336,7 @@ type AutomationJobKind = 'checkin' | 'tasks' | 'report' | 'streak' | 'travel';
 export declare const AUTOMATION_JOB_KINDS: readonly AutomationJobKind[];
 /** Reject anything that is not a job kind, so a route cannot name an unknown job. */
 export declare function isAutomationJobKind(value: unknown): value is AutomationJobKind;
-export declare function dayKey(date: Date): string;
+export declare function dayKey(date: Date, timeZone?: string): string;
 /**
  * Whether `now`'s local hour is one of `hours`.
  *
@@ -1467,6 +1471,15 @@ export declare class WorkBuddyScheduler {
    * rate-limits per account, so overlapping passes would only trip that limit.
    * A job that throws is recorded and the loop continues.
    */
+  /**
+   * Whether `kind` is due at `now`: its earliest configured hour has passed in
+   * the scheduling timezone, and no hour of today has been consumed yet.
+   *
+   * Hours are consumed per SLOT (one entry per configured hour), so a job with
+   * two hours still runs twice a day — but a job whose hour passed while DSH was
+   * closed runs immediately on the next tick instead of waiting for tomorrow.
+   */
+  private isDue;
   private tick;
   /** Run one job against every eligible account and record the outcome. */
   /**

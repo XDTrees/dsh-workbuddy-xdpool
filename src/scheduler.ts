@@ -348,10 +348,39 @@ function diffEarnings(
   return { credit, energy, claimed, accounts }
 }
 
-export function dayKey(date: Date): string {
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${date.getFullYear()}-${month}-${day}`
+/**
+ * The timezone every hour in this file is interpreted in.
+ *
+ * The activity windows these jobs target are defined in Beijing time, but the
+ * scheduler used `getHours()`, which answers in the host machine's local zone.
+ * On a machine set to anything else, "09:00" was 09:00 local — a check-in that
+ * simply never came due. Naming the zone makes the hour mean the same instant
+ * everywhere DSH runs, and is also what lets a test pin the behaviour.
+ */
+export const AUTOMATION_TIME_ZONE = 'Asia/Shanghai'
+
+/** Calendar parts of `date` in `timeZone`, all as zero-padded strings. */
+function zonedParts(date: Date, timeZone: string = AUTOMATION_TIME_ZONE): {
+  year: string
+  month: string
+  day: string
+  hour: string
+} {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)
+  const pick = (type: string): string => parts.find(part => part.type === type)?.value ?? '00'
+  return { year: pick('year'), month: pick('month'), day: pick('day'), hour: pick('hour') }
+}
+
+export function dayKey(date: Date, timeZone: string = AUTOMATION_TIME_ZONE): string {
+  const { year, month, day } = zonedParts(date, timeZone)
+  return `${year}-${month}-${day}`
 }
 
 /**
@@ -361,8 +390,9 @@ export function dayKey(date: Date): string {
  * for several hours runs in each of them while a second tick inside the same
  * hour is still refused.
  */
-export function slotKey(date: Date): string {
-  return `${dayKey(date)}T${String(date.getHours()).padStart(2, '0')}`
+export function slotKey(date: Date, timeZone: string = AUTOMATION_TIME_ZONE): string {
+  const { hour } = zonedParts(date, timeZone)
+  return `${dayKey(date, timeZone)}T${hour}`
 }
 
 /**
@@ -375,7 +405,8 @@ export function slotKey(date: Date): string {
  * moment it wakes, on the same day.
  */
 export function isFireHour(now: Date, hours: readonly number[]): boolean {
-  return hours.includes(now.getHours())
+  const { hour } = zonedParts(now)
+  return hours.includes(Number(hour))
 }
 
 /** Whether this account may be used: not switched off, not cooling. */
@@ -682,6 +713,25 @@ export class WorkBuddyScheduler {
    * rate-limits per account, so overlapping passes would only trip that limit.
    * A job that throws is recorded and the loop continues.
    */
+  /**
+   * Whether `kind` is due at `now`: its earliest configured hour has passed in
+   * the scheduling timezone, and no hour of today has been consumed yet.
+   *
+   * Hours are consumed per SLOT (one entry per configured hour), so a job with
+   * two hours still runs twice a day — but a job whose hour passed while DSH was
+   * closed runs immediately on the next tick instead of waiting for tomorrow.
+   */
+  private isDue(kind: JobKind, now: Date): boolean {
+    const hours = this.hoursOf(kind)
+    if (hours.length === 0) return false
+    const { hour } = zonedParts(now)
+    const current = Number(hour)
+    const today = dayKey(now)
+    // Any configured hour that has come due today and whose slot is still unrun.
+    return hours.some(candidate => candidate <= current
+      && this.states[kind].lastRunSlot !== `${today}T${String(candidate).padStart(2, '0')}`)
+  }
+
   private async tick(): Promise<void> {
     if (!this.enabled || this.stopped || this.busy) return
     this.busy = true
@@ -694,7 +744,14 @@ export class WorkBuddyScheduler {
       for (const kind of JOB_KINDS) {
         if (this.stopped) return
         if (this.states[kind].lastRunSlot === slot) continue
-        if (!isFireHour(now, this.hoursOf(kind))) continue
+        // CATCH-UP: run if the configured hour has already PASSED and no slot
+        // for it has run today. The old equality test (`hour === configured`)
+        // silently skipped the day whenever DSH was not running at that exact
+        // hour — a 09:00 check-in never ran if the app started at 10:00. Asking
+        // "has the hour passed, and is that slot still unrun" makes a missed
+        // schedule self-heal on the next tick, which is what a laptop that
+        // slept through the hour needs.
+        if (!this.isDue(kind, now)) continue
         await this.runJob(kind, today)
       }
     } catch (error: unknown) {

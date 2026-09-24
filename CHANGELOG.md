@@ -4,6 +4,72 @@
 
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 1.5.0 (2026-09-24)
+
+这一版修四处实报问题，其中第一处直接决定 Mac 用户能不能用。
+
+### 一、Mac 上 WorkBuddy 5.6.2「获取不到账号」——桌面端加密了凭据
+
+现象：Mac 上 App 装着、也登录着，插件却一个账号都列不出来。
+
+根因不在路径，在**加密**。WorkBuddy 桌面端从 **5.6.0 起**把 auth 文件里的
+`accessToken` / `refreshToken` / `nickname` 从纯字符串改成了加密信封
+（`{"$wbEncrypted":1,"envelope":"…"}`，AES-256-GCM），而且 **macOS 与 Windows
+同样如此**——此前「只有 Windows 加密」的判断是错的。原来的读取代码是
+`typeof auth.accessToken === 'string'`，遇到信封对象直接判定「没有凭据」，于是
+把「已登录」误报成「未登录」。
+
+修法（`src/at-rest.ts` 新增 + `src/accounts.ts` 接入）：
+- 向**本机已安装的 App 自己**索取字段密钥：用 `ELECTRON_RUN_AS_NODE` 跑它的原生绑定
+  (`electron_browser_workbuddy_storage.loggerGet()`)，就地派生密钥。插件不内置任何密钥
+  副本，密钥只在进程内存缓存、不落盘。
+- 二进制定位改为**问 bundle 自己**：macOS 的 `CFBundleExecutable` 是 `Electron`
+  而不是 `WorkBuddy`，按 App 名拼路径永远找不到 App。候选含国际版 `WorkBuddy AI.app`，
+  并支持 App 被归入 `/Applications/子目录/`，扫到的候选先用 `CFBundleIdentifier`
+  确认身份才执行（每个 Electron 应用的二进制都叫 `Electron`，只按名字匹配有风险）。
+- **「未登录」与「登录信息读不出来」不再共用一句话**：加密但拿不到密钥时抛
+  `WorkBuddyEncryptedCredentialError`，文案指向「装 App / 用 `WORKBUDDY_APP_EXECUTABLE`
+  指定位置」，并明说**重新登录没用**——因为凭据本身是好的。
+
+### 二、签到到点不跑
+
+两个独立原因，都会让 09:00 的签到静默错过：
+- **时区**：判定用 `date.getHours()`（本机时区）。活动窗口按北京时间定义，机器时区不是
+  北京时就会错点。现改为显式 `Asia/Shanghai`（`AUTOMATION_TIME_ZONE`）。
+- **错过不补**：原来要求「当前小时正好等于配置小时」。DSH 在 09:00 没运行（或笔记本睡过去了），
+  10:00 再启动时 `10 ∉ [9]`，当天就再也不跑。现改为**补跑**：只要配置的小时已过、且该时段
+  当天未跑过，下一次 tick 立即执行。
+
+### 三、字体太淡 + 时间显示不全
+
+- 自动化面板里时间戳（`上次运行` 那列）被左侧名称以固定 `72px` 挤掉，且没有 `nowrap`，
+  长日期会被换行/截断。现给该列独立的宽度策略与 `white-space:nowrap`。
+- 一批文字用了过淡的 `#8a97b5`（`auto-hint` / `auto-total-label` / `earned-label` /
+  `auto-switch` 等）与 11px 字号，对比度不足。统一提到次级色 `#c6c9d0`、字号 12px。
+
+### 四、「保留积分」填了数值、重开还是 0
+
+根因是**写入没有校验**。`setSetting` 原来是 fire-and-forget：不 await、不问结果，
+于是「settings 服务 resolve 了但值没落盘」这种失败会**被报告成保存成功**，卡片显示已保存，
+下次读取又变回 0——用户无法判断到底有没有生效。
+
+修法：`setSetting` 改为 async，**await 写入 + 回读文档校验**，不一致就抛错，
+由路由返回失败、卡片显示出来。比较用忽略键序的深比较（`stableJsonEqual`），
+否则两个内容相同、键序不同的对象会被误判为「没落盘」。四处写入（保留积分、账号启停、
+模型选择、积分台账）全部走这条路径。
+
+### 测试
+
+新增 16 例，总数 171 → **187**：加密凭据 7 例（含「不可解密必须报 ENCRYPTED 而不是未登录」、
+「密钥不对不能返回垃圾」）、落盘校验 6 例（含「setter resolve 但没存必须抛错」）、
+签到补跑 2 例、以及既有的调度/凭据用例随语义更新。
+
+### 溯源
+
+`src/at-rest.ts` 移植自 [dingminhua/dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy)
+（MIT, Copyright (c) 2026 LaoDing）——该模块最先定位并修复了「5.6.0 起 macOS 也加密凭据」
+（其 issue #15 真机取证）。移植保留其全部判定逻辑，未作改动。
+
 ## 1.4.1 (2026-09-24)
 
 ### 修了：hy3 超长对话还是会弹 400

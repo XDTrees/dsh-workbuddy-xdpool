@@ -324,7 +324,7 @@ describe('scheduler runs', () => {
     pool: WorkBuddyAccountPool,
     upstream: FakeUpstream,
     when: Date,
-    hours: { checkin?: number[]; report?: number[]; tasks?: number[]; streak?: number[] },
+    hours: { checkin?: number[]; report?: number[]; tasks?: number[]; streak?: number[]; travel?: number[] },
   ): WorkBuddyScheduler {
     return new WorkBuddyScheduler(pool, upstream.client, {
       enabled: true,
@@ -332,6 +332,7 @@ describe('scheduler runs', () => {
       reportHours: hours.report ?? [],
       taskHours: hours.tasks ?? [],
       streakHours: hours.streak ?? [],
+      travelHours: hours.travel ?? [],
       accountDelayMs: 0,
       eventScoreWaitMs: 0,
       expertGapMs: 0,
@@ -411,13 +412,28 @@ describe('scheduler runs', () => {
     expect(status.jobs.tasks.credit).toBe(20)
   })
 
-  it('does nothing outside its configured hour', async () => {
+  it('catches up a slot whose hour passed while DSH was not running', async () => {
+    const { pool, upstream } = await harness(1)
+    // The job is configured for 11:00 and the first tick this process sees is
+    // 15:00 — the app was closed at 11. It must run NOW rather than skip the day,
+    // which is the whole point of the catch-up rule (a laptop that slept through
+    // the hour used to lose the check-in entirely).
+    const when = new Date(2026, 8, 7, 15, 0, 0)
+    const scheduler = build(pool, upstream, when, { tasks: [11] })
+    await tickAt(scheduler, when)
+    expect(upstream.calls).toContain('listTasks')
+    expect(scheduler.status().jobs.tasks.lastRunDate).toBe('2026-09-07')
+  })
+
+  it('does not repeat a caught-up slot on the next tick', async () => {
     const { pool, upstream } = await harness(1)
     const when = new Date(2026, 8, 7, 15, 0, 0)
     const scheduler = build(pool, upstream, when, { tasks: [11] })
     await tickAt(scheduler, when)
-    expect(upstream.calls).toEqual([])
-    expect(scheduler.status().jobs.tasks.lastRunDate).toBeUndefined()
+    const afterFirst = upstream.calls.length
+    // Same hour, same day: the slot is spent, so nothing new is dispatched.
+    await tickAt(scheduler, new Date(2026, 8, 7, 15, 30, 0))
+    expect(upstream.calls.length).toBe(afterFirst)
   })
 
   it('accepts only not-accepted unlocked tasks, then claims the claimable ones', async () => {
@@ -445,7 +461,9 @@ describe('scheduler runs', () => {
   it('runs the report pass and reads the streak back', async () => {
     const { pool, upstream } = await harness(1)
     const when = new Date(2026, 8, 7, 10, 0, 0)
-    const scheduler = build(pool, upstream, when, { report: [10] })
+    // Only the report job is due here: the others are pinned to a LATER hour so
+    // the catch-up rule cannot pull them into this tick.
+    const scheduler = build(pool, upstream, when, { report: [10], tasks: [22], checkin: [22], streak: [22], travel: [22] })
     await tickAt(scheduler, when)
     expect(upstream.calls).toEqual(['report', 'streak'])
     expect(scheduler.status().jobs.report.ok).toBe(1)
