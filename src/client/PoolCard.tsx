@@ -633,7 +633,18 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * also refreshes the account list afterwards: the reserve badge appears
    * as soon as the reading crosses the floor.
    */
-  const saveCreditReserve = async (accountId: string, reserve: number): Promise<void> => {
+  /**
+   * Save one account reserved-credit floor.
+   *
+   * A reserve only protects credits if the pool knows the balance, so this also
+   * refreshes the account list afterwards: the reserve badge appears as soon as
+   * the reading crosses the floor.
+   *
+   * Returns whether the host CONFIRMED the write. The card keys its inline
+   * "saved / not saved" note off this, so a failure is shown where the user is
+   * looking instead of only in the card-level notice line.
+   */
+  const saveCreditReserve = async (accountId: string, reserve: number): Promise<boolean> => {
     setReserveBusy(accountId)
     setFlash(undefined)
     try {
@@ -651,8 +662,12 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
           ? (t?.('row.reserveSaved', { credits: reserve }) ?? `Keeping ${reserve} credits`)
           : (t?.('row.reserveCleared') ?? 'Reserve cleared'))
       }
+      return true
     } catch (cause: unknown) {
+      // Reported to the caller (inline note) AND to the card-level error line:
+      // the inline note says what failed, the line says why.
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+      return false
     } finally {
       if (mounted.current) setReserveBusy(undefined)
     }
@@ -1040,7 +1055,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         account={account}
                         {...checkinBusyId === undefined ? {} : { checkinBusyId }}
                         onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
-                        onSaveCreditReserve={(accountId, reserve) => { void saveCreditReserve(accountId, reserve) }}
+                        onSaveCreditReserve={(accountId, reserve) => saveCreditReserve(accountId, reserve)}
                           onToggleDisabled={(accountId, disabled) => { void toggleAccountDisabled(accountId, disabled) }}
                           {...accountBusyId === undefined ? {} : { accountBusyId }}
                         t={t}
@@ -1126,7 +1141,7 @@ function AccountBlock({
   /** Account id whose switch is in flight, if any. */
   accountBusyId?: string
   onToggleDisabled: (accountId: string, disabled: boolean) => void
-    onSaveCreditReserve: (accountId: string, reserve: number) => void
+    onSaveCreditReserve: (accountId: string, reserve: number) => Promise<boolean>
     /** Account id whose reserve is being saved, if any. */
     reserveBusyId?: string
 }) {
@@ -1268,6 +1283,21 @@ function AccountBlock({
  * each save is a settings write plus a status refresh, and a per-character
  * save would hammer both.
  */
+/**
+ * The reserved-credit floor for one account.
+ *
+ * Saving is an EXPLICIT action, not a blur side effect. The old version
+ * committed `onBlur`, which meant a value could be written without the user
+ * asking for it — and when the write silently failed, the only trace was a
+ * notice line at the top of the card that is easy to miss. That is how
+ * "I typed a number, reopened, and it says 0 again" happened with no visible
+ * error to explain it.
+ *
+ * Now: the field is a draft, Save is enabled only when the draft differs from
+ * what the host last reported, and the outcome (saving / saved / failed) is
+ * shown inline next to the button. Enter also saves, so keyboard flow is not
+ * lost.
+ */
 function CreditReserveRow({
   account,
   t,
@@ -1277,23 +1307,41 @@ function CreditReserveRow({
   account: PoolWebAccount
   t?: PoolCardProps['t']
   busy: boolean
-  onSave: (accountId: string, reserve: number) => void
+  /** Resolves true when the host confirmed the write, false otherwise. */
+  onSave: (accountId: string, reserve: number) => Promise<boolean>
 }) {
-  const [draft, setDraft] = useState<string>(String(account.creditReserve ?? 0))
-  // Keep the field in step when the status document changes underneath it
-  // (another tab, or a refresh after saving).
-  useEffect(() => {
-    setDraft(String(account.creditReserve ?? 0))
-  }, [account.creditReserve])
+  const saved = account.creditReserve ?? 0
+  const [draft, setDraft] = useState<string>(String(saved))
+  // Track the last successful write so the field can settle on it without
+  // waiting for the next poll: a save that worked must be visibly reflected.
+  const [settled, setSettled] = useState<number>(saved)
+  const [note, setNote] = useState<'saved' | 'failed' | undefined>(undefined)
 
-  const commit = (): void => {
-    const parsed = Number.parseInt(draft, 10)
-    const next = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0
-    if (next === (account.creditReserve ?? 0)) {
+  // Follow the host document when it changes underneath us (another tab, or a
+  // refresh after this card saved). Never during an edit: that would overwrite
+  // what the user is typing.
+  useEffect(() => {
+    setSettled(saved)
+    setDraft(current => (current === String(saved) ? current : String(saved)))
+  }, [saved])
+
+  const parsed = Number.parseInt(draft, 10)
+  const next = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0
+  // "Dirty" compares against the settled value, not the possibly-stale prop, so
+  // the button stays disabled right after a successful save.
+  const dirty = next !== settled
+
+  const commit = async (): Promise<void> => {
+    if (busy || !dirty) return
+    setNote(undefined)
+    const ok = await onSave(account.id, next)
+    if (ok) {
+      setSettled(next)
       setDraft(String(next))
-      return
+      setNote('saved')
+    } else {
+      setNote('failed')
     }
-    onSave(account.id, next)
   }
 
   return (
@@ -1309,17 +1357,39 @@ function CreditReserveRow({
         disabled={busy}
         className="dsm-workbuddy-xdpool-reserve-input"
         aria-label={t?.('row.reserveTitle') ?? 'Keep at least'}
-        onChange={(event) => { setDraft(event.target.value) }}
-        onBlur={commit}
+        onChange={(event) => {
+          setDraft(event.target.value)
+          setNote(undefined)
+        }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
+          if (event.key === 'Enter') void commit()
         }}
       />
       <span className="dsm-workbuddy-xdpool-reserve-unit">
+        {t?.('row.reserveUnit') ?? 'credits'}
+      </span>
+      <button
+        type="button"
+        className="dsm-workbuddy-xdpool-reserve-save"
+        disabled={busy || !dirty}
+        onClick={() => { void commit() }}
+      >
         {busy
           ? (t?.('row.reserveSaving') ?? 'Saving…')
-          : (t?.('row.reserveUnit') ?? 'credits')}
-      </span>
+          : (t?.('row.reserveSave') ?? 'Save')}
+      </button>
+      {note === 'saved'
+        ? <span className="dsm-workbuddy-xdpool-reserve-note dsm-workbuddy-xdpool-reserve-note-ok">
+            {next > 0
+              ? (t?.('row.reserveSaved', { credits: next }) ?? `Keeping ${next} credits`)
+              : (t?.('row.reserveCleared') ?? 'Reserve cleared')}
+          </span>
+        : null}
+      {note === 'failed'
+        ? <span className="dsm-workbuddy-xdpool-reserve-note dsm-workbuddy-xdpool-reserve-note-bad">
+            {t?.('row.reserveFailed') ?? 'Not saved — try again'}
+          </span>
+        : null}
       {account.reserved === true
         ? <span className="dsm-workbuddy-xdpool-reserve-badge">
             {t?.('row.reserveHolding') ?? 'Reserved: skipped'}
