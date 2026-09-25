@@ -204,20 +204,18 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     streamIdleTimeoutMs: WORKBUDDY_STREAM_IDLE_TIMEOUT_MS,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-workbuddy-xdpool retryPolicy'),
     configuredMaxTokens: new Map(),
+    // Required by dsh-llm-pi-ai >= 0.1.5-rc.2: the host adapter reads
+    // profile.modelErrors.get(model) on every model resolution. The catalog
+    // comes from the live upstream, so there are no pre-known failures — an
+    // empty map means "no model is pre-rejected".
+    modelErrors: new Map(),
     ...REQUEST_IMAGE_BUDGETS,
     piProvider: provider,
   }
 
-  // Required by the host adapter: it reads `profile.modelErrors.get(model)` for
-  // every model it resolves, so leaving it undefined makes every model lookup
-  // throw "Cannot read properties of undefined (reading 'get')" — which the
-  // catalog then surfaces as "{provider} 加载失败".
-  //
-  // It is attached outside the literal on purpose: the version of
-  // `dsh-llm-pi-ai` this repo pins declares the field at runtime but not in its
-  // published `.d.ts`, so listing it in the literal fails `tsc` while removing it
-  // breaks the running host. The cast keeps both sides happy.
-  Object.assign(profile, { modelErrors: new Map() })
+  // `modelErrors` is declared in the literal above: the pinned dsh-llm-pi-ai
+  // (0.1.5-rc.2) publishes it as required, so the cast-based workaround the
+  // older pin needed is gone.
 
   let profiles = new Map<string, ResolvedPiAiProviderProfile>([[providerId, profile]])
 
