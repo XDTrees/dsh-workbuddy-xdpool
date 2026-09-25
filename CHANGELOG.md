@@ -4,6 +4,21 @@
 
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 1.6.1 (2026-09-24)
+
+### 同机双桌面 build：凭据按各自 keyId 解开
+
+国内 `WorkBuddy.exe` 与国际版 `WorkBuddyAI.exe` 各自独立密钥，每个加密字段的
+envelope 里带 keyId。同机双 build 时，旧 opener 假设"全局唯一一把密钥"，
+keyId 不匹配就报 `ciphertext 错误 / 找不到账号`。
+
+修法：`encryptedFieldOpener` 先预热密钥缓存，再返回同步闭包，按字段
+`envelope.keyId` 用 `atRestKeyFor` 选对应 build 的密钥；无 build 能提供该
+keyId 时报"此字段无可用密钥"而非静默空串。
+
+回归测试 +3（全仓 198）：不同 keyId 各用自身密钥解开、无 build 提供时抛错、
+错误密钥在场仍命中正确 key。
+
 ## 1.6.0 (2026-09-24)
 
 这一版修的都是「已装、已登录，插件却说找不到 App / 存不进去」这一类误报。
