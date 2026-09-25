@@ -44,9 +44,12 @@ export interface PoolCardInjected {
   /**
    * The plugin settings section the card reads and writes. Model selection
    * lives here, which is what makes it apply to the whole pool rather than to
-   * whichever account is currently serving.
+   * whichever account is currently serving. Optional because the settingsScope
+   * service arrives late on dsh 0.1.7+ (the client binds it dynamically via
+   * ctx.inject(['settingsScope']) rather than a static top-level inject); the
+   * card renders read-only until it is available.
    */
-  settingsScope: PoolCardSettingsScope
+  settingsScope?: PoolCardSettingsScope
 }
 
 /** The settings scope the slot hands the card, narrowed to what it uses. */

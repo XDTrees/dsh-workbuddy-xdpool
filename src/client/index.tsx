@@ -29,8 +29,15 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Stable browser-plugin name. */
 export const name = 'dsh-workbuddy-xdpool-client'
-/** Client services required by the Plugin configuration contribution. */
-export const inject = ['slots', 'locale', 'settingsScope']
+/** Client services required by the Plugin configuration contribution.
+ * `settingsScope` is intentionally NOT listed: on dsh 0.1.7-rc.2 it arrives
+ * late, and a static top-level inject leaves the entry stuck
+ * `pending (waiting for service: settingsScope)` so the profile reports
+ * "1 entry did not activate". It is bound dynamically in `apply` via
+ * `ctx.inject(['settingsScope'], …)` — the same pattern dshmarket / dsh-context
+ * use — so the card activates immediately and renders read-only until the
+ * settings scope is available. */
+export const inject = ['slots', 'locale']
 
 /** Register card copy and the pool card under Plugin configuration. */
 export function apply(ctx: ClientContext): void {
@@ -40,8 +47,17 @@ export function apply(ctx: ClientContext): void {
     const t = ctx.locale.bind(namespace) as PoolCardInjected['t']
     // The model-selection controls write through this scope, so the card
     // must hold the same settings section the host installed. Without it the
-    // rows would render read-only even when the profile is writable.
-    const settingsScope = ctx.settingsScope.bind({ namespace: 'workbuddy-xdpool' }) as NonNullable<PoolCardInjected['settingsScope']>
+    // rows would render read-only even when the profile is writable. The
+    // settingsScope service is bound dynamically (see the inject comment above);
+    // the slot reads it lazily, so the card is read-only only until the scope
+    // arrives, then re-renders writable.
+    let settingsScope: PoolCardInjected['settingsScope']
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['settingsScope'], (scope) => {
+        const bound = scope?.settingsScope?.bind?.({ namespace: 'workbuddy-xdpool' })
+        if (bound) settingsScope = bound as NonNullable<PoolCardInjected['settingsScope']>
+      })
+    }
     ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
       name: 'settings.plugin.item',
       key: 'workbuddy-xdpool',
