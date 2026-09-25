@@ -47,6 +47,7 @@ import { createDecipheriv, createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 /** A `{$wbEncrypted:1,envelope}` field wrapper, the only shape this module opens. */
 export interface WorkBuddyEncryptedField {
@@ -82,9 +83,15 @@ export const WORKBUDDY_APP_EXECUTABLE_ENV = 'WORKBUDDY_APP_EXECUTABLE'
 /** How long the app is given to answer with its key payload. */
 const KEY_FETCH_TIMEOUT_MS = 10_000
 
-/** File name of the WorkBuddy desktop executable on Windows. */
-const APP_EXECUTABLE_NAME = 'WorkBuddy.exe'
-
+/**
+ * Executable file names the desktop app ships under, in probe order.
+ *
+ * `WorkBuddyAI.exe` is the INTERNATIONAL build; both apps can be installed side
+ * by side (observed on a real machine: `D:\\workbuddy\\WorkBuddy.exe` for the
+ * domestic one and `D:\\workbuddyai\\WorkBuddyAI.exe` for the international one),
+ * so the name cannot be assumed.
+ */
+const APP_EXECUTABLE_NAMES: readonly string[] = ['WorkBuddy.exe', 'WorkBuddyAI.exe']
 /**
  * macOS bundles the desktop app may be installed as, in probe order.
  *
@@ -254,39 +261,143 @@ export function macosBundleExecutable(bundle: string): string | undefined {
 }
 
 /**
+ * Windows install locations recorded by the app's own uninstaller.
+ *
+ * The registry is the authoritative answer: it survives a non-default drive, a
+ * renamed folder and a differently-named executable, none of which any fixed
+ * path list can predict. Real machines put the app at `D:\workbuddy\WorkBuddy.exe`
+ * and `D:\workbuddyai\WorkBuddyAI.exe` — exactly the layouts a
+ * `%ProgramFiles%\WorkBuddy\WorkBuddy.exe` probe cannot see, which is why the
+ * plugin reported "the desktop app could not provide the key" for an app that was
+ * installed and running.
+ *
+ * `DisplayIcon` is the field that actually carries the path (observed as
+ * `D:\workbuddy\WorkBuddy.exe,0`); `InstallLocation` is usually empty for these
+ * installers, so both are read and either may contribute.
+ *
+ * Returns [] on any failure — a missing registry key is the normal case on
+ * non-Windows, not an error.
+ */
+function windowsRegistryAppPaths(): string[] {
+  if (process.platform !== 'win32') return []
+  const roots: readonly [string, string][] = [
+    ['HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/**'],
+    ['HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/**'],
+    ['HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/**'],
+  ]
+  const out: string[] = []
+  for (const [root] of roots) {
+    let listing: string
+    try {
+      // reg.exe is part of Windows and needs no native module; asking it for the
+      // whole hive in one call is far cheaper than shelling out per entry.
+      listing = execFileSync('reg', ['query', root, '/s', '/v', 'DisplayName'], {
+        encoding: 'utf8', timeout: 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+      })
+    } catch {
+      continue
+    }
+    // Each key block we care about mentions WorkBuddy by display name; walk the
+    // hive and read the value under the SAME key once it is recognised.
+    const keys = listing.split(/\r?\n(?=HKEY_)/u).filter(block => /WorkBuddy|CodeBuddy/iu.test(block))
+    for (const key of keys) {
+      const keyPath = /^(HKEY_[^\r\n]+)/u.exec(key)?.[1]?.trim()
+      if (keyPath === undefined) continue
+      for (const name of ['DisplayIcon', 'InstallLocation']) {
+        try {
+          const value = execFileSync('reg', ['query', keyPath, '/v', name], {
+            encoding: 'utf8', timeout: 5_000, windowsHide: true,
+          })
+          const match = /REG_(?:SZ|EXPAND_SZ)\s+(.+)$/mu.exec(value)
+          const raw = match?.[1]?.trim()
+          if (raw === undefined || raw === '') continue
+          // DisplayIcon is `"<path>",<index>` or `<path>,<index>`.
+          const cleaned = raw.replace(/^"/u, '').replace(/",-?\d+$/u, '').replace(/,-?\d+$/u, '').trim()
+          out.push(cleaned)
+        } catch {
+          // Value absent on this key: try the next one.
+        }
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * Windows fallbacks for an app the registry did not cover: the well-known
+ * per-user and machine-wide locations, plus every fixed drive's `Program Files`.
+ *
+ * Drive enumeration matters because installing to a non-system drive is common
+ * on Windows and no environment variable points there.
+ */
+function windowsFallbackAppPaths(env: NodeJS.ProcessEnv): string[] {
+  const out: string[] = []
+  const roots = new Set<string>()
+  for (const key of ['ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)', 'LOCALAPPDATA'] as const) {
+    const value = env[key]?.trim()
+    if (value !== undefined && value !== '') roots.add(value)
+  }
+  // Every fixed drive's Program Files, since nothing else points at D:/E:.
+  for (let code = 67 /* C */; code <= 90 /* Z */; code += 1) {
+    const drive = String.fromCharCode(code) + ':\\'
+    try {
+      if (!existsSync(drive)) continue
+    } catch {
+      continue
+    }
+    roots.add(join(drive, 'Program Files'))
+    roots.add(join(drive, 'Program Files (x86)'))
+  }
+  for (const root of roots) {
+    for (const name of APP_EXECUTABLE_NAMES) {
+      out.push(join(root, 'WorkBuddy', name))
+      out.push(join(root, 'WorkBuddy AI', name))
+      // The per-user install nests it one level deeper.
+      out.push(join(root, 'Programs', 'WorkBuddy', name))
+    }
+  }
+  // One level below each root, covering `D:\\workbuddy\\`, `D:\\workbuddyai\\`.
+  for (const root of roots) {
+    try {
+      for (const entry of readdirSync(root)) {
+        if (!/^(workbuddy|codebuddy)/iu.test(entry)) continue
+        for (const name of APP_EXECUTABLE_NAMES) out.push(join(root, entry, name))
+      }
+    } catch {
+      // Unreadable root: skip it.
+    }
+  }
+  return out
+}
+
+/**
  * Candidate paths of the WorkBuddy desktop executable, in probe order.
  *
- * The Windows build is the one that encrypts credentials, so Windows leads;
- * the macOS bundles are listed because the same native module ships there and
- * the encryption policy is enabled on macOS builds too (observed from 5.6.x),
- * and `undefined` entries (an unset env variable) are dropped.
+ * Order is deliberate:
+ *  1. the explicit override, because a user who set it knows where the app is;
+ *  2. the registry, which is what the installer itself recorded;
+ *  3. derived fallbacks (per-user, machine-wide, every fixed drive).
  *
- * On macOS the executable name comes from each bundle (see
- * {@link macosBundleExecutable}) rather than being assembled from the app name.
+ * Only the Windows branch consults the registry (it is the only platform with
+ * one). macOS asks each bundle for its own `CFBundleExecutable` instead, because
+ * the WorkBuddy bundles ship a binary named `Electron`, not after the app.
  *
- * `readBundleExecutable` is injectable, in the same spirit as `platform`/`home`/
- * `env`: the macOS branch consults the real filesystem, so without a seam the
- * expected candidates would depend on whether the host machine happens to have
- * the app installed — and the test would pass on a developer's Mac while
- * failing in CI.
+ * `readBundleExecutable` and `registryPaths` are injectable in the same spirit as
+ * `platform`/`home`/`env`: both consult the real machine, so without a seam the
+ * expected candidates would depend on what happens to be installed where the
+ * suite runs — passing on a developer's box and failing in CI.
  */
 export function workbuddyAppExecutableCandidates(
   platform: NodeJS.Platform = process.platform,
   home: string = homedir(),
   env: NodeJS.ProcessEnv = process.env,
   readBundleExecutable: (bundle: string) => string | undefined = macosBundleExecutable,
+  registryPaths: () => string[] = windowsRegistryAppPaths,
 ): string[] {
   const candidates: (string | undefined)[] = [env[WORKBUDDY_APP_EXECUTABLE_ENV]?.trim()]
   if (platform === 'win32') {
-    const local = env['LOCALAPPDATA']?.trim()
-    const programFiles = env['ProgramFiles']?.trim()
-    const programFilesX86 = env['ProgramFiles(x86)']?.trim()
-    candidates.push(
-      local === undefined || local === '' ? undefined : join(local, 'Programs', 'WorkBuddy', APP_EXECUTABLE_NAME),
-      local === undefined || local === '' ? undefined : join(local, 'WorkBuddy', APP_EXECUTABLE_NAME),
-      programFiles === undefined || programFiles === '' ? undefined : join(programFiles, 'WorkBuddy', APP_EXECUTABLE_NAME),
-      programFilesX86 === undefined || programFilesX86 === '' ? undefined : join(programFilesX86, 'WorkBuddy', APP_EXECUTABLE_NAME),
-    )
+    candidates.push(...registryPaths())
+    candidates.push(...windowsFallbackAppPaths(env))
   } else if (platform === 'darwin') {
     for (const name of MACOS_APP_BUNDLE_NAMES) {
       candidates.push(
@@ -449,6 +560,19 @@ let cachedKey: Buffer | undefined
 let inflightKey: Promise<Buffer | undefined> | undefined
 
 /**
+ * When the last key lookup failed, and how long a failure is trusted.
+ *
+ * Without this, EVERY credential read spawned the app and waited out the
+ * 10-second timeout before giving up — which is what made "rescan accounts" and
+ * every status poll crawl on a machine where the app could not be found. A
+ * failure is negative-cached briefly: long enough that a burst of reads costs
+ * one attempt, short enough that installing or starting the app is picked up
+ * without restarting DSH.
+ */
+let lastKeyFailureAtMs = 0
+const KEY_FAILURE_BACKOFF_MS = 60_000
+
+/**
  * The desktop app's at-rest field key, or undefined when it cannot be obtained
  * (app not installed, an older build without the native module, or a future
  * build that rotates the payload). Cached after the first success so the app is
@@ -457,13 +581,28 @@ let inflightKey: Promise<Buffer | undefined> | undefined
  */
 export function readAtRestKey(): Promise<Buffer | undefined> {
   if (cachedKey !== undefined) return Promise.resolve(cachedKey)
+  // A recent failure is remembered so a burst of reads (a rescan walks every
+  // auth file) does not spawn the app once per file.
+  if (Date.now() - lastKeyFailureAtMs < KEY_FAILURE_BACKOFF_MS) {
+    return Promise.resolve(undefined)
+  }
   inflightKey ??= (async () => {
     const executable = findWorkbuddyAppExecutable()
-    if (executable === undefined) return undefined
-    const payload = await fetchAtRestKeyPayload(executable)
-    const key = deriveAtRestKey(payload)
-    cachedKey = key
-    return key
+    if (executable === undefined) {
+      lastKeyFailureAtMs = Date.now()
+      return undefined
+    }
+    try {
+      const payload = await fetchAtRestKeyPayload(executable)
+      const key = deriveAtRestKey(payload)
+      cachedKey = key
+      lastKeyFailureAtMs = 0
+      return key
+    } catch {
+      // Remember the failure: the next read tries again only after the backoff.
+      lastKeyFailureAtMs = Date.now()
+      return undefined
+    }
   })().finally(() => {
     inflightKey = undefined
   })
@@ -474,5 +613,6 @@ export function readAtRestKey(): Promise<Buffer | undefined> {
 export function clearAtRestKeyCache(): void {
   cachedKey = undefined
   inflightKey = undefined
+  lastKeyFailureAtMs = 0
 }
 

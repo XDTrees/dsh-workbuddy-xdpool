@@ -4,6 +4,68 @@
 
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 1.6.0 (2026-09-24)
+
+这一版修的都是「已装、已登录，插件却说找不到 App / 存不进去」这一类误报。
+
+### 一、WorkBuddy 装在非系统盘时找不到 App（社区反馈 + 本机复现）
+
+报错：`holds encrypted credentials but the desktop app could not provide the key`，
+但 App 明明装着并在运行。
+
+根因：Windows 只探测四个固定在**系统盘**的路径，而实际安装位置是自定义盘符 ——
+本机实测两个 App 都在非默认位置，且**国际版的文件名都不一样**：
+
+```
+D:\workbuddy\WorkBuddy.exe        国内版 5.5.3
+D:\workbuddyai\WorkBuddyAI.exe    国际版 5.6.2   ← 文件名都不同
+```
+
+修法（三层，按可靠性排序）：
+
+1. **读注册表**（最权威）——安装器自己记录的 `DisplayIcon` / `InstallLocation`，
+   不管装在哪个盘、目录叫什么、可执行文件叫什么都能找到；
+2. 环境变量 `WORKBUDDY_APP_EXECUTABLE`（用户显式指定，优先级最高）；
+3. 兜底枚举：`ProgramFiles` / `ProgramW6432` / `ProgramFiles(x86)` / `LOCALAPPDATA`，
+   **外加所有固定盘符**的 `Program Files`，再向下扫一层匹配 `workbuddy*` 目录。
+
+同时补上国际版可执行文件名 `WorkBuddyAI.exe` —— 它此前从未进过候选，
+所以哪怕路径对了也找不到。
+
+**实测验证**：注册表方案在本机正确发现两个 App，且用国内版 App 派生的密钥
+能解开国际版凭据（两个 App 共用同一个构建期密钥，`keyId` 完全匹配）。
+
+### 二、报错文案不再误导
+
+原文案暗示「去装 App」，而用户 App 就装着。现在区分两种情况，并给出真正可执行的指引：
+设置 `WORKBUDDY_APP_EXECUTABLE` 指向实际路径，并明说**重新登录无效**
+（凭据本身是好的，缺的是密钥）。
+
+### 三、读账号很慢 / 重新检测账号也报错
+
+每次读凭据都会 spawn App 并等待 10 秒超时；一旦失败，逐个凭据文件再来一遍。
+新增**失败负缓存**（60 秒）：一次失败后短期内不再重试，
+既让「扫描账号」瞬间返回，也保证装上/启动 App 后无需重启 DSH 就能恢复。
+
+### 四、「保留积分」保存报 `settings service unavailable; creditReserves was not saved`
+
+**这是我 1.5.0 引入的 bug**：校验写入了不存在的 API。
+本版 `dsh-settings` 暴露的是**按命名空间**的写入方法，没有 `set(key, value)`：
+
+```
+update(ns, patch, expectedRevision)    // 把 patch 合并进该命名空间的用户层
+replace(ns, section, expectedRevision)
+mutate(ns, ops, expectedRevision)
+```
+
+现在改用 `update(ns, { [key]: value })`。**「await + 回读校验」的理念保持不变**
+（它确实抓到了问题，只是抓错了原因）——写入后仍然回读文档比对，不一致就报错。
+
+### 测试
+
+188 → 195（新增 `app-location.test.ts` 7 例：注册表优先、override 优先、
+多盘符与文件名变体、macOS 仍走 bundle 而不碰注册表）。
+
 ## 1.5.3 (2026-09-24)
 
 ### 内核依赖对齐 DSH 实际版本，消除「需要 0.1.7」的歧义

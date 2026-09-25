@@ -423,7 +423,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       entry: Config,
       hooks: typeof sectionHooks,
     ) => void
-    set?: (key: string, value: unknown) => Promise<void> | void
+    /**
+     * Write paths. This service exposes NAMESPACE-scoped writers, not a bare
+     * `set(key, value)`:
+     *
+     *   update(ns, patch)   merge a plain-object patch into the user section
+     *   replace(ns, sect)   replace the user section wholesale
+     *   mutate(ns, ops)     path-addressed edits
+     *
+     * Calling a non-existent `set` is what produced
+     * "settings service unavailable; creditReserves was not saved" for every
+     * save, on a machine where the service was present the whole time.
+     */
+    update?: (ns: SettingsNamespace, patch: Record<string, unknown>, expectedRevision?: unknown) => Promise<void> | void
   }
   if (typeof settingsService.installSection === 'function') {
     settingsService.installSection(ctx, WORKBUDDY_POOL_SETTINGS_NS, Config, config, sectionHooks)
@@ -475,13 +487,16 @@ function canonicalJson(value: unknown): string {
 
   const setSetting = async (key: string, value: unknown, expected?: unknown): Promise<void> => {
     if (value === undefined) return
-    const write = settingsService?.set
-    if (write === undefined) {
-      throw new Error(`settings service unavailable; ${key} was not saved`)
+    const update = settingsService?.update
+    if (update === undefined) {
+      throw new Error(`settings service has no update(); ${key} was not saved`)
     }
-    // Await it: a rejection must reach the caller, not only the log.
-    await write.call(settingsService, key, value)
-    // A resolved set() is NOT proof the document changed.
+    // The service writes PER NAMESPACE, so the key becomes a one-field patch.
+    // Await it: a rejection must reach the caller instead of only the log.
+    await update.call(settingsService, WORKBUDDY_POOL_SETTINGS_NS, { [key]: value })
+    // A resolved write is NOT proof the document changed — the provider can
+    // accept and drop. Re-read and compare; mismatching is a real failure and
+    // must surface, because a silently-reverting value is worse than an error.
     if (expected !== undefined) {
       const stored = (current() as Record<string, unknown>)[key]
       if (!stableJsonEqual(stored, expected)) {

@@ -159,8 +159,11 @@ export class WorkBuddyEncryptedCredentialError extends Error {
   readonly code = ENCRYPTED_CREDENTIAL_CODE
   constructor(sourcePath: string) {
     super(
-      `workbuddy: ${sourcePath} holds encrypted credentials but the desktop app could not provide the key. `
-        + 'Install the WorkBuddy desktop app (or point WORKBUDDY_APP_EXECUTABLE at it) — signing in again will not help.',
+      `workbuddy: ${sourcePath} holds encrypted credentials, but no WorkBuddy desktop app could be located to provide the key.`
+        + ' If the app IS installed, it is simply outside the paths this plugin probes — set '
+        + 'WORKBUDDY_APP_EXECUTABLE to its full .exe path (then restart DSH) and the credential will open.'
+        + ' Signing in again will not help: the credential itself is intact. '
+        + 'Run `dsh-workbuddy-xdpool doctor` to see which paths were probed.',
     )
     this.name = 'WorkBuddyEncryptedCredentialError'
   }
