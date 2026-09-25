@@ -229,6 +229,24 @@ export function openEncryptedField(field: WorkBuddyEncryptedField, key: Buffer):
 }
 
 /**
+ * The key id an encrypted field envelope demands, or undefined when the
+ * envelope cannot be read.
+ *
+ * The account pool uses it to pick the right desktop build's key when more
+ * than one build (domestic and international) is installed on the same machine:
+ * each `.info` file names the key id its fields were sealed under, so the opener
+ * must select the matching derived key rather than assume one build exists.
+ */
+export function encryptedFieldKeyId(field: WorkBuddyEncryptedField): string | undefined {
+  try {
+    const record = JSON.parse(Buffer.from(field.envelope, 'base64').toString('utf8')) as Record<string, unknown>
+    return typeof record['keyId'] === 'string' ? record['keyId'] : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * The executable inside a macOS app bundle, read from the bundle's own
  * `Info.plist`.
  *
@@ -555,64 +573,130 @@ export function fetchAtRestKeyPayload(executable: string): Promise<string> {
   })
 }
 
-/** Process-lifetime cache of the derived key; never persisted. */
-let cachedKey: Buffer | undefined
-let inflightKey: Promise<Buffer | undefined> | undefined
+/**
+ * The desktop app's at-rest keys, indexed by the key id each derived key
+ * reports (the first 16 hex of its SHA-256).
+ *
+ * More than one build can be installed on one machine — the domestic
+ * `WorkBuddy.exe` and the international `WorkBuddyAI.exe` share a key id on the
+ * builds seen here, but a future build may rotate it, and the discovery below
+ * must keep working if they ever diverge. A field envelope names the key id it
+ * was sealed under, so the opener selects the matching derived key instead of
+ * assuming a single build exists. Cached per process and never persisted.
+ */
+const atRestKeyById = new Map<string, Buffer>()
+let inflightKeys: Promise<void> | undefined
 
 /**
- * When the last key lookup failed, and how long a failure is trusted.
+ * When the last full key sweep failed, and how long that failure is trusted.
  *
  * Without this, EVERY credential read spawned the app and waited out the
  * 10-second timeout before giving up — which is what made "rescan accounts" and
  * every status poll crawl on a machine where the app could not be found. A
  * failure is negative-cached briefly: long enough that a burst of reads costs
- * one attempt, short enough that installing or starting the app is picked up
+ * one sweep, short enough that installing or starting the app is picked up
  * without restarting DSH.
  */
 let lastKeyFailureAtMs = 0
 const KEY_FAILURE_BACKOFF_MS = 60_000
 
 /**
- * The desktop app's at-rest field key, or undefined when it cannot be obtained
- * (app not installed, an older build without the native module, or a future
- * build that rotates the payload). Cached after the first success so the app is
- * spawned at most once per process; a failure is retried on the next call,
- * because the user may install or start the app between reads.
+ * Load every desktop build's key id into {@link atRestKeyById}.
+ *
+ * Mirrors the reference `provideTheKey` shape: probe EVERY candidate executable
+ * (not just the first that exists) and keep the key each one yields. A build
+ * that fails to answer — a timeout, a single-instance lock, an older build
+ * without the native module — is skipped on its own and does NOT poison the
+ * other builds, which is exactly the failure mode the single-candidate path
+ * had: one bad spawn cached `undefined` for the whole process and every
+ * encrypted field then reported "no app could be located".
  */
-export function readAtRestKey(): Promise<Buffer | undefined> {
-  if (cachedKey !== undefined) return Promise.resolve(cachedKey)
-  // A recent failure is remembered so a burst of reads (a rescan walks every
-  // auth file) does not spawn the app once per file.
-  if (Date.now() - lastKeyFailureAtMs < KEY_FAILURE_BACKOFF_MS) {
-    return Promise.resolve(undefined)
-  }
-  inflightKey ??= (async () => {
-    const executable = findWorkbuddyAppExecutable()
-    if (executable === undefined) {
+function ensureAtRestKeys(): Promise<void> {
+  if (atRestKeyById.size > 0) return Promise.resolve()
+  if (Date.now() - lastKeyFailureAtMs < KEY_FAILURE_BACKOFF_MS) return Promise.resolve()
+  inflightKeys ??= (async () => {
+    const candidates = workbuddyAppExecutableCandidates()
+      .filter(candidate => {
+        try { return existsSync(candidate) } catch { return false }
+      })
+    if (candidates.length === 0) {
       lastKeyFailureAtMs = Date.now()
-      return undefined
+      return
     }
-    try {
-      const payload = await fetchAtRestKeyPayload(executable)
-      const key = deriveAtRestKey(payload)
-      cachedKey = key
+    let anySuccess = false
+    await Promise.all(candidates.map(async (executable) => {
+      try {
+        const payload = await fetchAtRestKeyPayload(executable)
+        const key = deriveAtRestKey(payload)
+        atRestKeyById.set(deriveAtRestKeyId(key), key)
+        anySuccess = true
+      } catch {
+        // One build failing must not hide the others.
+      }
+    }))
+    if (anySuccess) {
       lastKeyFailureAtMs = 0
-      return key
-    } catch {
-      // Remember the failure: the next read tries again only after the backoff.
+    } else {
       lastKeyFailureAtMs = Date.now()
-      return undefined
     }
   })().finally(() => {
-    inflightKey = undefined
+    inflightKeys = undefined
   })
-  return inflightKey
+  return inflightKeys
 }
 
-/** Drop the cached key; tests and diagnostics only. */
+/**
+ * The desktop app's at-rest field key for a given key id, or undefined when no
+ * installed build yielded that key (app not installed, an older build without
+ * the native module, a future build that rotates the payload, or every probe
+ * failed within the backoff window).
+ */
+export function readAtRestKeyById(keyId: string): Promise<Buffer | undefined> {
+  return ensureAtRestKeys().then(() => atRestKeyById.get(keyId))
+}
+
+/**
+ * Synchronous key lookup for a key id already loaded by {@link ensureAtRestKeys}.
+ *
+ * The account pool warms the cache up front (via {@link readAtRestKey}) and then
+ * opens each encrypted field through a synchronous closure, because the parser
+ * runs `decrypt` inline. Lookups that race the warm-up, or ask for a key id no
+ * installed build produced, return undefined and are reported as the
+ * encrypted-but-unavailable error rather than a silently empty token.
+ */
+export function atRestKeyFor(keyId: string): Buffer | undefined {
+  return atRestKeyById.get(keyId)
+}
+
+/**
+ * Test-only: install a fixed set of derived keys (indexed by key id) so the
+ * account pool can resolve built-in shapes without spawning the desktop app.
+ * Mirrors nothing in production; `clearAtRestKeyCache` resets it.
+ */
+export function setAtRestKeysForTest(keys: Array<{ keyId: string; key: Buffer }>): void {
+  atRestKeyById.clear()
+  for (const { keyId, key } of keys) atRestKeyById.set(keyId, key)
+}
+
+/**
+ * Backwards-compatible single-key view: the first key any build provided.
+ *
+ * Kept so callers that do not yet carry a key id (and the legacy tests) still
+ * resolve to a usable key on single-build machines. Multi-build callers should
+ * prefer {@link readAtRestKeyById} and select by the field's own key id.
+ */
+export function readAtRestKey(): Promise<Buffer | undefined> {
+  return ensureAtRestKeys().then(() => {
+    for (const key of atRestKeyById.values()) return key
+    return undefined
+  })
+}
+
+/** Drop the cached keys; tests and diagnostics only. */
 export function clearAtRestKeyCache(): void {
-  cachedKey = undefined
-  inflightKey = undefined
+  atRestKeyById.clear()
+  inflightKeys = undefined
   lastKeyFailureAtMs = 0
 }
+
 

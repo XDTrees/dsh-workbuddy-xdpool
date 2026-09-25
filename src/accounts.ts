@@ -16,9 +16,11 @@ import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { regionOf, type WorkBuddyRegion } from './upstream.ts'
 import {
+  encryptedFieldKeyId,
   isEncryptedFieldWrapper,
   openEncryptedField,
   readAtRestKey,
+  atRestKeyFor,
 } from './at-rest.ts'
 
 /** Minimal upstream surface the pool needs to refresh a token (no circular import). */
@@ -382,13 +384,29 @@ async function readCredential(path: string): Promise<WorkBuddyCredential | undef
  * a lookup failure degrades to "encrypted, unopenable" rather than to a parse
  * error that would look like a corrupt file.
  */
-async function encryptedFieldOpener(): Promise<((field: unknown) => string) | undefined> {
-  const key = await readAtRestKey().catch(() => undefined)
-  if (key === undefined) return undefined
+export async function encryptedFieldOpener(): Promise<((field: unknown) => string) | undefined> {
+  // Warm the per-key-id cache so the synchronous closure below can resolve each
+  // field's own key. Each encrypted field names the key id it was sealed under
+  // (WorkBuddyEncryptedField.envelope.keyId); when more than one desktop build
+  // (domestic and international) is installed on one machine, every build yields
+  // its key here and the field selects its own. A build that fails to answer is
+  // skipped on its own (mirroring the reference provideTheKey), so one bad spawn
+  // cannot hide the others behind a process-wide undefined key.
+  await readAtRestKey().catch(() => undefined)
   return (field: unknown) => {
     if (!isEncryptedFieldWrapper(field)) throw new Error('workbuddy: not an encrypted field wrapper')
+    const keyId = encryptedFieldKeyId(field)
+    if (keyId === undefined) throw new Error('workbuddy: encrypted field has no key id')
+    const key = atRestKeyFor(keyId)
+    if (key === undefined) throw new Error('workbuddy: no at-rest key available for this encrypted field')
     return openEncryptedField(field, key)
   }
+}
+
+// Warm the key cache for any installed build before the first parse, so a field
+// resolves synchronously inside the opener above. Exposed for tests/diagnostics.
+export async function primeAtRestKeys(): Promise<void> {
+  await readAtRestKey().catch(() => undefined)
 }
 
 /** Every directory the pool should scan, in probe order. */

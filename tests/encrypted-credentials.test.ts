@@ -14,8 +14,11 @@
 
 import { describe, expect, it } from 'vitest'
 import { createCipheriv, createHash, randomBytes } from 'node:crypto'
-import { parseWorkBuddyAuth, ENCRYPTED_CREDENTIAL_CODE, isEncryptedCredentialError } from '../src/accounts.ts'
-import { deriveAtRestKey, deriveAtRestKeyId, isEncryptedFieldWrapper, openEncryptedField } from '../src/at-rest.ts'
+import { encryptedFieldOpener,
+  parseWorkBuddyAuth, ENCRYPTED_CREDENTIAL_CODE, isEncryptedCredentialError } from '../src/accounts.ts'
+import { deriveAtRestKey, atRestKeyFor,
+  deriveAtRestKeyId,
+  setAtRestKeysForTest, isEncryptedFieldWrapper, openEncryptedField } from '../src/at-rest.ts'
 
 /** AAD transcript for one field-framed sym-v1 envelope (mirrors src/at-rest.ts). */
 function fieldAad(keyId: string, suite: number): Buffer {
@@ -139,5 +142,71 @@ describe('encrypted credential fields (5.6.0+)', () => {
     const secret = JSON.parse(PAYLOAD).atRestSecretKey as string
     const wrong = createHash('sha256').update(Buffer.from(secret, 'base64')).digest()
     expect(key.equals(wrong)).toBe(false)
+  })
+})
+
+
+/**
+ * Multi-build key dispatch (the "wrong ciphertext / no account found" bug).
+ *
+ * More than one desktop build can be installed on one machine — the domestic
+ * `WorkBuddy.exe` and the international `WorkBuddyAI.exe`. Both derive their key
+ * from a per-build secret, so each field envelope names the key id it was sealed
+ * under. The opener must select the matching key per field, never assume a single
+ * global key. A field whose key id no installed build produced is reported as the
+ * encrypted-but-unavailable error, and a key id that cannot encrypt/decrypt with
+ * the wrong key is never silently accepted.
+ */
+describe('multi-build key id dispatch', () => {
+  it('opens two fields sealed under different build key ids with their own keys', async () => {
+    const payloadA = JSON.stringify({ atRestSecretKey: Buffer.from('build-A-secret').toString('base64') })
+    const payloadB = JSON.stringify({ atRestSecretKey: Buffer.from('build-B-secret').toString('base64') })
+    const keyA = deriveAtRestKey(payloadA)
+    const keyB = deriveAtRestKey(payloadB)
+    const idA = deriveAtRestKeyId(keyA)
+    const idB = deriveAtRestKeyId(keyB)
+    expect(idA).not.toBe(idB)
+    setAtRestKeysForTest([
+      { keyId: idA, key: keyA },
+      { keyId: idB, key: keyB },
+    ])
+    const opener = await encryptedFieldOpener()
+    expect(opener).toBeTypeOf('function')
+    const fieldA = seal('token-A', payloadA)
+    const fieldB = seal('token-B', payloadB)
+    // Each field is opened with its own build key, selected by key id.
+    expect(opener!(fieldA)).toBe('token-A')
+    expect(opener!(fieldB)).toBe('token-B')
+  })
+
+  it('throws (not empty) for a field whose key id no build provided', async () => {
+    const payloadA = JSON.stringify({ atRestSecretKey: Buffer.from('build-A-secret').toString('base64') })
+    const payloadB = JSON.stringify({ atRestSecretKey: Buffer.from('build-B-secret').toString('base64') })
+    const keyA = deriveAtRestKey(payloadA)
+    const keyB = deriveAtRestKey(payloadB)
+    setAtRestKeysForTest([{ keyId: deriveAtRestKeyId(keyA), key: keyA }])
+    const opener = await encryptedFieldOpener()
+    const fieldB = seal('token-B', payloadB)
+    let thrown: unknown
+    try { opener!(fieldB) } catch (e) { thrown = e }
+    expect(thrown).toBeDefined()
+    expect(String((thrown as Error).message)).toMatch(/no at-rest key available/i)
+  })
+
+  it('always selects the matching build key even when a wrong key is also present', async () => {
+    const payloadA = JSON.stringify({ atRestSecretKey: Buffer.from('aaa').toString('base64') })
+    const payloadB = JSON.stringify({ atRestSecretKey: Buffer.from('bbb').toString('base64') })
+    const keyA = deriveAtRestKey(payloadA)
+    const keyB = deriveAtRestKey(payloadB)
+    // The wrong key (for a third, unrelated payload) is loaded too; must not be used.
+    const wrongKey = deriveAtRestKey(JSON.stringify({ atRestSecretKey: Buffer.from('ccc').toString('base64') }))
+    setAtRestKeysForTest([
+      { keyId: deriveAtRestKeyId(keyA), key: keyA },
+      { keyId: deriveAtRestKeyId(keyB), key: keyB },
+      { keyId: deriveAtRestKeyId(wrongKey), key: wrongKey },
+    ])
+    const opener = await encryptedFieldOpener()
+    expect(opener!(seal('A', payloadA))).toBe('A')
+    expect(opener!(seal('B', payloadB))).toBe('B')
   })
 })
