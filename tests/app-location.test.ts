@@ -63,8 +63,12 @@ describe('workbuddyAppExecutableCandidates — Windows', () => {
 
   it('knows the international executable name', () => {
     // The international build is `WorkBuddyAI.exe`; assuming `WorkBuddy.exe` was
-    // one of the two reasons the app looked absent.
-    const candidates = workbuddyAppExecutableCandidates(WIN, 'C:\\Users\\x', {}, undefined, () => [])
+    // one of the two reasons the app looked absent. Needs a non-empty env so the
+    // fallback roots are populated — an empty env yields zero candidates on any
+    // platform (no env roots, and no Windows drives exist on a Linux CI runner).
+    const candidates = workbuddyAppExecutableCandidates(
+      WIN, 'C:\\Users\\x', { ProgramFiles: 'C:\\Program Files' }, undefined, () => [],
+    )
     expect(candidates.some(c => c.endsWith('WorkBuddyAI.exe'))).toBe(true)
   })
 
