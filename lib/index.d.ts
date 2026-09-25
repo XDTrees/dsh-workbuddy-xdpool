@@ -1413,7 +1413,7 @@ export declare class WorkBuddyScheduler {
    * long before the settings section exists; a ledger written before that point
    * would have nowhere to go.
    */
-  setEarningsPersistence(save: (ledger: AutomationLedger) => void): void;
+  setEarningsPersistence(save: (ledger: AutomationLedger) => void | Promise<void>): void;
   /**
    * Fold a previously persisted ledger back in, when it belongs to today.
    *
@@ -2158,6 +2158,14 @@ export declare const modelSelectionKeyFor: (region: 'cn' | 'global') => string;
  * also why `contextBudgets` is a real dictionary (`z.dict`) - an open object
  * schema reads as "an object with no fields" and the fold then throws while
  * the provider row is rendered.
+ *
+ * Every field is wrapped in {@link asVolatile}: on the 0.1.7 line the settings
+ * write gate refuses an entry whose schema declares no volatile field at all
+ * ("Plugin entry ... has no volatile fields") and `describe()` skips such an
+ * entry — so an unmarked schema means the card can neither render nor save. On
+ * the 0.1.5 line the wrapper degrades to an identity no-op (see its JSDoc), and
+ * the value the running instance reads is a plain value either way once
+ * unwrapped.
  */
 export declare const Config: z<Config>;
 /** Everything the CLI needs from a live plugin instance. */

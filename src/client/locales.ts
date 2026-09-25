@@ -7,6 +7,9 @@
  */
 
 export const en = {
+  // The Settings nav row. Short by design: the nav column is narrow and the
+  // card body already carries the full product name.
+  'row.navLabel': 'XD Pool',
   'row.title': 'WorkBuddy XD Pool (dsh-workbuddy-xdpool)',
   'row.desc': 'Route every WorkBuddy sign-in on this machine into DSH as one auto-failing-over model pool.',
   'row.expand': 'Expand',
@@ -141,6 +144,7 @@ export const en = {
 export type WorkBuddyPoolSettingsKey = keyof typeof en
 
 export const zh: Record<WorkBuddyPoolSettingsKey, string> = {
+  'row.navLabel': 'XD Pool',
   'row.title': 'WorkBuddy 池（dsh-workbuddy-xdpool）',
   'row.desc': '把本机所有已登录的 WorkBuddy 账号并入 DSH，作为一个自动容错的模型池使用。',
   'row.expand': '展开',

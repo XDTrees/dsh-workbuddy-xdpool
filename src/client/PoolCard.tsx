@@ -7,8 +7,9 @@
  * token expiry / cooldown info / credit packages, then the model directory
  * with per-model free/limited/night/image badges and context size.
  *
- * The outer shell reuses the host's `dsm-plugin-card*` classes so the
- * collapse affordance is identical to every other plugin configuration row.
+ * Rendered as a full settings page (see `client/index.tsx`): the shell gives it
+ * a left-nav row and a scrollable content column, so everything is visible at
+ * once — a fold inside the page only hid the pool behind a click.
  *
  * @module dsh-workbuddy-xdpool/client/PoolCard
  */
@@ -17,7 +18,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createElement as h } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
-import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_AUTOMATION_RUN_PATH,
@@ -258,7 +258,6 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const settingsWritable = settingsScope?.getSnapshot().writable === true
   /** Which region tab is showing. A CN-only install never leaves this. */
   const [activeRegion, setActiveRegion] = useState<'cn' | 'global'>('cn')
-  const [open, setOpen] = useState(false)
   /**
    * Last-known status per region. Kept per region (not a single slot) so
    * switching tabs shows the other side's last answer immediately instead of
@@ -352,7 +351,6 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   }, [])
 
   useEffect(() => {
-    if (!open) return
     const controller = new AbortController()
     void refresh(activeRegion, controller.signal)
     const timer = window.setInterval(() => { void refresh(activeRegion, controller.signal) }, POLL_INTERVAL_MS)
@@ -360,7 +358,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       window.clearInterval(timer)
       controller.abort()
     }
-  }, [open, refresh, activeRegion])
+  }, [refresh, activeRegion])
 
   const rescan = async (): Promise<void> => {
     setBusy(true)
@@ -740,32 +738,42 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       : (t?.('row.shimStopped') ?? 'Provider loopback not running')
 
   return (
-    <li className={`dsm-plugin-card${open ? ' dsm-plugin-card-open' : ''}`}>
-      <button
-        type="button"
-        className="dsm-plugin-card-header"
-        aria-expanded={open}
-        aria-label={`${t?.(open ? 'row.collapse' : 'row.expand') ?? ''}: ${title}`}
-        onClick={() => { setOpen(!open) }}
-      >
-        <img className="dsm-plugin-card-icon" src={POOL_PLUGIN_ICON} alt="" />
-        <span className="dsm-plugin-card-head">
-          <span className="dsm-plugin-card-title">{title}</span>
-          <span className="dsm-plugin-card-description">{description}</span>
+    <section className="dsm-workbuddy-xdpool-page">
+      <header className="dsm-workbuddy-xdpool-page-head">
+        <img className="dsm-workbuddy-xdpool-page-icon" src={POOL_PLUGIN_ICON} alt="" />
+        <span className="dsm-workbuddy-xdpool-page-copy">
+          <h2 className="dsm-workbuddy-xdpool-page-title">{title}</h2>
+          <p className="dsm-workbuddy-xdpool-page-desc">{description}</p>
         </span>
-        <span
-          aria-hidden="true"
-          className={`dsm-plugin-card-chevron${open ? ' dsm-plugin-card-chevron-open' : ''}`}
-        >
-          {h(IconChevronDownOutline14, { size: 14 })}
-        </span>
-      </button>
-      {open
-        ? <div className="dsm-plugin-card-body">
-            <div className="dsm-workbuddy-xdpool-usage">
+        <div className="dsm-workbuddy-xdpool-page-actions">
+          <button
+            type="button"
+            className="dsm-btn dsm-btn-outline"
+            disabled={busy}
+            onClick={() => { void rescan() }}
+          >
+            {busy
+              ? (t?.('row.accountsScanning') ?? 'Detecting…')
+              : (t?.('row.accountsRescan') ?? 'Detect accounts again')}
+          </button>
+          {cooling > 0
+            ? <button
+                type="button"
+                className="dsm-btn dsm-btn-outline"
+                disabled={cooldownBusy}
+                onClick={() => { void resetCooldowns() }}
+              >
+                {cooldownBusy
+                  ? (t?.('row.resetCooldownsBusy') ?? 'Clearing…')
+                  : (t?.('row.resetCooldowns') ?? 'Clear all cooldowns')}
+              </button>
+            : null}
+        </div>
+      </header>
               {/* Region tabs: one supplier per tab. Both are always offered, so an
                   empty side reads as "not signed in here yet" rather than the tab
                   appearing only after the user has already signed in. */}
+              <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-status">
               <div className="dsm-workbuddy-xdpool-tabs" role="tablist">
                     {status?.regions.map(region => (
                       <button
@@ -869,6 +877,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                     : null}
                 </div>
               </div>
+              </section>
 
               {/* Daily-points automation: the schedule and each job's last run.
                   Off by default, so the panel leads with the switch and only
@@ -877,7 +886,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                   system at all, so showing the panel there would offer a switch that
                   can never do anything. */}
               {activeRegion !== 'cn' || status?.automation === undefined ? null
-                : <section className="dsm-workbuddy-xdpool-auto" aria-label={t?.('row.autoTitle') ?? 'Automation'}>
+                : <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-auto" aria-label={t?.('row.autoTitle') ?? 'Automation'}>
                     <div className="dsm-workbuddy-xdpool-auto-head">
                       <span className="dsm-workbuddy-xdpool-auto-title">
                         {t?.('row.autoTitle') ?? 'Automation'}
@@ -992,7 +1001,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                   </p>}
 
               {accountCount === 0 && error === undefined
-                ? <section className="dsm-workbuddy-xdpool-empty">
+                ? <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-empty">
                     <p className="dsm-workbuddy-xdpool-empty-title">
                       {t?.('row.regionEmptyTitle', { region: regionLabel })
                         ?? t?.('row.regionEmpty') ?? 'No account yet'}
@@ -1016,7 +1025,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 : null}
 
               {accountCount > 0
-                ? <section className="dsm-workbuddy-xdpool-accounts" aria-label={t?.('row.accountsTitle') ?? 'Accounts'}>
+                ? <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-accounts" aria-label={t?.('row.accountsTitle') ?? 'Accounts'}>
                     <div className="dsm-workbuddy-xdpool-accounts-head">
                       <h3 className="dsm-workbuddy-xdpool-accounts-title">
                         {t?.('row.accountsTitle') ?? 'Accounts in the pool'}
@@ -1065,7 +1074,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 : null}
 
               {(status?.models.length ?? 0) > 0
-                ? <section className="dsm-workbuddy-xdpool-models" aria-label={t?.('row.modelsTitle') ?? 'Models'}>
+                ? <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-models" aria-label={t?.('row.modelsTitle') ?? 'Models'}>
                     <div className="dsm-workbuddy-xdpool-models-head">
                       <div className="dsm-workbuddy-xdpool-models-heading">
                         <h3 className="dsm-workbuddy-xdpool-models-title">
@@ -1115,10 +1124,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                     </div>
                   </section>
                 : null}
-            </div>
-          </div>
-        : null}
-    </li>
+    </section>
   )
 }
 

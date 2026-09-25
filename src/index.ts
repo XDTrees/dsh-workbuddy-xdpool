@@ -229,6 +229,61 @@ export function automationOptions(automation: AutomationConfig | undefined): Aut
  * region that has never been saved stays absent so `applyConfigFromSource` can
  * fall back to the legacy flat keys.
  */
+function asVolatile<S>(schema: S): S {
+  const candidate = schema as unknown as { volatile?: () => S }
+  return typeof candidate.volatile === 'function' ? candidate.volatile() : schema
+}
+
+/**
+ * Peel one live volatile reference.
+ *
+ * On 0.1.7 a volatile field is handed back as `{ get(): T }` rather than a
+ * plain value, so a running instance observes a settings edit without being
+ * remounted. Every read of a marked field therefore has to unwrap: passing the
+ * reference onward compares an object against a string and reports the field as
+ * unset. On 0.1.5 the field is already a plain value, so this is a no-op.
+ *
+ * The test is duck-typed on purpose — importing `isVolatile` would add a
+ * dependency the 0.1.5 line does not carry.
+ */
+function unwrapVolatile<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function') {
+    return (value as unknown as { get(): T }).get()
+  }
+  return value
+}
+
+/**
+ * Deep copy of a config value with every live `{get(): T}` reference replaced
+ * by the value it resolves to.
+ *
+ * {@link unwrapVolatile} peels only the one level an ordinary read needs. A
+ * settings service is different: it validates and `structuredClone`s the WHOLE
+ * object, so a reference surviving anywhere inside it fails schema validation
+ * with a message that names the field but not the cause —
+ * `$.authFile expected string but got [object Object]`. That is what makes the
+ * namespace fail to register and the card silently disappear, which is why the
+ * object handed to `installSection` goes through this first.
+ */
+function unwrapVolatileDeep<T>(value: T): T {
+  const peeled = unwrapVolatile(value)
+  if (Array.isArray(peeled)) return peeled.map(entry => unwrapVolatileDeep(entry)) as T
+  if (peeled !== null && typeof peeled === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(peeled)) out[key] = unwrapVolatileDeep(entry)
+    return out as T
+  }
+  return peeled
+}
+
+/**
+ * One region's model-selection schema.
+ *
+ * Every field is optional on purpose: an absent field keeps its documented
+ * meaning ("all enabled" / "follow the upstream image flag" / "no cap"), and a
+ * region that has never been saved stays absent so `applyConfigFromSource` can
+ * fall back to the legacy flat keys.
+ */
 const modelSelectionSchema = z.object({
   enabledModelIds: z.array(z.string()).description('Model ids enabled in this region\'s picker (absent = all)'),
   imageModelIds: z.array(z.string()).description('Model ids accepting image input in this region (absent = follow upstream)'),
@@ -271,20 +326,28 @@ export const modelSelectionKeyFor = (region: 'cn' | 'global'): string =>
  * also why `contextBudgets` is a real dictionary (`z.dict`) - an open object
  * schema reads as "an object with no fields" and the fold then throws while
  * the provider row is rendered.
+ *
+ * Every field is wrapped in {@link asVolatile}: on the 0.1.7 line the settings
+ * write gate refuses an entry whose schema declares no volatile field at all
+ * ("Plugin entry ... has no volatile fields") and `describe()` skips such an
+ * entry — so an unmarked schema means the card can neither render nor save. On
+ * the 0.1.5 line the wrapper degrades to an identity no-op (see its JSDoc), and
+ * the value the running instance reads is a plain value either way once
+ * unwrapped.
  */
 export const Config: z<Config> = z.object({
-  authFile: z.string().description('WorkBuddy desktop auth file (defaults to the app own location)'),
-  cooldownMs: z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds'),
-  distribution: z.union(['priority', 'round-robin', 'balanced']).default('priority').description('How requests are spread: priority (drain one), round-robin (in order), or balanced (idle-weighted random)'),
-  disabledAccountIds: z.array(z.string()).default([]).description('Account ids excluded from the pool (empty = every discovered account participates)'),
-  creditReserves: z.dict(z.number().step(1).min(0)).default({}).description('Per-account credit floor: stop using an account once its balance reaches this value'),
-  enabledModelIds: z.array(z.string()).default([]).description('Legacy shared model-id list; used by a region that has no per-region selection yet'),
-  imageModelIds: z.array(z.string()).default([]).description('Legacy shared image-id list; used by a region that has no per-region selection yet'),
-  contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Legacy shared context budgets; used by a region with no per-region selection yet'),
-  modelSelectionCn: modelSelectionSchema.description('Model selection for the domestic gateway'),
-  modelSelectionGlobal: modelSelectionSchema.description('Model selection for the international gateway'),
-  automation: automationSchema.description('Daily points automation (activity report, task claiming, check-in)'),
-  automationEarnings: z.any().description('Automation earnings ledger (written by the scheduler)')
+  authFile: asVolatile(z.string().description('WorkBuddy desktop auth file (defaults to the app own location)')),
+  cooldownMs: asVolatile(z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds')),
+  distribution: asVolatile(z.union(['priority', 'round-robin', 'balanced']).default('priority').description('How requests are spread: priority (drain one), round-robin (in order), or balanced (idle-weighted random)')),
+  disabledAccountIds: asVolatile(z.array(z.string()).default([]).description('Account ids excluded from the pool (empty = every discovered account participates)')),
+  creditReserves: asVolatile(z.dict(z.number().step(1).min(0)).default({}).description('Per-account credit floor: stop using an account once its balance reaches this value')),
+  enabledModelIds: asVolatile(z.array(z.string()).default([]).description('Legacy shared model-id list; used by a region that has no per-region selection yet')),
+  imageModelIds: asVolatile(z.array(z.string()).default([]).description('Legacy shared image-id list; used by a region that has no per-region selection yet')),
+  contextBudgets: asVolatile(z.dict(z.number().step(1).min(1)).default({}).description('Legacy shared context budgets; used by a region with no per-region selection yet')),
+  modelSelectionCn: asVolatile(modelSelectionSchema.description('Model selection for the domestic gateway')),
+  modelSelectionGlobal: asVolatile(modelSelectionSchema.description('Model selection for the international gateway')),
+  automation: asVolatile(automationSchema.description('Daily points automation (activity report, task claiming, check-in)')),
+  automationEarnings: asVolatile(z.any().description('Automation earnings ledger (written by the scheduler)'))
 
 })
 
@@ -366,9 +429,20 @@ export function apply(ctx: Context, config: Config = {}): void {
   // the WorkBuddy XD Pool settings section joins (so edits made on the card's
   // Models settings page stay authoritative). A dedicated section is also what
   // tells the Host to mount the plugin's client card under Plugin config.
-  let current: () => Config = () => config
+  /**
+   * The effective config with every live volatile reference peeled.
+   *
+   * On 0.1.7 a field marked volatile is handed to the plugin as `{get(): T}` so
+   * a settings edit is observed without a remount, and the loader keeps the
+   * reference live. Every read below therefore goes through this view: a raw
+   * reference compared against a string reports the field as unset, which is
+   * how a saved reserve would read back as "0" while the file holds the value.
+   * On 0.1.5 there is nothing to peel and this is the identity.
+   */
+  let rawCurrent: () => Config = () => config
+  const current = (): Config => unwrapVolatileDeep(rawCurrent())
   const sectionHooks = {
-    setSource(source: () => Config) { current = source },
+    setSource(source: () => Config) { rawCurrent = source },
     onChange() { applyConfigFromSource() },
   }
   const applyConfigFromSource = (): void => {
@@ -410,11 +484,30 @@ export function apply(ctx: Context, config: Config = {}): void {
     // this passes `enabled: false` explicitly rather than leaving it undefined.
     core.scheduler.applyConfig(automationOptions(automation))
   }
+  // ---------------------------------------------------------------------
+  // Settings registration, on whichever host line is running.
+  //
+  // The two lines do not share a settings API:
+  //
+  //   0.1.5  SettingsProvider.installSection(owner, ns, schema, entry, hooks)
+  //          registers a NAMESPACE the plugin picks, and pushes changes back
+  //          through the `hooks.onChange` callback.
+  //   0.1.7  SettingsForms.configure({auto}, owner) registers the plugin
+  //          INSTANCE and lets the host derive the form from the entry id;
+  //          there is no `installSection` at all, and edits are announced as
+  //          `loader/volatile-update` on the fiber context.
+  //
+  // Calling the wrong one unconditionally is what took the whole plugin down:
+  // `ctx.settings.installSection(...)` on 0.1.7 throws "is not a function" from
+  // inside `apply`, which cordis reports as a failed entry rather than a
+  // degraded card. So the branch below is capability-probed, never assumed.
+  //
   // `settings` is declared in this plugin top-level `inject`, so the service is
-  // available synchronously here. Calling `installSection` without that
-  // declaration leaves the host with no settings view for this namespace, and its
-  // provider list then reads `undefined` while rendering: the
-  // "Cannot read properties of undefined (reading get)" failure.
+  // available synchronously here. Declaring it is also what keeps the host from
+  // rendering this namespace with no settings view and reading `undefined`
+  // while it builds the provider list (the "Cannot read properties of
+  // undefined (reading get)" failure).
+  // ---------------------------------------------------------------------
   const settingsService = ctx.settings as unknown as {
     installSection?: (
       owner: Context,
@@ -423,6 +516,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       entry: Config,
       hooks: typeof sectionHooks,
     ) => void
+    /**
+     * 0.1.7 presentation policy for this plugin instance. `auto: true` lets the
+     * host derive the form from the entry schema; the returned disposer must be
+     * registered with this plugin effects or the policy outlives disposal.
+     */
+    configure?: (presentation: { auto?: boolean }, owner?: unknown) => () => void
     /**
      * Write paths. This service exposes NAMESPACE-scoped writers, not a bare
      * `set(key, value)`:
@@ -438,10 +537,40 @@ export function apply(ctx: Context, config: Config = {}): void {
     update?: (ns: SettingsNamespace, patch: Record<string, unknown>, expectedRevision?: unknown) => Promise<void> | void
   }
   if (typeof settingsService.installSection === 'function') {
-    settingsService.installSection(ctx, WORKBUDDY_POOL_SETTINGS_NS, Config, config, sectionHooks)
-  } else {
-    ctx.logger.warn?.('dsh-workbuddy-xdpool: settings service has no installSection; card will not mount')
+    // 0.1.5: hand over the namespace and let the provider own the document.
+    //
+    // The config goes through `unwrapVolatileDeep` first: a volatile field is a
+    // live `{get(): T}` reference on the lines that support the marker, and the
+    // provider validates and structuredClones the whole object — a surviving
+    // reference fails validation with a message naming the field but not the
+    // cause, the namespace never registers, and the card silently disappears.
+    // (On 0.1.5 the marker is a no-op, so this is the identity there.)
+    settingsService.installSection(
+      ctx,
+      WORKBUDDY_POOL_SETTINGS_NS,
+      Config,
+      unwrapVolatileDeep(config),
+      sectionHooks,
+    )
   }
+  if (typeof settingsService.configure === 'function') {
+    // 0.1.7: the host derives the form from this entry and persists edits to
+    // the profile patch itself. Registering the policy through `ctx.effect`
+    // keeps the disposer wired to this plugin lifetime.
+    ctx.effect(() => settingsService.configure?.({ auto: true }, ctx.fiber) ?? (() => {}))
+  }
+  if (typeof settingsService.installSection !== 'function' && typeof settingsService.configure !== 'function') {
+    ctx.logger.warn?.('dsh-workbuddy-xdpool: settings service exposes neither installSection nor configure; the card will not mount')
+  }
+
+  // On 0.1.7 a saved edit lands in the profile patch and is announced as
+  // `loader/volatile-update`; the loader then hands the plugin a fresh live
+  // reference. Re-applying here is what makes a save on the card take effect
+  // without a host restart. The event does not exist on 0.1.5, which pushes
+  // changes through `hooks.onChange` instead — so on that line this listener
+  // simply never fires.
+  ;(ctx as unknown as { on(name: string, listener: () => void): unknown })
+    .on('loader/volatile-update', () => { applyConfigFromSource() })
 
   /**
    * Write one key of the plugin's own settings section. Only ever called with
@@ -485,15 +614,39 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value)
 }
 
+  /**
+   * The namespace `settings.update` expects on the running line.
+   *
+   * 0.1.5 resolves writers by the NAMESPACE the plugin registered through
+   * `installSection`, so the plugin picks it. 0.1.7 resolves them by the HOST
+   * PLUGIN ENTRY ID instead (`configEditor.entries().find(row => row.options.id
+   * === ns)`), and the profile patch chooses that id — the live Desktop host
+   * mounts this plugin as `llm-workbuddy-xdpool`, but a marketplace install can
+   * wrap it (`mkt-...`) or mount it through an `include` row. Asking the fiber
+   * for its own entry id is therefore the only correct answer there; guessing
+   * our own namespace makes every save throw `No configurable plugin entry`.
+   */
+  const settingsWriteNs: SettingsNamespace = typeof settingsService.installSection === 'function'
+    ? WORKBUDDY_POOL_SETTINGS_NS
+    : (() => {
+        try {
+          const entryId = (ctx.fiber as unknown as { entry?: { options?: { id?: string } } })?.entry?.options?.id
+          return (entryId === undefined || entryId === '' ? WORKBUDDY_POOL_SETTINGS_NS : entryId) as SettingsNamespace
+        } catch {
+          // No fiber entry (a programmatic probe): fall back to the declared id.
+          return WORKBUDDY_POOL_SETTINGS_NS
+        }
+      })()
   const setSetting = async (key: string, value: unknown, expected?: unknown): Promise<void> => {
     if (value === undefined) return
     const update = settingsService?.update
     if (update === undefined) {
       throw new Error(`settings service has no update(); ${key} was not saved`)
     }
-    // The service writes PER NAMESPACE, so the key becomes a one-field patch.
-    // Await it: a rejection must reach the caller instead of only the log.
-    await update.call(settingsService, WORKBUDDY_POOL_SETTINGS_NS, { [key]: value })
+    // The service writes PER NAMESPACE (or per entry id on 0.1.7), so the key
+    // becomes a one-field patch. Await it: a rejection must reach the caller
+    // instead of only the log.
+    await update.call(settingsService, settingsWriteNs, { [key]: value })
     // A resolved write is NOT proof the document changed — the provider can
     // accept and drop. Re-read and compare; mismatching is a real failure and
     // must surface, because a silently-reverting value is worse than an error.
@@ -757,6 +910,15 @@ function canonicalJson(value: unknown): string {
       // Seed the live model catalog (with per-model credit multipliers and
       // reasoning levels) from the upstream; the static fallback covers an
       // offline upstream so the provider is never empty.
+      //
+      // The trailing `catch` is load-bearing, not tidiness: `scan()` rejects
+      // whenever the WorkBuddy app cannot be located to open the credential
+      // (`ENCRYPTED_CREDENTIAL`), and the `try` below covers only the per-region
+      // loop. An unguarded rejection here is FATAL — the DSH host installs
+      // `installFailLoud`, which turns any unhandled rejection into `exit(1)`,
+      // so a missing app took the whole desktop down instead of degrading to
+      // the static catalog. The sibling `void core.pool.scan().then(…)` above
+      // already has a rejection handler; this one needs its own.
       void (async () => {
         // Seed each region from its OWN account and endpoint: the two gateways
         // advertise different rosters, so seeding both from accounts[0] gave the
@@ -778,7 +940,9 @@ function canonicalJson(value: unknown): string {
           }
         }
         invalidateCatalog()
-      })()
+      })().catch((error: unknown) => {
+        ctx.logger.warn('dsh-workbuddy-xdpool: account catalog seed failed', error)
+      })
     }, (error: unknown) => {
       ctx.logger.error('dsh-workbuddy-xdpool: shim failed to listen', error)
     })

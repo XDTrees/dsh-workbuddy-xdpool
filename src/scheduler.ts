@@ -498,7 +498,7 @@ export class WorkBuddyScheduler {
   private earningsDate = ''
   /** Host hooks that persist the ledger across restarts. */
   private readonly loadEarnings: (() => AutomationLedger | undefined) | undefined
-  private saveEarningsFn: ((ledger: AutomationLedger) => void) | undefined
+  private saveEarningsFn: ((ledger: AutomationLedger) => void | Promise<void>) | undefined
 
   constructor(pool: WorkBuddyAccountPool, client: WorkBuddyUpstreamClient, options: AutomationOptions = {}) {
     this.pool = pool
@@ -539,7 +539,7 @@ export class WorkBuddyScheduler {
    * long before the settings section exists; a ledger written before that point
    * would have nowhere to go.
    */
-  setEarningsPersistence(save: (ledger: AutomationLedger) => void): void {
+  setEarningsPersistence(save: (ledger: AutomationLedger) => void | Promise<void>): void {
     this.saveEarningsFn = save
   }
 
@@ -833,10 +833,24 @@ export class WorkBuddyScheduler {
    */
   private persistEarnings(): void {
     if (this.saveEarningsFn === undefined) return
+    const accounts: Record<string, AutomationAccountEarnings> = {}
+    for (const [id, entry] of this.earnings) accounts[id] = entry
+    const ledger = { date: this.earningsDate, accounts }
     try {
-      const accounts: Record<string, AutomationAccountEarnings> = {}
-      for (const [id, entry] of this.earnings) accounts[id] = entry
-      this.saveEarningsFn({ date: this.earningsDate, accounts })
+      // The hook may be async (the host-side settings write is). A `try` around a
+      // call that is not awaited catches only SYNCHRONOUS throws — an async
+      // rejection escapes as an unhandled rejection, and the host installs
+      // `installFailLoud`, which turns any unhandled rejection into exit(1). So a
+      // failed save would take the whole process down instead of being logged.
+      // Attaching the handler here (rather than awaiting) keeps this call site
+      // synchronous, which is what the callers — `rollEarnings`,
+      // `recordEarnings`, `status` — all assume.
+      const saved = this.saveEarningsFn(ledger)
+      if (saved !== undefined && typeof saved.then === 'function') {
+        void saved.then(undefined, (error: unknown) => {
+          this.logger.warn?.('dsh-workbuddy-xdpool: could not persist automation earnings:', error)
+        })
+      }
     } catch (error: unknown) {
       this.logger.warn?.('dsh-workbuddy-xdpool: could not persist automation earnings:', error)
     }

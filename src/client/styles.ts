@@ -6,29 +6,39 @@
  * naturally next to the other configuration rows instead of looking like a
  * bright Google-Material block on top of DSH's dark surface.
  *
- * The collapsible shell mirrors dingminhua/dsh-connect-trae (which itself
- * borrows from the LaoDing plugin family) so the row header behaves exactly
- * like the built-in cards next to it; the inner workbuddy-specific classes
- * are renamed to `dsm-workbuddy-xdpool-*` to stay namespaced.
+ * The page renders at full height with no collapse affordance, and its content is
+ * split into cards: a header row with the primary actions, a status card (region
+ * switch + distribution), then one card per feature area. The inner
+ * workbuddy-specific classes are namespaced `dsm-workbuddy-xdpool-*`.
  *
  * @module dsh-workbuddy-xdpool/client/styles
  */
 
 export const POOL_CARD_CSS = `
-/* Shell: same collapse affordance as every other plugin config row. */
-.dsm-plugin-card{border:1px solid var(--dsw-alias-border-l2,#36373b);background:var(--dsw-alias-bg-module-platform,#202126);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}
-.dsm-plugin-card:hover{border-color:var(--dsw-alias-label-dimmed,#777)}
-.dsm-plugin-card-open{background:var(--dsw-alias-bg-layer-2,#25262b);border-color:var(--dsw-alias-label-dimmed,#777)}
-.dsm-plugin-card-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:transparent;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}
-.dsm-plugin-card-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:-2px}
-.dsm-plugin-card-head{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}
-.dsm-plugin-card-title{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:15px;font-weight:600;line-height:1.4}
-.dsm-plugin-card-description{color:var(--dsw-alias-label-tertiary,#999);font-size:13px;line-height:1.5}
-.dsm-plugin-card-chevron{color:var(--dsw-alias-label-tertiary,#999);flex:none;display:inline-flex;transition:transform .16s}
-.dsm-plugin-card-chevron-open{transform:rotate(180deg)}
-.dsm-plugin-card-body{border-top:1px solid var(--dsw-alias-border-l2,#36373b);margin:0 16px;padding:0 0 8px}
-.dsm-plugin-card-icon{width:32px;height:32px;flex:none;border-radius:7px}
-
+/*
+ * Page shell. The settings shell renders this inside its own scrollable content
+ * column, so the page supplies only the rhythm and the cards — no outer border
+ * and no extra margin (the column pads its own edges).
+ */
+.dsm-workbuddy-xdpool-page{max-width:860px;flex-direction:column;gap:16px;display:flex}
+/*
+ * Header row: identity on the left, primary actions on the right. Wraps so a
+ * narrow panel drops the buttons below the title instead of squeezing it.
+ */
+.dsm-workbuddy-xdpool-page-head{align-items:center;gap:12px;flex-wrap:wrap;display:flex}
+.dsm-workbuddy-xdpool-page-icon{width:32px;height:32px;flex:none;border-radius:7px}
+.dsm-workbuddy-xdpool-page-copy{flex-direction:column;gap:4px;min-width:0;flex:1 1 220px;display:flex}
+.dsm-workbuddy-xdpool-page-title{color:var(--dsw-alias-label-primary,#e6e6e6);margin:0;font-size:16px;font-weight:600;line-height:1.4}
+.dsm-workbuddy-xdpool-page-desc{color:var(--dsw-alias-label-tertiary,#999);margin:0;font-size:13px;line-height:1.5}
+.dsm-workbuddy-xdpool-page-actions{align-items:center;gap:8px;flex-wrap:wrap;flex:none;display:flex}
+/*
+ * One feature area per card. The surface separates the sections the way the
+ * built-in settings pages do; without it every panel ran together into a single
+ * column of text with no visible boundary.
+ */
+.dsm-workbuddy-xdpool-card{border:1px solid var(--dsw-alias-border-l2,#36373b);background:var(--dsw-alias-bg-layer-2,#232529);border-radius:14px;flex-direction:column;gap:12px;padding:14px 16px;display:flex}
+/* Status card: the region switch sits above the state line, then the switch. */
+.dsm-workbuddy-xdpool-status{gap:14px}
 /* Reusable button primitives shared with the rest of the card body. */
 .dsm-btn{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}
 .dsm-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
@@ -38,12 +48,10 @@ export const POOL_CARD_CSS = `
 .dsm-btn-primary{background:var(--dsw-alias-label-primary,#e6e6e6);color:var(--dsw-alias-bg-layer-3,#202126)}
 .dsm-btn-primary:hover:not(:disabled){opacity:.9}
 
-/* Body layout: status row + accounts list + models list. */
-.dsm-workbuddy-xdpool-usage{display:flex;flex-direction:column;gap:14px;margin:0;padding:14px 0 4px}
 /* Region tabs: two independent suppliers, one shown at a time. */
 .dsm-workbuddy-xdpool-tabs{display:flex;gap:6px;padding:4px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:10px;background:var(--dsw-alias-bg-layer-3,#2a2c33)}
 /* Empty-region guide: steps for signing in on the other gateway. */
-.dsm-workbuddy-xdpool-empty{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;background:var(--dsw-alias-bg-layer-2,#24262c)}
+.dsm-workbuddy-xdpool-empty{gap:10px}
 .dsm-workbuddy-xdpool-empty-title{margin:0;color:var(--dsw-alias-label-primary,#e6e6e6);font-size:14px;font-weight:600;line-height:20px}
 .dsm-workbuddy-xdpool-empty-steps{display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:10px;background:var(--dsw-alias-bg-layer-3,#2a2c33)}
 .dsm-workbuddy-xdpool-empty-steps-title{margin:0;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;font-weight:600;line-height:18px}
@@ -57,14 +65,14 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:baseline;background:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-xdpool-tab-dot[data-state="error"]{background:var(--dsw-alias-state-error-primary,#ef4444)}
 .dsm-workbuddy-xdpool-tab-dot[data-state="idle"]{background:var(--dsw-alias-label-dimmed,#9aa0a6)}
-.dsm-workbuddy-xdpool-usage-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.dsm-workbuddy-xdpool-usage-head{display:flex;flex-direction:column;gap:12px;min-width:0}
 .dsm-workbuddy-xdpool-usage-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
-.dsm-workbuddy-xdpool-usage-status{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:500;color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-workbuddy-xdpool-usage-status{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-usage-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
-.dsm-workbuddy-xdpool-usage-hint{padding-left:19px;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
+.dsm-workbuddy-xdpool-usage-hint{margin:0;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
 /* Distribution switch: priority (drain one) vs round-robin (spread). */
-.dsm-workbuddy-xdpool-dist{display:flex;flex-direction:column;gap:6px;padding-left:19px;margin-top:8px}
-.dsm-workbuddy-xdpool-dist-title{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
+.dsm-workbuddy-xdpool-dist{display:flex;flex-direction:column;gap:7px}
+.dsm-workbuddy-xdpool-dist-title{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px;letter-spacing:.03em;text-transform:uppercase;font-weight:600}
 .dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;text-align:left;display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:44px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:8px;padding:6px 10px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s}
 .dsm-workbuddy-xdpool-dist-option:hover:not(:disabled):not(.dsm-workbuddy-xdpool-dist-option-active){color:var(--dsw-alias-label-primary,#e6e6e6);border-color:var(--dsw-alias-label-dimmed,#777)}
 .dsm-workbuddy-xdpool-dist-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
@@ -76,7 +84,7 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-usage-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* Account list (each account = a labeled subpanel, same as dingminhua). */
-.dsm-workbuddy-xdpool-accounts{display:flex;flex-direction:column;gap:14px;border-top:1px solid var(--dsw-alias-border-l2,#36373b);padding-top:14px}
+.dsm-workbuddy-xdpool-accounts{gap:14px}
 .dsm-workbuddy-xdpool-accounts-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 /* "In use now": answers which account is serving without scanning every row. */
 /* A hairline + tint reads as status; a filled bar would read as a call to action. */
@@ -139,7 +147,7 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-total-value{color:var(--dsw-alias-state-success-primary,#22a06b);font-size:28px;line-height:32px;font-weight:800;letter-spacing:-.02em;white-space:nowrap;font-variant-numeric:tabular-nums}
 
 /* Model directory list. */
-.dsm-workbuddy-xdpool-models{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--dsw-alias-border-l2,#36373b);padding-top:14px}
+.dsm-workbuddy-xdpool-models{gap:10px}
 .dsm-workbuddy-xdpool-models-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .dsm-workbuddy-xdpool-models-title{margin:0;color:var(--dsw-alias-label-primary,#e6e6e6);font-size:14px;font-weight:600;line-height:20px}
 .dsm-workbuddy-xdpool-models-summary{margin:2px 0 0;color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:18px}
@@ -167,6 +175,12 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-models-heading{display:flex;flex-direction:column;gap:2px;min-width:0}
 .dsm-workbuddy-xdpool-models-actions{display:flex;align-items:center;gap:8px;flex:none}
 
+
+/* Automation: run-now button and the per-job progress line. */
+.dsm-workbuddy-xdpool-auto-run{flex:none}
+.dsm-workbuddy-xdpool-auto-job-detail{grid-column:1/-1;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px}
+/* Credit packages panel heading inside the right-hand column. */
+.dsm-workbuddy-xdpool-panel-packages{display:flex;flex-direction:column;gap:7px;min-width:0}
 
 /* Check-in docked under the total, inside the right-hand panel. */
 .dsm-workbuddy-xdpool-checkin{display:flex;flex-direction:column;align-items:center;gap:7px;width:100%;margin-top:10px;padding-top:11px;border-top:1px solid var(--dsw-alias-border-l2,#36373b)}

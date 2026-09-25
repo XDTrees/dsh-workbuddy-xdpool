@@ -80,8 +80,20 @@ const SYMMETRIC_SCHEME = 'sym-v1'
 /** Env override pointing at the WorkBuddy desktop executable. */
 export const WORKBUDDY_APP_EXECUTABLE_ENV = 'WORKBUDDY_APP_EXECUTABLE'
 
-/** How long the app is given to answer with its key payload. */
-const KEY_FETCH_TIMEOUT_MS = 10_000
+/**
+ * How long the app is given to answer with its key payload.
+ *
+ * 30s, not 10s: the child is the WorkBuddy Electron binary running as plain
+ * Node, and its FIRST spawn on a cold machine costs several seconds on its own
+ * (measured 4.5s here) before the endpoint security stack has warmed its scan
+ * cache. Under load — a concurrent `pnpm install` from the market, a running
+ * full-disk scan — that first spawn crosses a 10s budget, the fetch rejects,
+ * `readAtRestKey` returns undefined, and every encrypted credential then reads
+ * as `WorkBuddyEncryptedCredentialError` until the 60s negative cache expires.
+ * A successful fetch is cached for the process lifetime, so the longer budget
+ * is only ever paid once per process, and only when the app is present but slow.
+ */
+const KEY_FETCH_TIMEOUT_MS = 30_000
 
 /**
  * Executable file names the desktop app ships under, in probe order.
@@ -356,6 +368,9 @@ function windowsFallbackAppPaths(env: NodeJS.ProcessEnv): string[] {
     if (value !== undefined && value !== '') roots.add(value)
   }
   // Every fixed drive's Program Files, since nothing else points at D:/E:.
+  // The drive ROOT is added too: `D:\workbuddy\` and `D:\workbuddyai\` are
+  // real observed installs, and the one-level scan below only reaches them
+  // through the root itself — `D:\Program Files` is not where they live.
   for (let code = 67 /* C */; code <= 90 /* Z */; code += 1) {
     const drive = String.fromCharCode(code) + ':\\'
     try {
@@ -365,6 +380,7 @@ function windowsFallbackAppPaths(env: NodeJS.ProcessEnv): string[] {
     }
     roots.add(join(drive, 'Program Files'))
     roots.add(join(drive, 'Program Files (x86)'))
+    roots.add(drive)
   }
   for (const root of roots) {
     for (const name of APP_EXECUTABLE_NAMES) {
