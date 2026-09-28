@@ -152,8 +152,13 @@ const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
  * Desktop app UA. The global gateway serves its product config only to this
  * client channel: the CLI UA gets a truncated roster (or an HTTP 500), which
  * is why the international catalog must be read with the desktop spelling.
+ *
+ * Spelled like the real international build (5.6.2) rather than the stale
+ * 5.5.2 the code used to carry: the gateway answers a different (smaller) roster
+ * for unrecognised/old versions, so a too-old UA silently dropped models from
+ * the international picker even when the live fetch succeeded.
  */
-const DESKTOP_UA = 'WorkBuddy/5.5.2'
+const DESKTOP_UA = 'WorkBuddy/5.6.2'
 
 /** CN model catalog. */
 const MODELS_CATALOG_PATH = '/v2/enterprises/personal/models'

@@ -53,9 +53,56 @@ export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
   { id: 'hy4-preview', name: 'Hy4-Preview', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.29 },
 ]
 
+/**
+ * International (global) fallback, used before the first live `/v3/config`
+ * fetch and whenever the overseas gateway is unreachable.
+ *
+ * The two gateways advertise DIFFERENT rosters and different model ids, so the
+ * CN list above is the wrong fallback for the international tab — it drops
+ * GPT/Grok/Gemini and invents models the global gateway has never served
+ * (`deepseek-v4-pro`/`deepseek-v4-flash`/`minimax-m3`), which is exactly the
+ * "国际版模型完全不对" symptom. This list mirrors the real `/v3/config` roster
+ * that `fetchModels` parses (same ids, names and multipliers), so a region that
+ * has not yet fetched a live catalog still shows the right models. Media models
+ * (`gpt-image-*`, `seedance-*`) are intentionally excluded: they carry no token
+ * limits upstream and would otherwise render as text-only chat models.
+ */
+export const FALLBACK_WORKBUDDY_MODELS_GLOBAL: readonly WorkBuddyModelInfo[] = [
+  { id: 'default-model', name: 'Auto', contextWindow: 176_000, maxOutputTokens: 24_000, supportsImages: true },
+  { id: 'fast-model', name: 'Fast', contextWindow: 200_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 0.34 },
+  { id: 'balanced-model', name: 'Balanced', contextWindow: 256_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 0.59 },
+  { id: 'primary-model', name: 'Primary', contextWindow: 272_000, maxOutputTokens: 72_000, supportsImages: true, multiplier: 3.31 },
+  { id: 'deep-model', name: 'Ultimate', contextWindow: 176_000, maxOutputTokens: 24_000, supportsImages: true, multiplier: 3.33 },
+  { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.29 },
+  { id: 'hy4-preview-f', name: 'Hy4 preview', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0 },
+  { id: 'hy3', name: 'Hy3', contextWindow: 192_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0 },
+  { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0 },
+  { id: 'gpt-6-astra', name: 'GPT-6-Astra', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 6.67 },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 3.47 },
+  { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 1.39 },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.14 },
+  { id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 3.31 },
+  { id: 'gpt-5.4', name: 'GPT-5.4', contextWindow: 272_000, maxOutputTokens: 72_000, supportsImages: true, multiplier: 1.65 },
+  { id: 'grok-4.7', name: 'Grok-4.7', contextWindow: 500_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 1.9 },
+  { id: 'gemini-3.5-flash', name: 'Gemini-3.5-Flash', contextWindow: 1_000_000, maxOutputTokens: 65_536, supportsImages: true, multiplier: 0.99 },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 0.06 },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, maxOutputTokens: 48_000, supportsImages: true, multiplier: 0.79 },
+  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 1_000_000, maxOutputTokens: 48_000, supportsImages: true, multiplier: 0.79 },
+  { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 1_000_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 1.62 },
+  { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 256_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 0.52 },
+  { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', contextWindow: 1_000_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 0.77 },
+]
+
 /** Live catalog with a static fallback behind it. */
 export class WorkBuddyCatalog {
-  private models: readonly WorkBuddyModelInfo[] = FALLBACK_WORKBUDDY_MODELS
+  private models: readonly WorkBuddyModelInfo[]
+  /** The fallback this catalog reverts to; region-specific (CN vs global). */
+  private readonly fallback: readonly WorkBuddyModelInfo[]
+
+  constructor(fallback: readonly WorkBuddyModelInfo[] = FALLBACK_WORKBUDDY_MODELS) {
+    this.models = fallback
+    this.fallback = fallback
+  }
   private listeners = new Set<() => void>()
   /** User's model selection. Empty object = follow the catalog unfiltered. */
   private selection: ModelSelection = {}
@@ -98,7 +145,7 @@ export class WorkBuddyCatalog {
 
   /** Restore the static fallback, e.g. when the upstream stops answering. */
   reset(): void {
-    this.models = FALLBACK_WORKBUDDY_MODELS
+    this.models = this.fallback
     this.notify()
   }
 
@@ -124,7 +171,7 @@ export class WorkBuddyCatalog {
 
   /** Replace the catalog from the live upstream list; keeps the fallback if empty. */
   updateFromUpstream(models: readonly WorkBuddyUpstreamModel[]): void {
-    this.update(catalogFromUpstream(models))
+    this.update(catalogFromUpstream(models, this.fallback))
   }
 
   private notify(): void {
@@ -159,7 +206,10 @@ export function toModelInfo(model: WorkBuddyUpstreamModel): WorkBuddyModelInfo {
 }
 
 /** Map the live upstream list, falling back to the static list when empty. */
-export function catalogFromUpstream(models: readonly WorkBuddyUpstreamModel[]): readonly WorkBuddyModelInfo[] {
-  if (models.length === 0) return FALLBACK_WORKBUDDY_MODELS
+export function catalogFromUpstream(
+  models: readonly WorkBuddyUpstreamModel[],
+  fallback: readonly WorkBuddyModelInfo[] = FALLBACK_WORKBUDDY_MODELS,
+): readonly WorkBuddyModelInfo[] {
+  if (models.length === 0) return fallback
   return models.map(toModelInfo)
 }

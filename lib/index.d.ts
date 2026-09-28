@@ -1094,9 +1094,27 @@ interface WorkBuddyModelInfo {
  * which is what turns on the free badge.
  */
 export declare const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[];
+/**
+ * International (global) fallback, used before the first live `/v3/config`
+ * fetch and whenever the overseas gateway is unreachable.
+ *
+ * The two gateways advertise DIFFERENT rosters and different model ids, so the
+ * CN list above is the wrong fallback for the international tab — it drops
+ * GPT/Grok/Gemini and invents models the global gateway has never served
+ * (`deepseek-v4-pro`/`deepseek-v4-flash`/`minimax-m3`), which is exactly the
+ * "国际版模型完全不对" symptom. This list mirrors the real `/v3/config` roster
+ * that `fetchModels` parses (same ids, names and multipliers), so a region that
+ * has not yet fetched a live catalog still shows the right models. Media models
+ * (`gpt-image-*`, `seedance-*`) are intentionally excluded: they carry no token
+ * limits upstream and would otherwise render as text-only chat models.
+ */
+export declare const FALLBACK_WORKBUDDY_MODELS_GLOBAL: readonly WorkBuddyModelInfo[];
 /** Live catalog with a static fallback behind it. */
 export declare class WorkBuddyCatalog {
   private models;
+  /** The fallback this catalog reverts to; region-specific (CN vs global). */
+  private readonly fallback;
+  constructor(fallback?: readonly WorkBuddyModelInfo[]);
   private listeners;
   /** User's model selection. Empty object = follow the catalog unfiltered. */
   private selection;

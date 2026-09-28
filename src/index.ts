@@ -11,7 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { WorkBuddyAccountPool } from './accounts.ts'
-import { WorkBuddyCatalog } from './catalog.ts'
+import { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, FALLBACK_WORKBUDDY_MODELS_GLOBAL } from './catalog.ts'
 import {
   POOL_NAME_BY_REGION,
   POOL_PROVIDER_BY_REGION,
@@ -50,7 +50,7 @@ export {
   type WorkBuddyAccount,
   type WorkBuddyCredential,
 } from './accounts.ts'
-export { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, type WorkBuddyModelInfo } from './catalog.ts'
+export { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, FALLBACK_WORKBUDDY_MODELS_GLOBAL, type WorkBuddyModelInfo } from './catalog.ts'
 export { WorkBuddyUpstreamClient, buddyAppEvents, classifyUpstreamError, desktopAutomationCreatedEvent, desktopCanvasEvents, desktopChatEvents, parseRateLimitReset, type UpstreamErrorKind } from './upstream.ts'
 export {
   APPEARANCE_THEME_KEY, BUDDY_APP_ID, BUDDY_APP_NAME, LIBRARY_DOC_URL, LIGHTHOUSE_EXPERT_ID,
@@ -419,8 +419,8 @@ export function createCore(logger?: { warn(...args: unknown[]): void; info?(...a
   const client = new WorkBuddyUpstreamClient()
   const pool = new WorkBuddyAccountPool({ ...logger === undefined ? {} : { logger }, client })
   const catalogs = {
-    cn: new WorkBuddyCatalog(),
-    global: new WorkBuddyCatalog(),
+    cn: new WorkBuddyCatalog(FALLBACK_WORKBUDDY_MODELS),
+    global: new WorkBuddyCatalog(FALLBACK_WORKBUDDY_MODELS_GLOBAL),
   } as const
   // The scheduler is assembled here but stays inert until `start()`: the CLI and
   // the tests both build a core without wanting background traffic.
