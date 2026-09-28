@@ -26,6 +26,7 @@ import type { WorkBuddyShim } from './shim.ts'
 import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
+  POOL_ACCOUNT_IGNORE_PATH,
   POOL_AUTOMATION_RUN_PATH,
   POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
@@ -35,6 +36,7 @@ import {
   POOL_STATUS_PATH,
   type PoolWebAccount,
   type PoolWebAccountToggle,
+  type PoolWebAccountIgnore,
   type PoolWebAutomationJob,
   type PoolWebCreditReserve,
   type PoolWebAutomationRun,
@@ -42,6 +44,7 @@ import {
   type PoolWebModel,
   type PoolWebModelSelection,
   type PoolWebStatus,
+  type PoolWebIgnoredAccount,
   type PoolRegion,
 } from './status-paths.ts'
 
@@ -96,6 +99,21 @@ export interface PoolStatusRouteOptions {
    * Absent without a settings service: the route then answers 503.
    */
   setAccountDisabled?: (accountId: string, disabled: boolean) => Promise<void> | void
+  /**
+   * Throw one account out of the pool for good, or take it back.
+   *
+   * Backed by the plugin's own ignore file rather than the settings document,
+   * because the CLI writes the same list and has no settings service. Absent
+   * when the host did not wire it: the route then answers 503.
+   */
+  setAccountIgnored?: (accountId: string, ignored: boolean) => Promise<void> | void
+  /**
+   * The accounts currently ignored, for the card's "ignored" list.
+   *
+   * A thunk rather than a snapshot so the document always reflects the file on
+   * disk, including edits made by the CLI while the card is open.
+   */
+  ignoredAccounts?: () => readonly PoolWebIgnoredAccount[]
 }
 
 /** Redact token-like content before it crosses to the browser. */
@@ -221,6 +239,29 @@ function parseAccountToggle(
   if (accountId === '' || typeof disabled !== 'boolean') return undefined
   if (!known(accountId)) return undefined
   return { accountId, disabled }
+}
+
+/**
+ * Validate an ignore/unignore request.
+ *
+ * Two different notions of "known" apply, which is why the caller passes both:
+ *
+ * - ignoring requires the account to be IN THE POOL, because the card can only
+ *   name an account it was just shown;
+ * - un-ignoring requires the account to be ON THE IGNORE LIST instead — by
+ *   definition it is not in the pool any more, so checking the pool would make
+ *   the undo button impossible to use.
+ */
+function parseAccountIgnore(
+  body: Record<string, unknown>,
+  knownInPool: (id: string) => boolean,
+  knownIgnored: (id: string) => boolean,
+): PoolWebAccountIgnore | undefined {
+  const accountId = typeof body['accountId'] === 'string' ? body['accountId'].trim() : ''
+  const ignored = body['ignored']
+  if (accountId === '' || typeof ignored !== 'boolean') return undefined
+  if (ignored ? !knownInPool(accountId) : !knownIgnored(accountId)) return undefined
+  return { accountId, ignored }
 }
 
 /**
@@ -455,6 +496,11 @@ export async function poolWebStatus(
     shim,
     automation,
     creditReserves: deps.pool.creditReservesInOrder(),
+    // The accounts thrown out of the pool. Reported on every region's document
+    // (not just the one they came from) because the list is a property of the
+    // machine, and the user has to be able to find an ignored account no matter
+    // which tab they happen to be looking at.
+    ignored: deps.ignoredAccounts?.() ?? [],
   }
 }
 
@@ -594,6 +640,46 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
     })
 
     /**
+     * Throw one account out of the pool for good, or take it back.
+     *
+     * Same three guards as the disable route — POST only, loopback origin only,
+     * and an explicit `accountId` — plus the semantic split in
+     * {@link parseAccountIgnore}: ignoring checks the pool, un-ignoring checks
+     * the ignore list.
+     *
+     * The credential FILE is deliberately left alone. Deleting it would sign the
+     * desktop app out (the live file IS the app's current session) and would not
+     * even stick, since the app rewrites it on the next sign-in. Ignoring is
+     * enforced on the read side instead, which is both reversible and durable.
+     */
+    const disposeAccountIgnore = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_ACCOUNT_IGNORE_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.setAccountIgnored === undefined) {
+          return json(res, 503, { error: 'settings service unavailable; the ignore list cannot be saved' })
+        }
+        try {
+          const body = await readJsonBody(req)
+          const knownInPool = new Set(deps.pool.list().map(account => account.id))
+          const knownIgnored = new Set((deps.ignoredAccounts?.() ?? []).map(entry => entry.id))
+          const parsed = parseAccountIgnore(
+            body,
+            id => knownInPool.has(id),
+            id => knownIgnored.has(id),
+          )
+          if (parsed === undefined) return json(res, 400, { error: 'invalid account ignore payload' })
+          await deps.setAccountIgnored(parsed.accountId, parsed.ignored)
+          json(res, 200, { ok: true, ...parsed })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+
+    /**
      * Run one automation job on demand.
      *
      * POST only, loopback origin only, and the job name must be one of the four
@@ -657,6 +743,7 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
     return () => {
       disposeAutomationRun()
       disposeCreditReserve()
+      disposeAccountIgnore()
       disposeCheckin()
       disposeAccountDisable()
       disposeModelsSave()

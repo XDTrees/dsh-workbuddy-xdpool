@@ -25,6 +25,14 @@ export const POOL_MODELS_SAVE_PATH = '/plugins/dsh-workbuddy-xdpool/models/save'
 /** Switch one account in or out of the pool (card toggle). */
 export const POOL_ACCOUNT_DISABLE_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/disabled'
 
+/**
+ * Throw one account out of the pool for good, or take it back.
+ *
+ * Separate from the disable route because the semantics differ: disabling is a
+ * rotation preference the account survives, ignoring survives the account.
+ */
+export const POOL_ACCOUNT_IGNORE_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/ignored'
+
 /** Run one automation job immediately, so the card can verify it on demand. */
 export const POOL_AUTOMATION_RUN_PATH = '/plugins/dsh-workbuddy-xdpool/automation/run'
 
@@ -68,7 +76,7 @@ export interface PoolWebAutomationRunResult {
   message?: string
 }
 
-/** One pool account's row, token-free. */
+/** One account's row, token-free. */
 export interface PoolWebAccount {
   id: string
   label: string
@@ -210,6 +218,36 @@ export interface PoolWebAccountToggle {
   disabled: boolean
 }
 
+/**
+ * Body of the account ignore/unignore route: exactly one account per request.
+ *
+ * `ignored: true` throws the account out of the pool for good (its credential is
+ * not even read on the next scan, and a fresh desktop sign-in will not bring it
+ * back). `false` restores it, at which point the next scan discovers it again.
+ */
+export interface PoolWebAccountIgnore {
+  /** Pool account id, as reported in `PoolWebAccount.id`. */
+  accountId: string
+  /** `true` ignores the account permanently; `false` takes it back. */
+  ignored: boolean
+}
+
+/**
+ * One account the user has thrown out of the pool.
+ *
+ * Kept on the status document so the card can list what was ignored and offer a
+ * way back: without that, "ignored" is a one-way door the user cannot inspect or
+ * undo from the UI, which is how a hidden list becomes a support burden.
+ */
+export interface PoolWebIgnoredAccount {
+  /** Pool account id, the same key `PoolWebAccount.id` uses. */
+  id: string
+  /** Human label captured at ignore time, so the row reads without a rescan. */
+  label: string
+  /** ISO timestamp of when it was ignored. */
+  ignoredAt: string
+}
+
 export interface PoolWebModelSelection {
   /** Absent = every model is enabled. */
   enabledModelIds?: readonly string[]
@@ -243,6 +281,14 @@ export interface PoolWebStatus {
   automation: PoolWebAutomation
   /** Per-account credit floors currently in force, keyed by account id. */
   creditReserves: Readonly<Record<string, number>>
+  /**
+   * Accounts thrown out of the pool, in the order they were ignored.
+   *
+   * Reported so the card can show the list and offer a way back. These accounts
+   * are NOT in `accounts`: they are filtered out before their credentials are
+   * read, which is the whole point of the feature.
+   */
+  ignored: readonly PoolWebIgnoredAccount[]
 }
 
 /** One automation job's last run, as shown on the card. */
@@ -340,4 +386,32 @@ export type PoolRegion = 'cn' | 'global'
 
 /** How the pool spreads requests across its accounts. */
 export type PoolDistribution = 'priority' | 'round-robin' | 'balanced'
+
+/**
+ * The schedule every automation job falls back to.
+ *
+ * Shared by both halves on purpose. The host uses it when a configured hour
+ * list arrives empty (the settings schema materializes "never configured" into
+ * `[]`), and the card uses it when it writes the `automation` block back, so a
+ * document that already holds an empty list is healed instead of being saved
+ * back as an unrunnable schedule.
+ *
+ * This lives here rather than in `scheduler.ts` because the browser half cannot
+ * import the host module: `scheduler.ts` pulls in `node:crypto` and the whole
+ * upstream client, none of which exists in the browser bundle. Two hand-written
+ * copies would drift, and the drift is invisible — the card would write a
+ * schedule the scheduler does not run.
+ */
+export const DEFAULT_AUTOMATION_HOURS = {
+  checkin: [9],
+  report: [10],
+  tasks: [11],
+  streak: [12],
+  // Two passes: a trip loop needs a departure AND a collection, so a cat sent
+  // out at a single pass of the day would sit there until tomorrow.
+  travel: [9, 21],
+} as const satisfies Record<string, readonly number[]>
+
+/** One automation job kind, matching the scheduler's `AUTOMATION_JOB_KINDS`. */
+export type PoolWebAutomationKind = keyof typeof DEFAULT_AUTOMATION_HOURS
 

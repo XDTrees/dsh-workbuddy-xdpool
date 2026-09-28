@@ -378,6 +378,45 @@ async function readCredential(path: string): Promise<WorkBuddyCredential | undef
 }
 
 /**
+ * The pool id a document would receive, WITHOUT decrypting anything.
+ *
+ * Used to honour the ignore list before the at-rest key lookup runs: `uin` and
+ * `uid` are read as plain strings by {@link parseWorkBuddyAuth}, while
+ * `nickname` is commonly encrypted — so this returns undefined for an account
+ * whose identity lives only in the encrypted nickname, and the caller falls
+ * back to the full parse for those.
+ */
+export function cheapIdentityId(text: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const document = parsed as Record<string, unknown>
+  const identity =
+    typeof document['account'] === 'object' && document['account'] !== null
+      ? (document['account'] as Record<string, unknown>)
+      : document
+  const uin = typeof identity['uin'] === 'string' && identity['uin'] !== '' ? identity['uin'] : undefined
+  const uid = typeof identity['uid'] === 'string' && identity['uid'] !== '' ? identity['uid'] : undefined
+  if (uin === undefined && uid === undefined) return undefined
+  // `workbuddyAccountId` reads `uin` first, exactly as the full parse does, so
+  // this cheap id agrees with the id the account would really be filed under.
+  return workbuddyAccountId({ ...uin === undefined ? {} : { uin }, ...uid === undefined ? {} : { uid } })
+}
+
+/** {@link cheapIdentityId} for a file path; undefined when it cannot be read. */
+async function cheapIdentityIdFromFile(path: string): Promise<string | undefined> {
+  try {
+    return cheapIdentityId(await readFile(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Build the field opener, or undefined when the app cannot supply its key.
  *
  * Split out so the key lookup is testable without a real desktop install, and so
@@ -508,6 +547,21 @@ export class WorkBuddyAccountPool {
    */
   private disabledIds = new Set<string>()
   /**
+   * Account ids the user threw out of the pool for good.
+   *
+   * Enforced BEFORE the credential is parsed: `scan()` skips a file whose
+   * identity is already ignored, so an ignored account costs no at-rest key
+   * lookup (which spawns the desktop app on 5.6.0+) and cannot re-enter the pool
+   * when the app writes a fresh sign-in for it. That is the difference from
+   * {@link disabledIds}, which only filters at pick time and leaves the account
+   * listed, readable and re-discoverable.
+   *
+   * The set is supplied by the host from the plugin's own ignore file, and is
+   * replaced wholesale on every {@link applyIgnored} so removing an entry takes
+   * effect on the next scan without a restart.
+   */
+  private ignoredIds = new Set<string>()
+  /**
    * Per-account credit floor, keyed by account id. 0 (or absent) means "spend
    * it all".
    *
@@ -583,13 +637,51 @@ export class WorkBuddyAccountPool {
     if (options.creditReserves !== undefined) this.setCreditReserves(options.creditReserves)
   }
 
+  /**
+   * Replace the permanent ignore list.
+   *
+   * Also drops any already-discovered account that is now ignored, so the change
+   * is visible without waiting for the next scan: the card refreshes its status
+   * document right after the write, and an account still sitting in `accounts`
+   * would keep showing up there.
+   */
+  applyIgnored(ids: Iterable<string>): void {
+    this.ignoredIds = new Set(ids)
+    if (this.ignoredIds.size === 0) return
+    this.accounts = this.accounts.filter(account => !this.ignoredIds.has(account.id))
+  }
+
+  /** Whether this account has been thrown out of the pool for good. */
+  isIgnored(accountId: string): boolean {
+    return this.ignoredIds.has(accountId)
+  }
+
+  /** Every ignored id currently in force, in insertion order. */
+  ignoredIdsInOrder(): string[] {
+    return [...this.ignoredIds]
+  }
+
   /** Rescan the auth directories and merge newly discovered accounts. */
   async scan(): Promise<WorkBuddyAccount[]> {
     const found: WorkBuddyCredential[] = []
     for (const dir of this.authDirs) {
       for (const file of await authFilesIn(dir)) {
+        // Honour the ignore list BEFORE reading the document's key material.
+        // `cheapIdentityId` reads only the plain `uin`/`uid` fields, so an
+        // ignored account is skipped without spawning the desktop app for its
+        // at-rest key. A document whose identity lives in an encrypted nickname
+        // returns undefined here and is checked again after the full parse
+        // below — slower, but never wrongly admitted.
+        if (this.ignoredIds.size > 0) {
+          const cheapId = await cheapIdentityIdFromFile(file)
+          if (cheapId !== undefined && this.ignoredIds.has(cheapId)) continue
+        }
         const credential = await readCredential(file)
-        if (credential !== undefined) found.push(credential)
+        if (credential === undefined) continue
+        // Second gate: the cheap probe could not identify this file, so the
+        // ignored check happens now that the credential is fully parsed.
+        if (this.ignoredIds.size > 0 && this.ignoredIds.has(workbuddyAccountId(credential))) continue
+        found.push(credential)
       }
     }
 

@@ -32,6 +32,7 @@ import {
   libraryReadChain, playbookChain, skillChain, templateChains,
 } from './task-events.ts'
 import type { MarketExpert, TaskEventChain } from './task-events.ts'
+import { DEFAULT_AUTOMATION_HOURS } from './status-paths.ts'
 
 /** Per-account gap between upstream calls, so a pool of accounts is not a burst. */
 export const AUTOMATION_ACCOUNT_DELAY_MS = 800
@@ -307,6 +308,24 @@ type JobKind = AutomationJobKind
 
 const JOB_KINDS: readonly JobKind[] = AUTOMATION_JOB_KINDS
 
+/**
+ * Pick the hour list to run on: the configured one, or the default.
+ *
+ * An EMPTY list is treated as "not configured" rather than as "never run".
+ * That distinction is the whole point: the settings schema materializes an
+ * absent list into `[]` (a bare `z.array` with no `.default()`), so a config
+ * that never mentioned the schedule arrives here looking exactly like one
+ * deliberately set to nothing — and honouring the empty reading silently
+ * disabled every job while the card still showed the switch as ON.
+ *
+ * A user who genuinely wants a job skipped can leave it out of the schedule
+ * they save; they cannot express "off" with an empty array through the card
+ * either way, because the card always writes a non-empty list.
+ */
+function hoursOrDefault(configured: readonly number[] | undefined, fallback: readonly number[]): readonly number[] {
+  return configured !== undefined && configured.length > 0 ? configured : fallback
+}
+
 const EMPTY_JOB_STATE: AutomationJobState = { ok: 0, failed: 0, credit: 0, energy: 0, claimed: 0 }
 
 /** `YYYY-MM-DD` in local time, the day key every job resets on. */
@@ -520,15 +539,15 @@ export class WorkBuddyScheduler {
       this.earningsDate = today
     }
     this.enabled = options.enabled ?? false
-    this.checkinHours = options.checkinHours ?? [9]
-    this.reportHours = options.reportHours ?? [10]
-    this.taskHours = options.taskHours ?? [11]
-    this.streakHours = options.streakHours ?? [12]
+    this.checkinHours = hoursOrDefault(options.checkinHours, DEFAULT_AUTOMATION_HOURS.checkin)
+    this.reportHours = hoursOrDefault(options.reportHours, DEFAULT_AUTOMATION_HOURS.report)
+    this.taskHours = hoursOrDefault(options.taskHours, DEFAULT_AUTOMATION_HOURS.tasks)
+    this.streakHours = hoursOrDefault(options.streakHours, DEFAULT_AUTOMATION_HOURS.streak)
     // Two passes, not one: a trip loop needs a departure AND a collection, and
     // a cat sent out at the single pass of the day would sit there until
     // tomorrow. Morning out, evening back — the reference panel settled on the
     // same pair for the same reason.
-    this.travelHours = options.travelHours ?? [9, 21]
+    this.travelHours = hoursOrDefault(options.travelHours, DEFAULT_AUTOMATION_HOURS.travel)
   }
 
   /** Apply a new configuration; safe to call while running. */
@@ -559,11 +578,26 @@ export class WorkBuddyScheduler {
 
   applyConfig(options: AutomationOptions): void {
     if (options.enabled !== undefined) this.enabled = options.enabled
-    if (options.checkinHours !== undefined) this.checkinHours = options.checkinHours
-    if (options.reportHours !== undefined) this.reportHours = options.reportHours
-    if (options.taskHours !== undefined) this.taskHours = options.taskHours
-    if (options.streakHours !== undefined) this.streakHours = options.streakHours
-    if (options.travelHours !== undefined) this.travelHours = options.travelHours
+    // Each hour list falls back to its default when it arrives EMPTY, for the
+    // same reason the constructor does: an absent list is materialized as `[]`
+    // by the settings schema, so a plain `!== undefined` test adopted the empty
+    // array and the constructor defaults could never apply. That is how a
+    // switched-ON automation ended up with no runnable hour at all.
+    if (options.checkinHours !== undefined) {
+      this.checkinHours = hoursOrDefault(options.checkinHours, DEFAULT_AUTOMATION_HOURS.checkin)
+    }
+    if (options.reportHours !== undefined) {
+      this.reportHours = hoursOrDefault(options.reportHours, DEFAULT_AUTOMATION_HOURS.report)
+    }
+    if (options.taskHours !== undefined) {
+      this.taskHours = hoursOrDefault(options.taskHours, DEFAULT_AUTOMATION_HOURS.tasks)
+    }
+    if (options.streakHours !== undefined) {
+      this.streakHours = hoursOrDefault(options.streakHours, DEFAULT_AUTOMATION_HOURS.streak)
+    }
+    if (options.travelHours !== undefined) {
+      this.travelHours = hoursOrDefault(options.travelHours, DEFAULT_AUTOMATION_HOURS.travel)
+    }
   }
 
   /** Hours for one job, used by the loop and the status document. */

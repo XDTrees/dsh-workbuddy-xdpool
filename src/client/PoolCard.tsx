@@ -20,6 +20,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
+  POOL_ACCOUNT_IGNORE_PATH,
   POOL_AUTOMATION_RUN_PATH,
   POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
@@ -34,6 +35,7 @@ import {
   type PoolWebCreditPackage,
   type PoolDistribution,
 } from '../status-paths.ts'
+import { DEFAULT_AUTOMATION_HOURS } from '../status-paths.ts'
 import { POOL_PLUGIN_ICON } from './icon.ts'
 import { POOL_CARD_CSS } from './styles.ts'
 import type { WorkBuddyPoolSettingsKey } from './locales.ts'
@@ -139,6 +141,18 @@ export const AUTOMATION_JOBS = ['checkin', 'report', 'tasks', 'streak', 'travel'
 
 export type AutomationJobKind = typeof AUTOMATION_JOBS[number]
 
+/**
+ * The hour list to save for one job: what the card holds, or the default.
+ *
+ * Mirrors the host's own fallback (`hoursOrDefault` in `scheduler.ts`). An
+ * empty list must resolve to the default on BOTH sides, or the card would save
+ * a schedule the scheduler then refuses to run — the exact silent standstill
+ * this pair of fixes exists to remove.
+ */
+function hoursOrDefault(configured: readonly number[] | undefined, fallback: readonly number[]): number[] {
+  return configured !== undefined && configured.length > 0 ? [...configured] : [...fallback]
+}
+
 /** Read one job's configured hours off the status document. */
 function automationHours(status: PoolWebStatus, kind: AutomationJobKind): readonly number[] {
   const automation = status.automation
@@ -243,9 +257,21 @@ function isExpiringSoon(pack: PoolWebCreditPackage): boolean {
   return days !== undefined && days <= 3
 }
 
+/**
+ * The promo badge for one model, or undefined when it has none.
+ *
+ * `free` is read off the CREDIT MULTIPLIER, not off a tag. Neither gateway ever
+ * sends a literal `free` tag: the global roster marks its zero-cost models
+ * (`hy3`, `hy4-preview-f`, `deepseek-v4.1-flash`) as `credits: "x0.00"`, so
+ * waiting for a tag meant the badge NEVER appeared — including on models that
+ * genuinely cost nothing.
+ *
+ * An explicit free-ish tag still wins when present, so a gateway that starts
+ * tagging them keeps working without another change.
+ */
 function tagFor(model: PoolWebModel): 'free' | 'limited' | 'night' | undefined {
   const tags = model.tags ?? []
-  if (tags.includes('free')) return 'free'
+  if (tags.includes('free') || model.multiplier === 0) return 'free'
   if (tags.includes('limited-free')) return 'limited'
   if (tags.includes('night-discount')) return 'night'
   return undefined
@@ -467,6 +493,37 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     }
   }
 
+  /**
+   * Throw one account out of the pool for good, or take it back.
+   *
+   * The host owns the ignore file, so this is a plain route call: no settings
+   * scope is involved, which is also why it keeps working on a profile whose
+   * settings section is read-only.
+   */
+  const setAccountIgnored = async (accountId: string, ignored: boolean): Promise<void> => {
+    setAccountBusyId(accountId)
+    setFlash(undefined)
+    try {
+      const response = await fetch(POOL_ACCOUNT_IGNORE_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId, ignored }),
+      })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({})) as { error?: string }
+        throw new Error(detail.error ?? `HTTP ${response.status}`)
+      }
+      await refresh(activeRegion)
+    } catch (cause: unknown) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      if (mounted.current) {
+        setError(t?.('row.accountIgnoreError', { message }) ?? 'Could not change the ignore list: ' + message)
+      }
+    } finally {
+      if (mounted.current) setAccountBusyId(undefined)
+    }
+  }
+
   /** Keep the draft in step with the server copy while nothing is dirty. */
   const modelDraft = draft ?? (status === undefined ? {} : draftFromStatus(status))
   /** Model edits need a writable settings scope; otherwise the rows are read-only. */
@@ -559,13 +616,21 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     setAutomationBusy(true)
     setFlash(undefined)
     try {
+      // Every schedule field is carried along, `travelHours` included: it used
+      // to be missing from this list, so toggling the switch silently DROPPED
+      // the travel schedule from the saved document — and because the host then
+      // read the key as absent, the card could never write it back either.
+      //
+      // Each list also falls back to the same defaults the host uses when it is
+      // empty, so a document already holding `[]` (the shape the schema
+      // materializes for "never configured") is healed by the next toggle
+      // rather than written back as an unrunnable schedule.
       await write.call(settingsScope, 'automation', {
-        ...existing === undefined ? {} : {
-          checkinHours: [...existing.checkinHours],
-          reportHours: [...existing.reportHours],
-          taskHours: [...existing.taskHours],
-          streakHours: [...existing.streakHours],
-        },
+        checkinHours: hoursOrDefault(existing?.checkinHours, DEFAULT_AUTOMATION_HOURS.checkin),
+        reportHours: hoursOrDefault(existing?.reportHours, DEFAULT_AUTOMATION_HOURS.report),
+        taskHours: hoursOrDefault(existing?.taskHours, DEFAULT_AUTOMATION_HOURS.tasks),
+        streakHours: hoursOrDefault(existing?.streakHours, DEFAULT_AUTOMATION_HOURS.streak),
+        travelHours: hoursOrDefault(existing?.travelHours, DEFAULT_AUTOMATION_HOURS.travel),
         enabled,
       })
       await refresh(activeRegion)
@@ -1066,10 +1131,44 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
                         onSaveCreditReserve={(accountId, reserve) => saveCreditReserve(accountId, reserve)}
                           onToggleDisabled={(accountId, disabled) => { void toggleAccountDisabled(accountId, disabled) }}
+                          onIgnoreAccount={(accountId) => { void setAccountIgnored(accountId, true) }}
                           {...accountBusyId === undefined ? {} : { accountBusyId }}
                         t={t}
                       />
                     ))}
+                  </section>
+                : null}
+
+              {/* The ignored accounts, shown so "remove" is not a one-way door.
+                  Each row can be restored, which is what makes the feature safe
+                  to use on an account the user is merely unsure about. */}
+              {(status?.ignored.length ?? 0) > 0
+                ? <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-ignored" aria-label={t?.('row.ignoredTitle') ?? 'Removed accounts'}>
+                    <div className="dsm-workbuddy-xdpool-ignored-head">
+                      <h3 className="dsm-workbuddy-xdpool-ignored-title">
+                        {t?.('row.ignoredTitle') ?? 'Removed accounts'}
+                      </h3>
+                      <p className="dsm-workbuddy-xdpool-ignored-summary">
+                        {t?.('row.ignoredSummary', { count: status?.ignored.length ?? 0 })
+                          ?? `${status?.ignored.length ?? 0} account(s) no longer in the pool`}
+                      </p>
+                    </div>
+                    <div className="dsm-workbuddy-xdpool-ignored-list">
+                      {(status?.ignored ?? []).map(entry => (
+                        <div key={entry.id} className="dsm-workbuddy-xdpool-ignored-row">
+                          <span className="dsm-workbuddy-xdpool-ignored-label">{entry.label}</span>
+                          <button
+                            type="button"
+                            className="dsm-workbuddy-xdpool-ignored-restore"
+                            title={t?.('row.ignoredRestoreHint') ?? 'Put this account back into the pool'}
+                            disabled={accountBusyId === entry.id}
+                            onClick={() => { void setAccountIgnored(entry.id, false) }}
+                          >
+                            {t?.('row.ignoredRestore') ?? 'Restore'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </section>
                 : null}
 
@@ -1136,6 +1235,7 @@ function AccountBlock({
   onClaimCheckin,
   accountBusyId,
   onToggleDisabled,
+  onIgnoreAccount,
   onSaveCreditReserve,
   reserveBusyId,
 }: {
@@ -1147,6 +1247,8 @@ function AccountBlock({
   /** Account id whose switch is in flight, if any. */
   accountBusyId?: string
   onToggleDisabled: (accountId: string, disabled: boolean) => void
+  /** Throw this account out of the pool for good. */
+  onIgnoreAccount: (accountId: string) => void
     onSaveCreditReserve: (accountId: string, reserve: number) => Promise<boolean>
     /** Account id whose reserve is being saved, if any. */
     reserveBusyId?: string
@@ -1186,6 +1288,20 @@ function AccountBlock({
         >
           <span className="dsm-workbuddy-xdpool-account-toggle-dot" />
           {isDisabled ? (t?.('row.accountOff') ?? 'Disabled') : (t?.('row.accountInRotation') ?? 'Enabled')}
+        </button>
+        {/* Throwing the account away for good. Deliberately a separate, plainly
+            labelled button rather than a third state of the switch above:
+            "stop using this for now" and "this account is not mine any more"
+            are different decisions, and merging them into one control is how a
+            user permanently drops an account by accident. */}
+        <button
+          type="button"
+          className="dsm-workbuddy-xdpool-account-ignore"
+          title={t?.('row.accountIgnoreHint') ?? 'Remove this account from the pool for good'}
+          disabled={accountBusyId === account.id}
+          onClick={() => { onIgnoreAccount(account.id) }}
+        >
+          {t?.('row.accountIgnore') ?? 'Remove'}
         </button>
       </div>
       <div className="dsm-workbuddy-xdpool-account-body">
@@ -1581,7 +1697,11 @@ function ModelRow({
           <span className="dsm-workbuddy-xdpool-model-copy">
             <span className="dsm-workbuddy-xdpool-model-name">
               <span>{model.name}</span>
-              {model.multiplier === undefined ? null
+              {/* A zero multiplier IS the upstream's way of saying "free"
+                  (`credits: "x0.00"`), so printing "x0.00 积分" next to a
+                  model that costs nothing is worse than printing nothing.
+                  The badge below already carries the free/free-tier label. */}
+              {model.multiplier === undefined || model.multiplier === 0 ? null
                 : <span className="dsm-workbuddy-xdpool-model-name-rate">
                     {t?.('row.rate', { rate: model.multiplier.toFixed(2) }) ?? `${model.multiplier.toFixed(2)}x`}
                   </span>}

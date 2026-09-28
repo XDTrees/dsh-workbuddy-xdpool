@@ -30,6 +30,12 @@ export {
 } from './scheduler.ts'
 import { regionOf, WorkBuddyUpstreamClient, type WorkBuddyRegion } from './upstream.ts'
 import { registerPoolStatusRoute } from './web-status.ts'
+import {
+  ignoreAccount,
+  ignoredIdsPath,
+  readIgnoredAccountsSync,
+  unignoreAccount,
+} from './ignored.ts'
 
 export { WORKBUDDY_POOL_PROVIDER, createWorkBuddyAdapter, type WorkBuddyAdapter } from './adapter.ts'
 export { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
@@ -55,7 +61,12 @@ export {
   type ExpertUseMode, type MarketExpert, type TaskEventChain, type TaskEventTransport,
 } from './task-events.ts'
 export { buildStatus, formatStatus, formatRates, type WorkBuddyStatus, type AccountStatus } from './status.ts'
+// The shared automation schedule. Exported so a probe (and any future
+// consumer) can assert the host and the card agree on what an empty hour list
+// means, rather than hard-coding the numbers a second time.
+export { DEFAULT_AUTOMATION_HOURS } from './status-paths.ts'
 export {
+  POOL_ACCOUNT_IGNORE_PATH,
   POOL_AUTOMATION_RUN_PATH,
   POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
@@ -63,12 +74,27 @@ export {
   POOL_RESET_COOLDOWN_PATH,
   POOL_RESCAN_PATH,
   POOL_STATUS_PATH,
+  type PoolWebAccountIgnore,
   type PoolWebCheckin,
   type PoolWebCheckinClaim,
+  type PoolWebIgnoredAccount,
   type PoolWebModel,
   type PoolWebModelSelection,
   type PoolWebStatus,
 } from './status-paths.ts'
+export {
+  IGNORED_FILE_NAME,
+  PLUGIN_DATA_DIR_NAME,
+  dshHome,
+  ignoreAccount,
+  ignoredIdsPath,
+  pluginDataDir,
+  readIgnoredAccounts,
+  readIgnoredAccountsSync,
+  unignoreAccount,
+  writeIgnoredAccounts,
+  type IgnoredAccount,
+} from './ignored.ts'
 export type { ModelSelection } from './catalog.ts'
 
 // The card half talks to these routes over HTTP; exporting the registrar and
@@ -410,6 +436,23 @@ export function createCore(logger?: { warn(...args: unknown[]): void; info?(...a
 export function apply(ctx: Context, config: Config = {}): void {
   const core = createCore(ctx.logger)
 
+  // The permanent ignore list, read ONCE here (synchronously) and kept live.
+  //
+  // Loaded at apply time rather than on the first scan because `apply()` is
+  // synchronous and a later async load could resolve after accounts were already
+  // discovered — an ignored account would then sit in the pool until the next
+  // scan. A few hundred bytes of blocking read at startup removes that window
+  // entirely.
+  const ignoredPath = ignoredIdsPath()
+  let ignoredAccounts = readIgnoredAccountsSync(ignoredPath)
+  core.pool.applyIgnored(ignoredAccounts.map(entry => entry.id))
+
+  /** Re-read the ignore file and push it into the pool. */
+  const refreshIgnored = (): void => {
+    ignoredAccounts = readIgnoredAccountsSync(ignoredPath)
+    core.pool.applyIgnored(ignoredAccounts.map(entry => entry.id))
+  }
+
   /**
    * Invalidate the provider snapshot so the picker re-reads the catalog.
    *
@@ -477,8 +520,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       ...imageModelIds === undefined ? {} : { imageModelIds },
       ...contextBudgets === undefined ? {} : { contextBudgets },
     }
-    core.catalogs.cn.applySelection(modelSelectionCn ?? legacySelection)
-    core.catalogs.global.applySelection(modelSelectionGlobal ?? legacySelection)
+    // When NEITHER the region key NOR the legacy keys name anything, keep the
+    // selection already in force instead of applying an empty one.
+    //
+    // An absent `enabledModelIds` means "all enabled", which is right for a
+    // fresh install but catastrophic as a fallback: a region key that goes
+    // missing (hand-edited config, a profile or entry id that changed, a
+    // marketplace install) used to fall back to `{}` and thereby WIDEN the
+    // user's curated few models to the entire catalog. Losing a selection must
+    // degrade to "unchanged", never to "everything".
+    const fallbackSelection = (region: 'cn' | 'global') => {
+      const legacyEmpty = legacySelection.enabledModelIds === undefined
+        && legacySelection.imageModelIds === undefined
+        && legacySelection.contextBudgets === undefined
+      return legacyEmpty ? core.catalogs[region].currentSelection() : legacySelection
+    }
+    core.catalogs.cn.applySelection(modelSelectionCn ?? fallbackSelection('cn'))
+    core.catalogs.global.applySelection(modelSelectionGlobal ?? fallbackSelection('global'))
     // The automation reads the same settings document, so a save on the card
     // re-arms it without a host restart. An absent block means off, which is why
     // this passes `enabled: false` explicitly rather than leaving it undefined.
@@ -571,6 +629,22 @@ export function apply(ctx: Context, config: Config = {}): void {
   // simply never fires.
   ;(ctx as unknown as { on(name: string, listener: () => void): unknown })
     .on('loader/volatile-update', () => { applyConfigFromSource() })
+
+  // Apply the SAVED configuration once at startup, not only when it changes.
+  //
+  // On 0.1.7 `configure({auto})` registers the presentation policy and nothing
+  // else: it reads no value and applies no value, and edits are announced as
+  // `loader/volatile-update` (a listener, so it does not fire at boot). The
+  // 0.1.5 line pushed the initial document through `installSection` →
+  // `hooks.onChange`, which is why this only ever broke on the newer line.
+  //
+  // Without this call the pool, BOTH catalogs and the scheduler stay at their
+  // constructor defaults until the user touches the card, so every restart
+  // silently reverts the distribution, the automation switch and the model
+  // selection even though the settings file still holds them. The read path was
+  // never broken — `current()` resolves the loader's config — which is exactly
+  // why the symptom looked like "the values are saved but ignored".
+  applyConfigFromSource()
 
   /**
    * Write one key of the plugin's own settings section. Only ever called with
@@ -751,6 +825,28 @@ function canonicalJson(value: unknown): string {
         else delete next[accountId]
         await setSetting('creditReserves', next, next)
       },
+    // Throw one account out of the pool for good, or take it back.
+    //
+    // The ignore list is NOT a settings key: the CLI has no settings service, so
+    // a settings-only list could be written by the card and never by the
+    // terminal. Both halves read and write this one plugin-owned file instead,
+    // which is what keeps `ignore` from the CLI and the card's button in step.
+    //
+    // The account's label is captured at ignore time so the card can list it
+    // without re-reading a credential it has deliberately stopped reading.
+    setAccountIgnored: async (accountId, ignored) => {
+      if (ignored) {
+        const known = core.pool.list().find(account => account.id === accountId)
+        await ignoreAccount({ id: accountId, ...known === undefined ? {} : { label: known.label } }, ignoredPath)
+      } else {
+        await unignoreAccount(accountId, ignoredPath)
+      }
+      refreshIgnored()
+      // A newly ignored account must leave the pool immediately, and a
+      // restored one must come back without waiting for the next tick.
+      if (!ignored) await core.pool.scan()
+    },
+    ignoredAccounts: () => ignoredAccounts,
   }))
   api = {
     ...core,

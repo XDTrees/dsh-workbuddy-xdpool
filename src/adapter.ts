@@ -124,7 +124,12 @@ const TAG_LABEL: Readonly<Record<string, string>> = {
  *  so we don't tack a trailing separator on a plain model. */
 function displaySuffix(info: WorkBuddyModelInfo): string | undefined {
   const parts: string[] = []
-  if (typeof info.multiplier === 'number' && Number.isFinite(info.multiplier)) {
+  // `multiplier: 0` is the gateways' own spelling of "free" (`credits:
+  // "x0.00"`), so it prints as the free badge instead of "x0.00" — which read
+  // as a zero-cost rate and carried no promo label at all.
+  if (info.multiplier === 0) {
+    parts.push('免费')
+  } else if (typeof info.multiplier === 'number' && Number.isFinite(info.multiplier)) {
     parts.push(`x${info.multiplier.toFixed(2)}`)
   }
   for (const tag of info.tags ?? []) {

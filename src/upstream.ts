@@ -51,6 +51,38 @@ export interface WorkBuddyUpstreamModel {
   descriptionZh?: string
   descriptionEn?: string
   supportsToolCall?: boolean
+  /**
+   * Promo tags the upstream attaches to a model.
+   *
+   * Both gateways send a `tags` array, but the vocabularies are NOT the same
+   * and neither uses the words this plugin used to expect:
+   *
+   * - Global sends `["craft"]`, `["text-to-image"]`, `["text-to-video"]`, `[]`
+   *   — capability/grouping labels, never `free`.
+   * - Zero cost is expressed as `credits: "x0.00"` instead.
+   *
+   * So this field is a passthrough of what the upstream really said, and
+   * `free` is DERIVED from the multiplier rather than awaited as a tag (see
+   * {@link isFreeModel}).
+   */
+  tags?: readonly string[]
+}
+
+/**
+ * Whether a model is free to use.
+ *
+ * Read off the CREDIT MULTIPLIER, not off a tag. The old rule waited for a
+ * literal `free` / `limited-free` entry in `tags`, which no gateway has ever
+ * sent: the global roster marks its zero-cost models as `credits: "x0.00"`
+ * (`hy3`, `hy4-preview-f`, `deepseek-v4.1-flash`), so every one of them
+ * rendered as a plain paid model with no badge.
+ *
+ * An explicit free-ish tag still counts when one does appear, so a future
+ * gateway that starts tagging them keeps working either way.
+ */
+export function isFreeModel(model: Pick<WorkBuddyUpstreamModel, 'creditMultiplier' | 'tags'>): boolean {
+  if (model.tags?.some(tag => tag === 'free' || tag === 'limited-free')) return true
+  return model.creditMultiplier === 0
 }
 
 /** One billing package, already normalised. */
@@ -604,6 +636,12 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
   const reasoning = parseReasoning(raw['reasoning'])
   const supportsToolCall = typeof raw['supportsToolCall'] === 'boolean' ? raw['supportsToolCall'] : undefined
   const supportsImages = typeof raw['supportsImages'] === 'boolean' ? raw['supportsImages'] : undefined
+  // Passthrough of the upstream's own tag list. It used to be dropped entirely,
+  // which made the card's promo badges unreachable for every model on both
+  // gateways — the JSON carried a `tags` array the whole time.
+  const tags = Array.isArray(raw['tags'])
+    ? raw['tags'].filter((tag): tag is string => typeof tag === 'string' && tag !== '')
+    : undefined
   return {
     id,
     name,
@@ -615,6 +653,7 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
     ...descriptionEn === undefined ? {} : { descriptionEn },
     ...supportsToolCall === undefined ? {} : { supportsToolCall },
     ...supportsImages === undefined ? {} : { supportsImages },
+    ...tags === undefined || tags.length === 0 ? {} : { tags },
   }
 }
 

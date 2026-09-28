@@ -221,6 +221,21 @@ interface WorkBuddyUpstreamModel {
   descriptionZh?: string;
   descriptionEn?: string;
   supportsToolCall?: boolean;
+  /**
+   * Promo tags the upstream attaches to a model.
+   *
+   * Both gateways send a `tags` array, but the vocabularies are NOT the same
+   * and neither uses the words this plugin used to expect:
+   *
+   * - Global sends `["craft"]`, `["text-to-image"]`, `["text-to-video"]`, `[]`
+   *   — capability/grouping labels, never `free`.
+   * - Zero cost is expressed as `credits: "x0.00"` instead.
+   *
+   * So this field is a passthrough of what the upstream really said, and
+   * `free` is DERIVED from the multiplier rather than awaited as a tag (see
+   * {@link isFreeModel}).
+   */
+  tags?: readonly string[];
 }
 /** One billing package, already normalised. */
 interface WorkBuddyCreditPackage {
@@ -831,6 +846,21 @@ export declare class WorkBuddyAccountPool {
    */
   private disabledIds;
   /**
+   * Account ids the user threw out of the pool for good.
+   *
+   * Enforced BEFORE the credential is parsed: `scan()` skips a file whose
+   * identity is already ignored, so an ignored account costs no at-rest key
+   * lookup (which spawns the desktop app on 5.6.0+) and cannot re-enter the pool
+   * when the app writes a fresh sign-in for it. That is the difference from
+   * {@link disabledIds}, which only filters at pick time and leaves the account
+   * listed, readable and re-discoverable.
+   *
+   * The set is supplied by the host from the plugin's own ignore file, and is
+   * replaced wholesale on every {@link applyIgnored} so removing an entry takes
+   * effect on the next scan without a restart.
+   */
+  private ignoredIds;
+  /**
    * Per-account credit floor, keyed by account id. 0 (or absent) means "spend
    * it all".
    *
@@ -875,6 +905,19 @@ export declare class WorkBuddyAccountPool {
     /** Per-account credit floor, keyed by account id. Absent keeps the current map. */
     creditReserves?: Readonly<Record<string, number>>;
   }): void;
+  /**
+   * Replace the permanent ignore list.
+   *
+   * Also drops any already-discovered account that is now ignored, so the change
+   * is visible without waiting for the next scan: the card refreshes its status
+   * document right after the write, and an account still sitting in `accounts`
+   * would keep showing up there.
+   */
+  applyIgnored(ids: Iterable<string>): void;
+  /** Whether this account has been thrown out of the pool for good. */
+  isIgnored(accountId: string): boolean;
+  /** Every ignored id currently in force, in insertion order. */
+  ignoredIdsInOrder(): string[];
   /** Rescan the auth directories and merge newly discovered accounts. */
   scan(): Promise<WorkBuddyAccount[]>;
   /** All accounts, cooldown state included. */
@@ -1036,7 +1079,20 @@ interface WorkBuddyModelInfo {
   /** Upstream tags: free / limited-free / night-discount. */
   tags?: readonly string[];
 }
-/** Static fallback used before the first live catalog fetch. */
+/**
+ * Static fallback used before the first live catalog fetch, and whenever the
+ * upstream cannot be reached.
+ *
+ * The multipliers are carried on purpose. Without them the provider's model
+ * picker silently loses every rate and every free badge the moment the live
+ * fetch fails — which reads to the user as "the plugin broke my model list"
+ * rather than "the upstream is unreachable". The values are the ones the two
+ * gateways actually advertise for these ids (`credits: "x0.79 credits"` and so
+ * on), so a fallback row looks the same as a live one.
+ *
+ * `multiplier: 0` is the gateways' own spelling of "free" (`credits: "x0.00"`),
+ * which is what turns on the free badge.
+ */
 export declare const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[];
 /** Live catalog with a static fallback behind it. */
 export declare class WorkBuddyCatalog {
@@ -1692,11 +1748,18 @@ export declare const POOL_RESET_COOLDOWN_PATH = "/plugins/dsh-workbuddy-xdpool/c
 export declare const POOL_CHECKIN_PATH = "/plugins/dsh-workbuddy-xdpool/checkin";
 /** Plugin-owned model-selection save endpoint (writes the settings section). */
 export declare const POOL_MODELS_SAVE_PATH = "/plugins/dsh-workbuddy-xdpool/models/save";
+/**
+ * Throw one account out of the pool for good, or take it back.
+ *
+ * Separate from the disable route because the semantics differ: disabling is a
+ * rotation preference the account survives, ignoring survives the account.
+ */
+export declare const POOL_ACCOUNT_IGNORE_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/ignored";
 /** Run one automation job immediately, so the card can verify it on demand. */
 export declare const POOL_AUTOMATION_RUN_PATH = "/plugins/dsh-workbuddy-xdpool/automation/run";
 /** Set or clear one account's reserved-credit floor. */
 export declare const POOL_CREDIT_RESERVE_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/credit-reserve";
-/** One pool account's row, token-free. */
+/** One account's row, token-free. */
 interface PoolWebAccount {
   id: string;
   label: string;
@@ -1826,6 +1889,34 @@ interface PoolWebModel {
   /** Whether this model is currently enabled in the picker. */
   enabled: boolean;
 }
+/**
+ * Body of the account ignore/unignore route: exactly one account per request.
+ *
+ * `ignored: true` throws the account out of the pool for good (its credential is
+ * not even read on the next scan, and a fresh desktop sign-in will not bring it
+ * back). `false` restores it, at which point the next scan discovers it again.
+ */
+interface PoolWebAccountIgnore {
+  /** Pool account id, as reported in `PoolWebAccount.id`. */
+  accountId: string;
+  /** `true` ignores the account permanently; `false` takes it back. */
+  ignored: boolean;
+}
+/**
+ * One account the user has thrown out of the pool.
+ *
+ * Kept on the status document so the card can list what was ignored and offer a
+ * way back: without that, "ignored" is a one-way door the user cannot inspect or
+ * undo from the UI, which is how a hidden list becomes a support burden.
+ */
+interface PoolWebIgnoredAccount {
+  /** Pool account id, the same key `PoolWebAccount.id` uses. */
+  id: string;
+  /** Human label captured at ignore time, so the row reads without a rescan. */
+  label: string;
+  /** ISO timestamp of when it was ignored. */
+  ignoredAt: string;
+}
 interface PoolWebModelSelection {
   /** Absent = every model is enabled. */
   enabledModelIds?: readonly string[];
@@ -1861,6 +1952,14 @@ interface PoolWebStatus {
   automation: PoolWebAutomation;
   /** Per-account credit floors currently in force, keyed by account id. */
   creditReserves: Readonly<Record<string, number>>;
+  /**
+   * Accounts thrown out of the pool, in the order they were ignored.
+   *
+   * Reported so the card can show the list and offer a way back. These accounts
+   * are NOT in `accounts`: they are filtered out before their credentials are
+   * read, which is the whole point of the feature.
+   */
+  ignored: readonly PoolWebIgnoredAccount[];
 }
 /** One automation job's last run, as shown on the card. */
 interface PoolWebAutomationJob {
@@ -1952,6 +2051,89 @@ interface PoolWebAutomationEarnings {
 type PoolRegion = 'cn' | 'global';
 /** How the pool spreads requests across its accounts. */
 type PoolDistribution = 'priority' | 'round-robin' | 'balanced';
+/**
+ * The schedule every automation job falls back to.
+ *
+ * Shared by both halves on purpose. The host uses it when a configured hour
+ * list arrives empty (the settings schema materializes "never configured" into
+ * `[]`), and the card uses it when it writes the `automation` block back, so a
+ * document that already holds an empty list is healed instead of being saved
+ * back as an unrunnable schedule.
+ *
+ * This lives here rather than in `scheduler.ts` because the browser half cannot
+ * import the host module: `scheduler.ts` pulls in `node:crypto` and the whole
+ * upstream client, none of which exists in the browser bundle. Two hand-written
+ * copies would drift, and the drift is invisible — the card would write a
+ * schedule the scheduler does not run.
+ */
+export declare const DEFAULT_AUTOMATION_HOURS: {
+  readonly checkin: readonly [9];
+  readonly report: readonly [10];
+  readonly tasks: readonly [11];
+  readonly streak: readonly [12];
+  readonly travel: readonly [9, 21];
+};
+//#endregion
+//#region src/ignored.d.ts
+/** Directory holding this plugin's own state (imported snapshots, ignore list). */
+export declare const PLUGIN_DATA_DIR_NAME = ".workbuddy-xdpool";
+/** File holding the permanent ignore list, inside {@link pluginDataDir}. */
+export declare const IGNORED_FILE_NAME = "ignored.json";
+/** One ignored account, as stored on disk and shown on the card. */
+type IgnoredAccount = PoolWebIgnoredAccount;
+/**
+ * The DSH home directory, honouring the same override the host uses.
+ *
+ * Shared by the CLI and the host so both halves resolve the same file: an
+ * `ignore` written from the terminal has to be visible to the running plugin,
+ * which is only true if they agree on where "home" is.
+ */
+export declare function dshHome(env?: NodeJS.ProcessEnv): string;
+/** This plugin's own state directory. */
+export declare function pluginDataDir(env?: NodeJS.ProcessEnv): string;
+/** Absolute path of the ignore list. */
+export declare function ignoredIdsPath(env?: NodeJS.ProcessEnv): string;
+/**
+ * Read the ignore list, tolerating every "no list yet" shape.
+ *
+ * A missing file, unreadable file, or invalid JSON all mean the same thing to
+ * the caller — nothing is ignored — so none of them throws. The pool must be
+ * able to start on a machine that has never ignored anything.
+ */
+export declare function readIgnoredAccounts(path?: string): Promise<IgnoredAccount[]>;
+/**
+ * Synchronous read, for startup.
+ *
+ * The host applies the ignore list from inside `apply()`, which is synchronous,
+ * and doing it there removes a startup race: an async load could resolve AFTER
+ * the first account scan, which would let an ignored account slip into the pool
+ * once per boot. The file is a few hundred bytes, so a blocking read at startup
+ * costs nothing measurable.
+ */
+export declare function readIgnoredAccountsSync(path?: string): IgnoredAccount[];
+/**
+ * Replace the ignore list, atomically.
+ *
+ * Written to a sibling temp file and renamed over the target so a crash (or a
+ * concurrent reader) can never observe a half-written document — the ignore
+ * list is the only thing standing between a dead account and the rotation, and
+ * a truncated file reads as "nothing is ignored", which would quietly put every
+ * discarded account back in the pool.
+ */
+export declare function writeIgnoredAccounts(accounts: readonly IgnoredAccount[], path?: string): Promise<void>;
+/**
+ * Add one account to the ignore list, preserving the rest.
+ *
+ * A read-modify-write rather than a wholesale replace: the card and the CLI can
+ * both be open, and each request names exactly one account, so re-writing the
+ * whole list from a stale view would drop the other side's edits.
+ */
+export declare function ignoreAccount(account: {
+  id: string;
+  label?: string;
+}, path?: string): Promise<IgnoredAccount[]>;
+/** Drop one account from the ignore list. Returns the resulting list. */
+export declare function unignoreAccount(accountId: string, path?: string): Promise<IgnoredAccount[]>;
 //#endregion
 //#region src/web-status.d.ts
 /** Constructor dependencies — a narrow slice of the pool runtime. */
@@ -2005,6 +2187,21 @@ interface PoolStatusRouteOptions {
    * Absent without a settings service: the route then answers 503.
    */
   setAccountDisabled?: (accountId: string, disabled: boolean) => Promise<void> | void;
+  /**
+   * Throw one account out of the pool for good, or take it back.
+   *
+   * Backed by the plugin's own ignore file rather than the settings document,
+   * because the CLI writes the same list and has no settings service. Absent
+   * when the host did not wire it: the route then answers 503.
+   */
+  setAccountIgnored?: (accountId: string, ignored: boolean) => Promise<void> | void;
+  /**
+   * The accounts currently ignored, for the card's "ignored" list.
+   *
+   * A thunk rather than a snapshot so the document always reflects the file on
+   * disk, including edits made by the CLI while the card is open.
+   */
+  ignoredAccounts?: () => readonly PoolWebIgnoredAccount[];
 }
 /**
  * Assemble the card's status document. Per-account credits and check-in state
@@ -2214,4 +2411,4 @@ export declare function createCore(logger?: {
  */
 export declare function apply(ctx: Context, config?: Config): void;
 //#endregion
-export type { AccountStatus, AutomationLedger, AutomationRunSummary, AutomationStatus, Context, ExpertUseMode, MarketExpert, ModelSelection, PoolStatusRouteOptions, PoolWebCheckin, PoolWebCheckinClaim, PoolWebModel, PoolWebModelSelection, PoolWebStatus, SchedulerLogger, TaskEventChain, TaskEventTransport, UpstreamErrorKind, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };
+export type { AccountStatus, AutomationLedger, AutomationRunSummary, AutomationStatus, Context, ExpertUseMode, IgnoredAccount, MarketExpert, ModelSelection, PoolStatusRouteOptions, PoolWebAccountIgnore, PoolWebCheckin, PoolWebCheckinClaim, PoolWebIgnoredAccount, PoolWebModel, PoolWebModelSelection, PoolWebStatus, SchedulerLogger, TaskEventChain, TaskEventTransport, UpstreamErrorKind, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };

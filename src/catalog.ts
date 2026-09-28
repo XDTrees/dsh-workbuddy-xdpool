@@ -26,18 +26,31 @@ export interface WorkBuddyModelInfo {
   tags?: readonly string[]
 }
 
-/** Static fallback used before the first live catalog fetch. */
+/**
+ * Static fallback used before the first live catalog fetch, and whenever the
+ * upstream cannot be reached.
+ *
+ * The multipliers are carried on purpose. Without them the provider's model
+ * picker silently loses every rate and every free badge the moment the live
+ * fetch fails — which reads to the user as "the plugin broke my model list"
+ * rather than "the upstream is unreachable". The values are the ones the two
+ * gateways actually advertise for these ids (`credits: "x0.79 credits"` and so
+ * on), so a fallback row looks the same as a live one.
+ *
+ * `multiplier: 0` is the gateways' own spelling of "free" (`credits: "x0.00"`),
+ * which is what turns on the free badge.
+ */
 export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
-  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.79 },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.06 },
+  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.79 },
   { id: 'glm-5.1', name: 'GLM-5.1', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: false },
   { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
   { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
-  { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
+  { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 1.62 },
   { id: 'minimax-m3', name: 'MiniMax-M3', contextWindow: 200_000, maxOutputTokens: 128_000, supportsImages: true },
-  { id: 'hy3', name: 'Hy3', contextWindow: 32_000, maxOutputTokens: 8_000, supportsImages: true },
-  { id: 'hy4-preview', name: 'Hy4-Preview', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true },
+  { id: 'hy3', name: 'Hy3', contextWindow: 32_000, maxOutputTokens: 8_000, supportsImages: true, multiplier: 0 },
+  { id: 'hy4-preview', name: 'Hy4-Preview', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.29 },
 ]
 
 /** Live catalog with a static fallback behind it. */
@@ -139,6 +152,9 @@ export function toModelInfo(model: WorkBuddyUpstreamModel): WorkBuddyModelInfo {
     supportsImages: model.supportsImages ?? false,
     ...model.creditMultiplier === undefined ? {} : { multiplier: model.creditMultiplier },
     ...model.reasoning?.supportedEfforts === undefined ? {} : { supportedEfforts: model.reasoning.supportedEfforts },
+    // `tags` used to be dropped here as well, so even a gateway that DID send
+    // `free` would have had it stripped before the card ever saw it.
+    ...model.tags === undefined || model.tags.length === 0 ? {} : { tags: model.tags },
   }
 }
 

@@ -17,10 +17,26 @@ import {
   workbuddyAccountId,
 } from './accounts.ts'
 import { createCore } from './index.ts'
+import { ignoreAccount, readIgnoredAccounts, unignoreAccount } from './ignored.ts'
 import { formatRates, formatStatus } from './status.ts'
 
 /** Directory holding imported account snapshots. */
 const ACCOUNT_DIR_NAME = '.workbuddy-xdpool'
+
+/**
+ * Assemble the runtime for a CLI command, with the ignore list applied.
+ *
+ * Every command goes through here rather than calling `createCore()` directly,
+ * so a command can never accidentally act on an account the user has thrown out
+ * — `checkin all` collecting a reward for a discarded account would be exactly
+ * the kind of silent surprise the ignore feature exists to prevent.
+ */
+async function cliCore() {
+  const core = createCore()
+  const ignored = await readIgnoredAccounts()
+  core.pool.applyIgnored(ignored.map(entry => entry.id))
+  return core
+}
 
 /** Snapshot files are named by the md5 prefix of their key, so any key is safe. */
 function snapshotPath(key: string, dir: string): string {
@@ -49,6 +65,9 @@ function usage(): string {
     '  accounts            List discovered accounts (add --json)',
     '  import <key>        Snapshot the current desktop login as <key> (add --force)',
     '  remove <key>        Delete one imported snapshot',
+    '  ignore <acct>       Drop an account from the pool for good (id or label)',
+    '  unignore <acct>     Put an ignored account back into the pool',
+    '  ignored             List the accounts dropped from the pool (add --json)',
     '  login               Guide for adding another account (desktop app is single-sign-in)',
     '  checkin [all|<acct>] Daily check-in: report status, or collect with `all` / a label',
     '  reset               Clear all rate-limit cooldowns immediately',
@@ -80,7 +99,7 @@ async function commandStatus(args: string[]): Promise<number> {
   const asJson = args.includes('--json')
   const withCredits = args.includes('--credits')
   const withRates = args.includes('--rates')
-  const core = createCore()
+  const core = await cliCore()
   const accounts = await core.pool.scan()
 
   const status = {
@@ -155,7 +174,7 @@ async function commandStatus(args: string[]): Promise<number> {
 async function commandCheckin(args: string[]): Promise<number> {
   const asJson = args.includes('--json')
   const target = args.find(arg => !arg.startsWith('--'))
-  const core = createCore()
+  const core = await cliCore()
   const accounts = await core.pool.scan()
   if (accounts.length === 0) {
     console.error('No WorkBuddy account discovered. Sign in with the WorkBuddy desktop app first.')
@@ -260,7 +279,7 @@ async function commandDoctor(): Promise<number> {
   }
 
   lines.push('')
-  const core = createCore()
+  const core = await cliCore()
   const accounts = await core.pool.scan()
   lines.push(`Accounts discovered: ${accounts.length}`)
   if (accounts.length === 0) {
@@ -357,6 +376,83 @@ async function commandRemove(args: string[]): Promise<number> {
   }
 }
 
+/**
+ * Throw one account out of the pool for good, or take it back.
+ *
+ * The target may be a full account id (as `accounts --json` prints it) or any
+ * unambiguous fragment of the label, so the user does not have to copy a hash.
+ * The id is what gets stored — a label can change when the account is renamed,
+ * and an ignore list keyed by a mutable label would silently stop matching.
+ */
+async function commandIgnore(args: string[], ignored: boolean): Promise<number> {
+  const verb = ignored ? 'ignore' : 'unignore'
+  const target = args.filter(arg => !arg.startsWith('--'))[0]
+  if (target === undefined) {
+    console.error(`usage: dsh-workbuddy-xdpool ${verb} <account-id|label>`)
+    return 2
+  }
+
+  const core = await cliCore()
+  const accounts = await core.pool.scan()
+  const current = await readIgnoredAccounts()
+
+  if (!ignored) {
+    // Restoring works off the IGNORE LIST, not the pool: an ignored account is
+    // absent from `scan()` by definition, so looking it up there could never
+    // find the one account the user wants back.
+    const match = current.find(entry => entry.id === target)
+      ?? current.find(entry => entry.label === target)
+      ?? current.find(entry => entry.id.startsWith(target))
+    if (match === undefined) {
+      console.error(`No ignored account matches "${target}". Run \`ignored\` to list them.`)
+      return 1
+    }
+    await unignoreAccount(match.id)
+    console.log(`Restored ${match.label} (${match.id}). It rejoins the pool on the next scan.`)
+    return 0
+  }
+
+  const matches = accounts.filter(account =>
+    account.id === target
+    || account.label === target
+    || account.id.startsWith(target)
+    || account.label.includes(target))
+  if (matches.length === 0) {
+    console.error(`No account matches "${target}". Run \`accounts\` to list them.`)
+    return 1
+  }
+  if (matches.length > 1) {
+    console.error(`"${target}" matches ${matches.length} accounts; use the full id:\n`
+      + matches.map(account => `  ${account.id}  ${account.label}`).join('\n'))
+    return 1
+  }
+  const account = matches[0]!
+  await ignoreAccount({ id: account.id, label: account.label })
+  console.log(
+    `Ignored ${account.label} (${account.id}).\n`
+    + '  Its credential is no longer read and it will not rejoin the pool, even if the\n'
+    + '  desktop app signs it in again. Undo with: '
+    + `dsh-workbuddy-xdpool unignore ${account.id}`,
+  )
+  return 0
+}
+
+/** List the accounts currently thrown out of the pool. */
+async function commandIgnored(args: string[]): Promise<number> {
+  const asJson = args.includes('--json')
+  const ignored = await readIgnoredAccounts()
+  if (asJson) {
+    console.log(JSON.stringify(ignored, null, 2))
+    return 0
+  }
+  if (ignored.length === 0) {
+    console.log('No accounts are ignored. Use `ignore <account-id|label>` to drop one.')
+    return 0
+  }
+  console.log(ignored.map(entry => `⛔ ${entry.label}  (${entry.id})`).join('\n'))
+  return 0
+}
+
 function commandLogin(): number {
   console.log(
     [
@@ -379,7 +475,7 @@ function commandLogin(): number {
 }
 
 async function commandReset(): Promise<number> {
-  const core = createCore()
+  const core = await cliCore()
   await core.pool.scan()
   core.pool.resetCooldowns()
   console.log('Cleared all rate-limit cooldowns.')
@@ -388,25 +484,41 @@ async function commandReset(): Promise<number> {
 
 async function commandAccounts(args: string[]): Promise<number> {
   const asJson = args.includes('--json')
-  const core = createCore()
+  const core = await cliCore()
   const accounts = await core.pool.scan()
+  // Read the ignore list too. An ignored account is absent from `scan()` by
+  // design, so without this line it would simply vanish from the output and the
+  // user would have no way to tell "removed on purpose" from "not discovered".
+  const ignored = await readIgnoredAccounts()
   if (asJson) {
     console.log(
       JSON.stringify(
-        accounts.map(account => ({
-          id: account.id,
-          label: account.label,
-          cooling: account.cooldownUntilMs > Date.now(),
-          rateLimitHits: account.rateLimitHits,
-        })),
+        [
+          ...accounts.map(account => ({
+            id: account.id,
+            label: account.label,
+            cooling: account.cooldownUntilMs > Date.now(),
+            rateLimitHits: account.rateLimitHits,
+          })),
+          ...ignored.map(entry => ({
+            id: entry.id,
+            label: entry.label,
+            ignored: true,
+            ignoredAt: entry.ignoredAt,
+          })),
+        ],
         null,
         2,
       ),
     )
-  } else if (accounts.length === 0) {
+  } else if (accounts.length === 0 && ignored.length === 0) {
     console.log('No imported accounts. Run `import <key>` after signing in on the desktop app.')
   } else {
-    console.log(accounts.map(account => `${account.cooldownUntilMs > Date.now() ? '⏸' : '▶'} ${account.label}`).join('\n'))
+    const lines = accounts.map(account => `${account.cooldownUntilMs > Date.now() ? '⏸' : '▶'} ${account.label}`)
+    if (ignored.length > 0) {
+      lines.push(...ignored.map(entry => `⛔ ${entry.label}  (removed; \`unignore ${entry.id}\` to restore)`))
+    }
+    console.log(lines.join('\n'))
   }
   return 0
 }
@@ -431,6 +543,12 @@ export async function main(argv: string[]): Promise<number> {
       return commandImport(rest)
     case 'remove':
       return commandRemove(rest)
+    case 'ignore':
+      return commandIgnore(rest, true)
+    case 'unignore':
+      return commandIgnore(rest, false)
+    case 'ignored':
+      return commandIgnored(rest)
     case 'login':
       return commandLogin()
     case 'logout':
