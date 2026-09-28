@@ -25,6 +25,10 @@ on:
         description: '手动触发时也执行发布（默认只跑到测试）'
         type: boolean
         default: false
+      create_release:
+        description: '同时建 GitHub Release（作者会显示为 github-actions[bot]，仅作兜底）'
+        type: boolean
+        default: false
 
 permissions:
   id-token: write # OIDC：npm 据此确认「是本人授权的 workflow」
@@ -114,26 +118,43 @@ jobs:
         # OIDC 自动生效；npm CLI 会先尝试 OIDC，再回退到传统 token
         run: npm publish --ignore-scripts --access public
 
-      - name: Create the GitHub release
-        if: github.event_name == 'push' || inputs.publish
-        # 只推 tag 不会在 Releases 页面产生条目——那需要一个 Release 对象。
-        # 缺了这一步，npm 上有新版而 Releases 页面停在上一个版本，
-        # 看页面的人会以为没发。正文从 CHANGELOG 抽同版本那一段。
+      - name: Create the GitHub release (opt-in; needs a PAT to show a human author)
+        # 默认**不在**这里建 Release，原因是身份，不是排版。
+        #
+        # 这一步只能用 `secrets.GITHUB_TOKEN`（本仓库没有配置任何 PAT secret），
+        # 而用它建出来的 Release，作者固定显示成 `github-actions[bot]`。本项目的
+        # 历史 Release 都是维护者本人身份（XDTrees），标题也带副标题
+        # （`v1.5.1 — 保留积分改为显式保存…`）。让 CI 建，页面就会出现作者忽而是
+        # bot、标题忽而只剩版本号的参差——1.7.0 / 1.7.1 就是这么来的。
+        #
+        # 所以发布链到 npm 为止，Release 由维护者用本人凭据建；命令见同目录
+        # README 的「发版之后」一节。要恢复「推 tag 即全自动」，先加一个 PAT
+        # secret（如 `RELEASE_TOKEN`）并把下面的 GH_TOKEN 换成它，那样作者才是人。
+        #
+        # 手动触发时勾上 `create_release` 才会跑这一步（此时作者仍是 bot，仅作兜底）。
+        if: (github.event_name == 'push' || inputs.publish) && inputs.create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').version")"
+          # 标题与正文都从 CHANGELOG 抽，绝不手写第二份。
+          # `## 1.7.1 — 副标题` 里的副标题会拼进 Release 标题；没有副标题就退回纯版本号。
           node -e '
             const { readFileSync, writeFileSync } = require("node:fs")
+            const version = process.argv[1]
             const lines = readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/)
-            const at = lines.findIndex(l => l.startsWith("## " + process.argv[1] + " "))
-            if (at < 0) { console.error("no CHANGELOG section for " + process.argv[1]); process.exit(1) }
+            const at = lines.findIndex(l => l.startsWith("## " + version + " "))
+            if (at < 0) { console.error("no CHANGELOG section for " + version); process.exit(1) }
+            const heading = lines[at].slice(3).trim()
             const rest = lines.slice(at + 1)
             const end = rest.findIndex(l => l.startsWith("## "))
             writeFileSync("release-body.md", (end < 0 ? rest : rest.slice(0, end)).join("\n").trim() + "\n")
+            const dash = heading.indexOf(" — ")
+            const subtitle = dash < 0 ? "" : heading.slice(dash + 3).trim()
+            writeFileSync("release-title.txt", subtitle === "" ? "v" + version : "v" + version + " — " + subtitle)
           ' "$VERSION"
           gh release create "v$VERSION" \
-            --title "v$VERSION" \
+            --title "$(cat release-title.txt)" \
             --notes-file release-body.md \
             --verify-tag
