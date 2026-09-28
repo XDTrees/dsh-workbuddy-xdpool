@@ -81,6 +81,21 @@ const DEFAULT_CONTEXT_BUDGET = 200_000
 
 const POLL_INTERVAL_MS = 30_000
 
+/**
+ * The two gateways, in display order.
+ *
+ * A module constant rather than a field of the status document: the tab strip
+ * must render even when no document has arrived, and must not vanish when the
+ * active region's document is missing. The host sends `regions` for
+ * compatibility, but the strip no longer depends on it.
+ */
+const POOL_REGIONS: readonly PoolRegion[] = ['cn', 'global']
+
+/** The region a tab switch lands on. */
+function otherRegion(region: PoolRegion): PoolRegion {
+  return region === 'cn' ? 'global' : 'cn'
+}
+
 /** Inject or refresh the shared card CSS for the current client bundle. */
 if (typeof document !== 'undefined') {
   const cssId = 'dsh-workbuddy-xdpool/client.css'
@@ -311,6 +326,13 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       travelCredit: sum.travelCredit + entry.travelCredit,
     }), { credit: 0, energy: 0, claimed: 0, checkinCredit: 0, bonusCredit: 0, travelCredit: 0 })
   const [error, setError] = useState<string | undefined>(undefined)
+  /**
+   * Last error per region, kept per region for the same reason the documents
+   * are: a failing international gateway must not paint the domestic tab as
+   * broken (or vice versa). `error` above stays the card-level slot for
+   * actions that are not region-scoped (a failed save, a failed check-in).
+   */
+  const [errorByRegion, setErrorByRegion] = useState<Partial<Record<PoolRegion, string | undefined>>>({})
   const [busy, setBusy] = useState(false)
   const [cooldownBusy, setCooldownBusy] = useState(false)
   const [automationBusy, setAutomationBusy] = useState(false)
@@ -363,32 +385,75 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       if (mounted.current && signal?.aborted !== true) {
         setStatusByRegion(prev => ({ ...prev, [region]: value as PoolWebStatus }))
-        setError(undefined)
+        setErrorByRegion(prev => ({ ...prev, [region]: undefined }))
       }
       // Returned so a caller that needs to poll a field (the automation run
       // state) can read the fresh value instead of a stale render.
       return value as PoolWebStatus
     } catch (cause: unknown) {
       if (mounted.current && signal?.aborted !== true) {
-        setError(cause instanceof Error ? cause.message : String(cause))
+        // Recorded against THIS region. A single shared error slot painted one
+        // gateway's failure onto the other gateway's tab.
+        setErrorByRegion(prev => ({ ...prev, [region]: cause instanceof Error ? cause.message : String(cause) }))
       }
       return undefined
     }
   }, [])
 
+  /**
+   * Read the region on screen, on mount and on every switch.
+   *
+   * No abort signal is passed, deliberately: a request for the region the user
+   * just left is still the freshest answer for THAT region's slot, so tearing it
+   * down would throw away work and leave a hole in the cache. The `signal.aborted`
+   * guard in `refresh` still protects the unmount case via the poll below.
+   */
+  useEffect(() => {
+    void refresh(activeRegion)
+  }, [refresh, activeRegion])
+
+  /**
+   * Warm the OTHER region once, at mount.
+   *
+   * This is what makes a tab switch instant for the common case: the other
+   * side's document is already in `statusByRegion`, so the switch paints real
+   * content instead of a spinner. Deliberately NOT repeated on the poll
+   * interval — every status document costs one upstream probe per account, and
+   * doubling that every 30 seconds is a real cost for a page the user may leave
+   * open. The cached document is refreshed when the user actually switches.
+   */
+  const activeRegionRef = useRef(activeRegion)
+  activeRegionRef.current = activeRegion
+  useEffect(() => {
+    void refresh(otherRegion(activeRegionRef.current))
+  }, [refresh])
+
+  /**
+   * One long-lived poll of the ACTIVE region.
+   *
+   * `activeRegion` is deliberately absent from the dependency list, and the
+   * controller is not aborted on a switch. It used to be both, which meant every
+   * tab click tore down the in-flight request and started a new one; because
+   * `refresh` drops any answer whose signal was aborted, a user who clicked
+   * around faster than the host could answer left BOTH regions with no document
+   * at all. The interval reads the current region from a ref instead, so a single
+   * poll follows the tab without restarting.
+   */
   useEffect(() => {
     const controller = new AbortController()
-    void refresh(activeRegion, controller.signal)
-    const timer = window.setInterval(() => { void refresh(activeRegion, controller.signal) }, POLL_INTERVAL_MS)
+    const timer = window.setInterval(() => {
+      void refresh(activeRegionRef.current, controller.signal)
+    }, POLL_INTERVAL_MS)
     return () => {
       window.clearInterval(timer)
       controller.abort()
     }
-  }, [refresh, activeRegion])
+  }, [refresh])
 
   const rescan = async (): Promise<void> => {
     setBusy(true)
     setFlash(undefined)
+    setError(undefined)
     try {
       const response = await fetch(POOL_RESCAN_PATH, {
         method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin',
@@ -407,6 +472,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const resetCooldowns = async (): Promise<void> => {
     setCooldownBusy(true)
     setFlash(undefined)
+    setError(undefined)
     try {
       const response = await fetch(POOL_RESET_COOLDOWN_PATH, {
         method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin',
@@ -430,6 +496,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const claimCheckin = async (accountId: string): Promise<void> => {
     setCheckinBusyId(accountId)
     setFlash(undefined)
+    setError(undefined)
     try {
       const response = await fetch(POOL_CHECKIN_PATH, {
         method: 'POST',
@@ -472,6 +539,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     }
     setAccountBusyId(accountId)
     setFlash(undefined)
+    setError(undefined)
     try {
       // Derived from the status the card already holds, so the write is a
       // read-modify-write of the full list and two clicks cannot clobber.
@@ -503,6 +571,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const setAccountIgnored = async (accountId: string, ignored: boolean): Promise<void> => {
     setAccountBusyId(accountId)
     setFlash(undefined)
+    setError(undefined)
     try {
       const response = await fetch(POOL_ACCOUNT_IGNORE_PATH, {
         method: 'POST',
@@ -558,6 +627,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const discardModels = (): void => {
     setDraft(undefined)
     setFlash(undefined)
+    setError(undefined)
   }
 
   /**
@@ -590,6 +660,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       return
     }
     setFlash(undefined)
+    setError(undefined)
     try {
       await write.call(settingsScope, 'distribution', next)
       await refresh(activeRegion)
@@ -615,6 +686,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     const existing = status?.automation
     setAutomationBusy(true)
     setFlash(undefined)
+    setError(undefined)
     try {
       // Every schedule field is carried along, `travelHours` included: it used
       // to be missing from this list, so toggling the switch silently DROPPED
@@ -653,6 +725,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const runAutomationJob = async (): Promise<void> => {
     setAutomationRun('all')
     setFlash(undefined)
+    setError(undefined)
     try {
       const response = await fetch(POOL_AUTOMATION_RUN_PATH, {
         method: 'POST',
@@ -710,6 +783,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const saveCreditReserve = async (accountId: string, reserve: number): Promise<boolean> => {
     setReserveBusy(accountId)
     setFlash(undefined)
+    setError(undefined)
     try {
       const response = await fetch(POOL_CREDIT_RESERVE_PATH, {
         method: 'POST',
@@ -750,6 +824,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     }
     setSavingModels(true)
     setFlash(undefined)
+    setError(undefined)
     try {
       // Every id the catalog knows about, so a model added upstream while the
       // card sat open is not silently dropped by an unrelated save.
@@ -778,23 +853,42 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const description = t?.('row.desc') ?? ''
   const accountCount = status?.accounts.length ?? 0
   const cooling = status?.cooling ?? 0
-  const idle = status === undefined && error === undefined
+  /** This region's own failure, which is what its tab and body should report. */
+  const regionError = errorByRegion[activeRegion]
+  /**
+   * The active region has no document yet AND no failure. That is a distinct
+   * state from "this region has no accounts": with no document we do not know
+   * the account list, so claiming emptiness sends the user off to re-sign-in to
+   * an account that is already in the pool. Every render decision below keeps
+   * the two apart.
+   */
+  const loading = status === undefined && regionError === undefined
   const hasHealthy = accountCount > 0 && cooling < accountCount
-  const state: 'ok' | 'error' | 'idle' = error !== undefined
+  const state: 'ok' | 'error' | 'idle' = regionError !== undefined
     ? 'error'
-    : (idle ? 'idle' : (hasHealthy ? 'ok' : 'idle'))
+    : (loading ? 'idle' : (hasHealthy ? 'ok' : 'idle'))
+  /** One region's dot state, for the tab strip (each dot reports its own). */
+  const regionState = (region: PoolRegion): 'ok' | 'error' | 'idle' => {
+    if (errorByRegion[region] !== undefined) return 'error'
+    const doc = statusByRegion[region]
+    if (doc === undefined) return 'idle'
+    const total = doc.accounts.length
+    return total > 0 && doc.cooling < total ? 'ok' : 'idle'
+  }
   /** Human label for the active tab, used inside the empty-state copy. */
   const regionLabel = activeRegion === 'cn'
     ? (t?.('row.tabCn') ?? 'CN')
     : (t?.('row.tabGlobal') ?? 'Global')
 
-  const stateLabel = error !== undefined
+  const stateLabel = regionError !== undefined
     ? (t?.('row.requestFailed') ?? 'Request failed')
-    : accountCount === 0
-      ? (t?.('row.regionEmpty') ?? t?.('row.poolEmpty') ?? 'No account yet')
-      : state === 'ok'
-        ? (t?.('row.ok') ?? 'Healthy')
-        : (t?.('row.allCooling') ?? 'All cooling')
+    : loading
+      ? (t?.('row.regionLoading') ?? 'Loading this region…')
+      : accountCount === 0
+        ? (t?.('row.regionEmpty') ?? t?.('row.poolEmpty') ?? 'No account yet')
+        : state === 'ok'
+          ? (t?.('row.ok') ?? 'Healthy')
+          : (t?.('row.allCooling') ?? 'All cooling')
   const shimRunning = status?.shim.running === true
   const shimHint = status === undefined
     ? null
@@ -837,10 +931,18 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       </header>
               {/* Region tabs: one supplier per tab. Both are always offered, so an
                   empty side reads as "not signed in here yet" rather than the tab
-                  appearing only after the user has already signed in. */}
+                  appearing only after the user has already signed in.
+
+                  The strip iterates the CONSTANT region list, never the active
+                  region's document. Deriving it from `status.regions` made the
+                  whole strip disappear the instant the user switched to a region
+                  whose document had not arrived yet — `status` is
+                  `statusByRegion[activeRegion]`, so it went undefined and took
+                  both tabs with it. The user was then stranded on that tab with
+                  no way back to the other region: the reported "切换卡顿". */}
               <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-status">
               <div className="dsm-workbuddy-xdpool-tabs" role="tablist">
-                    {status?.regions.map(region => (
+                    {POOL_REGIONS.map(region => (
                       <button
                         key={region}
                         type="button"
@@ -849,7 +951,10 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         className={`dsm-workbuddy-xdpool-tab${region === activeRegion ? ' dsm-workbuddy-xdpool-tab-active' : ''}`}
                         onClick={() => { setActiveRegion(region) }}
                       >
-                        <span className="dsm-workbuddy-xdpool-tab-dot" data-state={state} />
+                        {/* Each dot reports its OWN region: one shared `state`
+                            painted both dots with the visible tab's health, so a
+                            hidden region that was broken still showed green. */}
+                        <span className="dsm-workbuddy-xdpool-tab-dot" data-state={regionState(region)} />
                         {region === 'cn'
                           ? (t?.('row.tabCn') ?? 'CN')
                           : (t?.('row.tabGlobal') ?? 'Global')}
@@ -1060,12 +1165,28 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                   </section>}
               {flash === undefined ? null
                 : <p className="dsm-workbuddy-xdpool-note">{flash}</p>}
+              {/* The region-scoped failure, and then the card-level one for
+                  actions that are not region-scoped (a failed save or check-in).
+                  Both are shown: they describe different failures. */}
+              {regionError === undefined
+                ? null
+                : <p className="dsm-workbuddy-xdpool-error">
+                    {t?.('row.error', { message: regionError }) ?? `Pool status unavailable: ${regionError}`}
+                  </p>}
               {error === undefined ? null
                 : <p className="dsm-workbuddy-xdpool-error">
                     {t?.('row.error', { message: error }) ?? `Pool status unavailable: ${error}`}
                   </p>}
 
-              {accountCount === 0 && error === undefined
+              {loading
+                ? <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-empty">
+                    <p className="dsm-workbuddy-xdpool-empty-title">
+                      {t?.('row.regionLoading') ?? 'Loading this region…'}
+                    </p>
+                  </section>
+                : null}
+
+              {accountCount === 0 && regionError === undefined && !loading
                 ? <section className="dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-empty">
                     <p className="dsm-workbuddy-xdpool-empty-title">
                       {t?.('row.regionEmptyTitle', { region: regionLabel })

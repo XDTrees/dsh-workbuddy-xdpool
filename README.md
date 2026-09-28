@@ -120,7 +120,7 @@ dsh plugin --profile desktop add dsh-workbuddy-xdpool
 ```sh
 pnpm install
 pnpm build              # 产出 lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
-pnpm test               # 138 项测试
+pnpm test               # 262 项测试
 pnpm typecheck          # 宿主侧类型检查
 pnpm typecheck:client   # 客户端类型检查
 ```
