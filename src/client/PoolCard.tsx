@@ -22,6 +22,7 @@ import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_ACCOUNT_IGNORE_PATH,
   POOL_AUTOMATION_RUN_PATH,
+  POOL_CATALOG_REFRESH_PATH,
   POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
   POOL_RESET_COOLDOWN_PATH,
@@ -313,6 +314,8 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [cooldownBusy, setCooldownBusy] = useState(false)
+  /** Model-catalog refresh in flight (separate from the account rescan). */
+  const [catalogBusy, setCatalogBusy] = useState(false)
   const [automationBusy, setAutomationBusy] = useState(false)
   /** The automation job currently running from the card, if any. */
   const [automationRun, setAutomationRun] = useState<AutomationJobKind | 'all' | undefined>(undefined)
@@ -401,6 +404,41 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (mounted.current) setBusy(false)
+    }
+  }
+
+  /**
+   * Re-fetch the upstream model catalog for both regions.
+   *
+   * Its own action, and its own BUTTON, because the account rescan beside it
+   * could not do this job: when the startup fetch failed, the picker held the
+   * shorter built-in list and "detect accounts again" left it untouched, so the
+   * only recovery was restarting DSH. Users reasonably assumed the button
+   * covered both.
+   */
+  const refreshCatalog = async (): Promise<void> => {
+    setCatalogBusy(true)
+    setFlash(undefined)
+    try {
+      const response = await fetch(POOL_CATALOG_REFRESH_PATH, {
+        method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin',
+      })
+      const body = await response.json() as {
+        regions?: Record<string, { source?: string; models?: number }>
+        error?: string
+      }
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      await refresh(activeRegion)
+      const here = body.regions?.[activeRegion]
+      if (mounted.current) {
+        setFlash(here?.source === 'live'
+          ? (t?.('row.catalogRefreshed', { count: here.models ?? 0 }) ?? '')
+          : (t?.('row.catalogRefreshOffline') ?? ''))
+      }
+    } catch (cause: unknown) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (mounted.current) setCatalogBusy(false)
     }
   }
 
@@ -1194,6 +1232,29 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         </p>
                       </div>
                       <div className="dsm-workbuddy-xdpool-models-actions">
+                        {/* The offline notice sits with the buttons, not in a
+                            tooltip: the failure it reports is "you are looking
+                            at a SHORTER list than the gateway offers", and a
+                            user who cannot see that will file it as a bug about
+                            missing models. */}
+                        {status?.catalogSource !== 'fallback' ? null
+                          : <span
+                              className="dsm-workbuddy-xdpool-catalog-offline"
+                              title={status.catalogError ?? undefined}
+                            >
+                              {t?.('row.catalogOffline') ?? 'built-in list (offline)'}
+                            </span>}
+                        <button
+                          type="button"
+                          className="dsm-btn dsm-btn-outline"
+                          disabled={catalogBusy}
+                          onClick={() => { void refreshCatalog() }}
+                          title={t?.('row.catalogRefreshHint') ?? 'Fetch the model list again from WorkBuddy'}
+                        >
+                          {catalogBusy
+                            ? (t?.('row.catalogRefreshing') ?? 'Fetching…')
+                            : (t?.('row.catalogRefresh') ?? 'Refresh models')}
+                        </button>
                         <button
                           type="button"
                           className="dsm-btn dsm-btn-outline"

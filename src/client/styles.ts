@@ -191,6 +191,9 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-model-budget input{margin:0;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
 .dsm-workbuddy-xdpool-models-heading{display:flex;flex-direction:column;gap:2px;min-width:0}
 .dsm-workbuddy-xdpool-models-actions{display:flex;align-items:center;gap:8px;flex:none}
+/* "Built-in list (offline)" chip: a warning tint, since the user is looking at
+   a SHORTER roster than the gateway offers and may wonder where models went. */
+.dsm-workbuddy-xdpool-catalog-offline{flex:none;padding:2px 9px;border-radius:999px;font-size:11px;line-height:17px;font-weight:600;background:var(--dsw-alias-state-warning-subtle,rgba(217,119,6,.15));color:var(--dsw-alias-state-warning-primary,#d97706);white-space:nowrap}
 
 
 /* Automation: run-now button and the per-job progress line. */

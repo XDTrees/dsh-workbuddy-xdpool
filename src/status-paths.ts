@@ -15,6 +15,16 @@
 export const POOL_STATUS_PATH = '/plugins/dsh-workbuddy-xdpool/status'
 /** Plugin-owned local account rescan endpoint (re-read desktop snapshots). */
 export const POOL_RESCAN_PATH = '/plugins/dsh-workbuddy-xdpool/accounts/rescan'
+/**
+ * Re-fetch the upstream model catalog for both regions.
+ *
+ * Separate from {@link POOL_RESCAN_PATH} because they answer different
+ * questions, and conflating them misled users: "detect accounts again" only
+ * re-read the desktop snapshots, so it could NOT recover a model list that had
+ * fallen back to the static table after a failed startup fetch. The only way
+ * out was restarting DSH.
+ */
+export const POOL_CATALOG_REFRESH_PATH = '/plugins/dsh-workbuddy-xdpool/models/refresh'
 /** Plugin-owned cooldown reset endpoint (clear all 429 cooldowns). */
 export const POOL_RESET_COOLDOWN_PATH = '/plugins/dsh-workbuddy-xdpool/cooldowns/reset'
 /** Plugin-owned daily check-in action endpoint (claim today's reward). */
@@ -289,7 +299,27 @@ export interface PoolWebStatus {
    * read, which is the whole point of the feature.
    */
   ignored: readonly PoolWebIgnoredAccount[]
+  /**
+   * Where THIS region's model list came from.
+   *
+   * `live` = fetched from the gateway (or a cached fetch survived a restart).
+   * `fallback` = the built-in static table, which means the startup fetch
+   * failed and the user is looking at a SHORTER, possibly stale roster — models
+   * they had enabled can be missing from it entirely.
+   *
+   * Surfaced because the failure used to be log-only: the picker quietly lost
+   * half its entries and nothing on screen said why, so it read as "the plugin
+   * deleted my models".
+   */
+  catalogSource?: PoolWebCatalogSource
+  /** When the live catalog was last successfully fetched, ISO. */
+  catalogUpdatedAt?: string
+  /** Why the last fetch failed, when it did. Redacted and length-capped. */
+  catalogError?: string
 }
+
+/** How a region's model list was obtained. */
+export type PoolWebCatalogSource = 'live' | 'fallback'
 
 /** One automation job's last run, as shown on the card. */
 export interface PoolWebAutomationJob {
