@@ -85,42 +85,58 @@ async function render(doc: Record<string, unknown>): Promise<string> {
   return container.textContent ?? ''
 }
 
+/**
+ * Render, then open the single account's detail dialog.
+ *
+ * Per-model usage is deliberately NOT on the page any more — a row carries the
+ * account's name and balance, and the dialog carries everything else. So these
+ * assertions read the dialog, which is where the user reads them too.
+ */
+async function renderWithAccountDialog(doc: Record<string, unknown>): Promise<string> {
+  await render(doc)
+  const row = container.querySelector<HTMLElement>('.dsm-workbuddy-xdpool-row')
+  if (row === null) throw new Error('no account row rendered')
+  act(() => { row.click() })
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) })
+  return container.textContent ?? ''
+}
+
 describe('usage row on the pool card', () => {
   it('shows the model and request count with tokens when reported', async () => {
-    const text = await render(statusWithUsage([
+    const text = await renderWithAccountDialog(statusWithUsage([
       { modelId: 'deepseek-v4.1-flash', requests: 3, tokens: 1500, tokensReported: true },
     ]))
 
     expect(text).toContain('今日用量')
     expect(text).toContain('deepseek-v4.1-flash')
-    expect(text).toContain('3 次请求')
-    expect(text).toContain('1,500 tokens')
+    expect(text).toContain('3 次')
+    expect(text).toContain('1,500 tok')
   })
 
   it('shows the request count but claims no token figure when the gateway reported none', async () => {
-    const text = await render(statusWithUsage([
+    const text = await renderWithAccountDialog(statusWithUsage([
       { modelId: 'hy3', requests: 2, tokens: 0, tokensReported: false },
     ]))
 
     expect(text).toContain('hy3')
-    expect(text).toContain('2 次请求')
+    expect(text).toContain('2 次')
     // The whole point: no invented "0 tokens" next to a real request count.
-    expect(text).not.toContain('tokens')
+    expect(text).not.toContain('tok')
   })
 
   it('renders one row per model', async () => {
-    const text = await render(statusWithUsage([
+    const text = await renderWithAccountDialog(statusWithUsage([
       { modelId: 'hy3', requests: 1, tokens: 0, tokensReported: false },
       { modelId: 'glm-5.2', requests: 4, tokens: 200, tokensReported: true },
     ]))
 
     expect(text).toContain('hy3')
     expect(text).toContain('glm-5.2')
-    expect(text).toContain('4 次请求')
+    expect(text).toContain('4 次')
   })
 
   it('stays quiet when nothing was recorded, rather than printing zeroes', async () => {
-    const text = await render(statusWithUsage(undefined))
+    const text = await renderWithAccountDialog(statusWithUsage(undefined))
     expect(text).not.toContain('今日用量')
   })
 })

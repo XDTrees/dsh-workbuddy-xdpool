@@ -289,15 +289,24 @@ describe('the settings page renders on both kernel lines', () => {
     // the whole body renders immediately.
     const card = readFileSync(new URL('../src/client/PoolCard.tsx', import.meta.url), 'utf8')
     expect(card).not.toMatch(/\{open\s*$/)
-    expect(card).not.toContain('setOpen')
-    expect(card).not.toContain('aria-expanded')
+    // The old fold was a boolean `open` gating the whole body. Dialogs are a
+    // different thing: they open over the page and the page keeps rendering.
+    // So the ban is on the BODY-level gate, not on every state setter.
+    expect(card).not.toMatch(/\bconst \[open, setOpen\]/)
+    expect(card).not.toMatch(/if \(!open\) return/)
     expect(card).not.toContain('dsm-plugin-card')
-    // The body renders directly inside the page now, split into cards: one per
-    // feature area, plus the status card that carries the region switch.
+    // The body renders directly inside the page now: a toolbar, then the
+    // accounts and models columns side by side. Everything secondary moved
+    // into a dialog, which is a click, not a fold — the page body itself has
+    // no collapsed state that hides data.
     expect(card).toContain('dsm-workbuddy-xdpool-page')
-    expect(card).toMatch(/dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-status/)
-    expect(card).toMatch(/dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-accounts/)
-    expect(card).toMatch(/dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-models/)
+    expect(card).toMatch(/dsm-workbuddy-xdpool-card dsm-workbuddy-xdpool-col/)
+    expect(card).toContain('dsm-workbuddy-xdpool-grid')
+    expect(card).toContain('dsm-workbuddy-xdpool-bar')
+    // `aria-expanded` survives on ONE control only: the "how to sign in" help
+    // disclosure inside the empty state. That discloses instructions, never
+    // pool data, and it is the only thing on the page allowed to fold.
+    expect(card.match(/aria-expanded/g) ?? []).toHaveLength(1)
   })
 
   it('polls while the page is mounted instead of while it is expanded', () => {
