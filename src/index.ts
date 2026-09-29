@@ -454,6 +454,50 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
+   * Fetch and install the model catalog for both regions.
+   *
+   * Each region is isolated AND independently retried: they are separate
+   * gateways on separate hosts, so one being unreachable must not degrade the
+   * other. The failure this exists for is a startup network hiccup — several
+   * components reporting `fetch failed` inside the same second, with the next
+   * request succeeding 0.7s later — which used to cost the user their model
+   * list for the whole session, with no way back short of a DSH restart.
+   *
+   * Returns what each region ended up with, so the card can confirm a manual
+   * refresh actually changed something.
+   */
+  const seedCatalog = async (): Promise<{
+    regions: Record<WorkBuddyRegion, { source: 'live' | 'fallback'; models: number; error?: string }>
+  }> => {
+    const accounts = await core.pool.scan()
+    const regions = {} as Record<WorkBuddyRegion, { source: 'live' | 'fallback'; models: number; error?: string }>
+    for (const region of ['cn', 'global'] as const) {
+      try {
+        const credential = accounts.find(account => regionOf(account.credential.domain) === region)?.credential
+        if (credential === undefined) {
+          ctx.logger.info?.(`dsh-workbuddy-xdpool: no ${region} account yet; keeping the static ${region} catalog`)
+          regions[region] = { source: 'fallback', models: core.catalogs[region].current().length }
+          continue
+        }
+        const models = await core.client.fetchModels(credential)
+        core.catalogs[region].updateFromUpstream(models)
+        ctx.logger.info?.(`dsh-workbuddy-xdpool: ${region} catalog seeded with ${models.length} model(s)`)
+        regions[region] = { source: 'live', models: models.length }
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        core.catalogs[region].noteFetchFailure(message)
+        ctx.logger.warn(`dsh-workbuddy-xdpool: ${region} model catalog unavailable; using static fallback`, error)
+        regions[region] = {
+          source: core.catalogs[region].currentSource(),
+          models: core.catalogs[region].current().length,
+          error: message,
+        }
+      }
+    }
+    return { regions }
+  }
+
+  /**
    * Invalidate the provider snapshot so the picker re-reads the catalog.
    *
    * Seeded with a no-op and reassigned once the adapters exist. The settings
@@ -847,6 +891,14 @@ function canonicalJson(value: unknown): string {
       if (!ignored) await core.pool.scan()
     },
     ignoredAccounts: () => ignoredAccounts,
+    // Re-fetch both regions' catalogs on demand. This is what the card's
+    // "refresh models" button calls; before it existed, a startup fetch failure
+    // left the static (shorter) roster in place until DSH was restarted.
+    refreshCatalog: async () => {
+      const result = await seedCatalog()
+      invalidateCatalog()
+      return result
+    },
   }))
   api = {
     ...core,
@@ -855,6 +907,12 @@ function canonicalJson(value: unknown): string {
     async rescan() {
       const accounts = await core.pool.scan()
       ctx.logger.info?.(`dsh-workbuddy-xdpool: discovered ${accounts.length} account(s)`)
+      // Also re-fetch the catalog. "Detect accounts again" is the button users
+      // reach for when the model list looks wrong, and re-scanning accounts
+      // alone could never fix a list that had fallen back to the static table —
+      // so the obvious remedy silently did nothing.
+      await seedCatalog()
+      invalidateCatalog()
       return accounts.length
     },
     async status(includeCredits = false) {
@@ -1020,21 +1078,7 @@ function canonicalJson(value: unknown): string {
         // advertise different rosters, so seeding both from accounts[0] gave the
         // global provider the CN model list (and vice versa). A region with no
         // signed-in account keeps its static fallback.
-        const accounts = await core.pool.scan()
-        for (const region of ['cn', 'global'] as const) {
-          try {
-            const credential = accounts.find(account => regionOf(account.credential.domain) === region)?.credential
-            if (credential === undefined) {
-              ctx.logger.info?.(`dsh-workbuddy-xdpool: no ${region} account yet; keeping the static ${region} catalog`)
-              continue
-            }
-            const models = await core.client.fetchModels(credential)
-            core.catalogs[region].updateFromUpstream(models)
-            ctx.logger.info?.(`dsh-workbuddy-xdpool: ${region} catalog seeded with ${models.length} model(s)`)
-          } catch (error: unknown) {
-            ctx.logger.warn(`dsh-workbuddy-xdpool: ${region} model catalog unavailable; using static fallback`, error)
-          }
-        }
+        await seedCatalog()
         invalidateCatalog()
       })().catch((error: unknown) => {
         ctx.logger.warn('dsh-workbuddy-xdpool: account catalog seed failed', error)

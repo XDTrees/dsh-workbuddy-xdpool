@@ -7,8 +7,7 @@
  * two gateways advertise different model ids, so the international tab showed
  * the domestic roster whenever the live `/v3/config` fetch had not succeeded
  * yet (first paint, fresh install, gateway briefly unreachable): it invented
- * models the global gateway never served (`deepseek-v4-pro`,
- * `deepseek-v4-flash`, `minimax-m3`, `glm-5.1`) and dropped the ones it does
+ * models the global gateway never served and dropped the ones it does
  * (`Balanced`, `Primary`, `Ultimate`, `GPT-6-Astra`, `GPT-5.6-*`, `Grok-4.7`,
  * `Gemini-3.5-Flash`). That is the "国际版模型完全不对" report.
  *
@@ -30,13 +29,27 @@ import {
 
 /** Ids the global gateway advertises and the domestic one does not. */
 const GLOBAL_ONLY = [
-  'balanced-model', 'primary-model', 'deep-model', 'default-model',
+  'balanced-model', 'primary-model', 'deep-model', 'default-model', 'fast-model',
   'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4',
-  'grok-4.7', 'gemini-3.5-flash', 'kimi-k2.6', 'kimi-k2.8-preview', 'deepseek-v4.1-flash',
+  'grok-4.7', 'gemini-3.5-flash', 'kimi-k3',
 ]
 
 /** Ids the domestic gateway advertises and the global one does not. */
-const CN_ONLY = ['deepseek-v4-pro', 'deepseek-v4-flash', 'minimax-m3', 'glm-5.1']
+const CN_ONLY = [
+  'deepseek-v4-pro', 'deepseek-v4-flash', 'minimax-m3', 'glm-5.1',
+  'glm-5v-turbo', 'hy3-x', 'kimi-k3-1', 'kimi-k2.7', 'auto',
+]
+
+/**
+ * Ids BOTH gateways serve under the same name.
+ *
+ * These are the ones that made a naive "global-only" list wrong: the domestic
+ * roster was rebuilt from the live endpoint in 1.7.3 and it advertises
+ * `kimi-k2.6`, `kimi-k2.8-preview` and `deepseek-v4.1-flash` too. Treating them
+ * as region-exclusive would fail against real gateway data, so they are
+ * asserted as shared instead.
+ */
+const SHARED = ['kimi-k2.6', 'kimi-k2.8-preview', 'deepseek-v4.1-flash']
 
 describe('region model fallbacks', () => {
   it('keeps the two rosters distinct', () => {
@@ -52,6 +65,10 @@ describe('region model fallbacks', () => {
     for (const id of CN_ONLY) {
       expect(cn.has(id), `${id} must be in the CN fallback`).toBe(true)
       expect(global.has(id), `${id} must NOT be in the global fallback`).toBe(false)
+    }
+    for (const id of SHARED) {
+      expect(cn.has(id), `${id} is served by BOTH gateways`).toBe(true)
+      expect(global.has(id), `${id} is served by BOTH gateways`).toBe(true)
     }
   })
 

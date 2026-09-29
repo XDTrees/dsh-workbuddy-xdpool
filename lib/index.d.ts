@@ -288,6 +288,13 @@ interface UpstreamClientOptions {
   fetchImpl?: typeof fetch;
   /** Client version string sent to the upstream. */
   clientVersion?: string;
+  /**
+   * Override the catalog-fetch backoff, in milliseconds.
+   *
+   * Tests set this to `[]` (or tiny values) so a retry case does not spend real
+   * seconds sleeping. Production uses {@link CATALOG_RETRY_BACKOFF_MS}.
+   */
+  catalogRetryBackoffMs?: readonly number[];
 }
 /** Region for a login domain; an empty domain means CN (matching upstream tooling). */
 /** The two gateways WorkBuddy serves: the domestic one and the international one. */
@@ -421,6 +428,19 @@ export declare function buddyAppEvents(buddyId: string, buddyName: string): Reco
 export declare class WorkBuddyUpstreamClient {
   private readonly fetchImpl;
   private readonly clientVersion;
+  /** Backoff ladder for `fetchModels`; empty means a single attempt. */
+  private readonly catalogRetryBackoffMs;
+  /**
+   * Optional logger for retry notices.
+   *
+   * Set by the host so a retry is visible in the log with its attempt count —
+   * without it, a retry that eventually succeeds is invisible, and an operator
+   * debugging "why was the catalog slow" has nothing to look at.
+   */
+  logger: {
+    warn?(...args: unknown[]): void;
+    info?(...args: unknown[]): void;
+  } | undefined;
   constructor(options?: UpstreamClientOptions);
   /**
    * Normalize an OpenAI chat-completions body for the WorkBuddy upstream:
@@ -467,6 +487,16 @@ export declare class WorkBuddyUpstreamClient {
    * below is common to the two branches.
    */
   fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]>;
+  /**
+   * One catalog attempt, without retries.
+   *
+   * Split out so {@link fetchModels} can retry it: the failure this guards
+   * against is a startup network hiccup, where several independent components
+   * see `fetch failed` inside the same second and the very next request
+   * succeeds — exactly the case a single attempt turns into "the user's model
+   * list is missing half its entries for the rest of the session".
+   */
+  private fetchModelsOnce;
   /** Read-only credits query, aggregated by package. Does not consume credits. */
   fetchCredits(credential: WorkBuddyCredential): Promise<WorkBuddyCredits>;
   /** Query today's check-in status without changing account state. */
@@ -1063,6 +1093,389 @@ export declare class WorkBuddyAccountPool {
   };
 }
 //#endregion
+//#region src/status-paths.d.ts
+/**
+ * Node-free constants and types shared by the Host and browser halves of the
+ * WorkBuddy XD Pool settings card.
+ *
+ * Pool's runtime state already lives in `src/status.ts` (`buildStatus` /
+ * `WorkBuddyStatus`); this module only carves the cross-domain (Host→browser)
+ * JSON document into a shape that stays token-free and matches what the
+ * browser card renders. Route paths are plugin-owned and mounted on the Host's
+ * same-origin web server (see `src/web-status.ts`).
+ *
+ * @module dsh-workbuddy-xdpool/status-paths
+ */
+/** Plugin-owned read-only pool status endpoint (account rows + models + shim). */
+export declare const POOL_STATUS_PATH = "/plugins/dsh-workbuddy-xdpool/status";
+/** Plugin-owned local account rescan endpoint (re-read desktop snapshots). */
+export declare const POOL_RESCAN_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/rescan";
+/** Plugin-owned cooldown reset endpoint (clear all 429 cooldowns). */
+export declare const POOL_RESET_COOLDOWN_PATH = "/plugins/dsh-workbuddy-xdpool/cooldowns/reset";
+/** Plugin-owned daily check-in action endpoint (claim today's reward). */
+export declare const POOL_CHECKIN_PATH = "/plugins/dsh-workbuddy-xdpool/checkin";
+/** Plugin-owned model-selection save endpoint (writes the settings section). */
+export declare const POOL_MODELS_SAVE_PATH = "/plugins/dsh-workbuddy-xdpool/models/save";
+/**
+ * Throw one account out of the pool for good, or take it back.
+ *
+ * Separate from the disable route because the semantics differ: disabling is a
+ * rotation preference the account survives, ignoring survives the account.
+ */
+export declare const POOL_ACCOUNT_IGNORE_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/ignored";
+/** Run one automation job immediately, so the card can verify it on demand. */
+export declare const POOL_AUTOMATION_RUN_PATH = "/plugins/dsh-workbuddy-xdpool/automation/run";
+/** Set or clear one account's reserved-credit floor. */
+export declare const POOL_CREDIT_RESERVE_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/credit-reserve";
+/** One account's row, token-free. */
+interface PoolWebAccount {
+  id: string;
+  label: string;
+  nickname?: string;
+  domain: string;
+  /** ISO timestamp; absent when the credential carries no expiry. */
+  expiresAt?: string;
+  /** Account-wide cooldown (every model blocked); only after a no-model penalize. */
+  cooling: boolean;
+  /** ISO timestamp when the account-wide 429 cooldown lifts; only while cooling. */
+  cooldownUntil?: string;
+  /**
+   * Per-model cooldowns currently active. The account is NOT `cooling` while a
+   * model is limited — its other models still serve — but each entry tells the
+   * card which model is out until when (e.g. `hy4-preview` cooling to 10:14,
+   * `hy3` normal).
+   */
+  modelCooldowns?: ReadonlyArray<{
+    modelId: string;
+    until: string;
+  }>;
+  /**
+   * Whether the user switched this account off. A disabled account never
+   * serves a request, but it stays listed so the card can switch it back on.
+   */
+  disabled: boolean;
+  rateLimitHits: number;
+  /**
+   * Credits the user asked to keep for this account. The pool stops picking the
+   * account once its balance reaches the reserve, so this many credits survive.
+   * 0 means the account may be spent down as before.
+   */
+  creditReserve: number;
+  /**
+   * Whether the account is held back purely by its reserve right now. Kept
+   * distinct from `cooling`: a reserved account is healthy and simply
+   * protected, which is a different thing to tell the user than rate-limited.
+   */
+  reserved: boolean;
+  /**
+   * What the automation earned for this account today. Absent when it earned
+   * nothing (or the automation never ran for it), so the card can stay quiet
+   * instead of printing a row of zeroes.
+   */
+  automationToday?: PoolWebAutomationEarnings;
+  /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
+  lastUsedAt?: string;
+  /** Aggregated credit summary for the account, read-only. */
+  credits?: PoolWebCredits;
+  creditsError?: string;
+  /**
+   * Today's check-in state for this account, read-only. Present only when the
+   * per-account check-in probe succeeded and the program is active. The card
+   * renders one claim button per account, so a multi-account pool can collect
+   * every account's daily reward without switching accounts by hand.
+   */
+  checkin?: PoolWebCheckin;
+  checkinError?: string;
+}
+/** One credit package (as surfaced by the pool's upstream client), node-free. */
+interface PoolWebCreditPackage {
+  packageName: string;
+  remain?: number;
+  size?: number;
+  /** CapacityType 4 — refreshed each cycle and never expires. */
+  monthly?: boolean;
+  /** Next cycle refresh point, ms. */
+  cycleRefreshMs?: number;
+  /** One-off expiry, ms. */
+  expiresAtMs?: number;
+}
+/** Aggregated credit answer the card renders under one account. */
+interface PoolWebCredits {
+  total?: number;
+  packages: readonly PoolWebCreditPackage[];
+  /** Credits expiring within 3 days. */
+  expiringSoon?: number;
+  /** When the nearest package expires, ms. */
+  nearestExpiryMs?: number;
+}
+/**
+ * Daily check-in state the card renders under one account's credits. Mirrors
+ * the upstream activity endpoint, minus anything the browser does not need.
+ */
+interface PoolWebCheckin {
+  /** The activity is running; a claim button is offered only while true. */
+  active: boolean;
+  /** Already collected today — the button renders as a done state. */
+  todayCheckedIn: boolean;
+  /** Consecutive days checked in. */
+  streakDays: number;
+  /** Credits a single day grants. */
+  dailyCredit: number;
+  /** Credits collected today (0 before claiming). */
+  todayCredit: number;
+  /** Today is a streak milestone day. */
+  isStreakDay: boolean;
+  /** The day count the next milestone lands on. */
+  nextStreakDay: number;
+  /** Bonus credits granted on a milestone day. */
+  streakBonusCredit: number;
+}
+/** Result of one claim, so the card can confirm what was collected. */
+interface PoolWebCheckinClaim {
+  credit: number;
+  streakDays: number;
+  isStreakDay: boolean;
+}
+/** One model the pool exposes to DSH, with cost / free tags. */
+interface PoolWebModel {
+  id: string;
+  name: string;
+  /** Relative credit cost, e.g. 0.79 for x0.79. */
+  multiplier?: number;
+  /** Upstream tags: free / limited-free / night-discount. */
+  tags?: readonly string[];
+  /** Effective image support after the user's per-model toggle. */
+  supportsImages: boolean;
+  /** Effective context window after the user's budget cap. */
+  contextWindow: number;
+  /** The window the upstream advertises, before any cap. */
+  nativeContextWindow: number;
+  /** Upstream output ceiling, so the card can show both limits. */
+  maxOutputTokens: number;
+  /** Thinking levels the upstream declares, when it declares any. */
+  supportedEfforts?: readonly string[];
+  /** Whether this model is currently enabled in the picker. */
+  enabled: boolean;
+}
+/**
+ * Body of the account ignore/unignore route: exactly one account per request.
+ *
+ * `ignored: true` throws the account out of the pool for good (its credential is
+ * not even read on the next scan, and a fresh desktop sign-in will not bring it
+ * back). `false` restores it, at which point the next scan discovers it again.
+ */
+interface PoolWebAccountIgnore {
+  /** Pool account id, as reported in `PoolWebAccount.id`. */
+  accountId: string;
+  /** `true` ignores the account permanently; `false` takes it back. */
+  ignored: boolean;
+}
+/**
+ * One account the user has thrown out of the pool.
+ *
+ * Kept on the status document so the card can list what was ignored and offer a
+ * way back: without that, "ignored" is a one-way door the user cannot inspect or
+ * undo from the UI, which is how a hidden list becomes a support burden.
+ */
+interface PoolWebIgnoredAccount {
+  /** Pool account id, the same key `PoolWebAccount.id` uses. */
+  id: string;
+  /** Human label captured at ignore time, so the row reads without a rescan. */
+  label: string;
+  /** ISO timestamp of when it was ignored. */
+  ignoredAt: string;
+}
+interface PoolWebModelSelection {
+  /** Absent = every model is enabled. */
+  enabledModelIds?: readonly string[];
+  /** Absent = each model follows its upstream image capability. */
+  imageModelIds?: readonly string[];
+  /** Per-model context-window cap, keyed by model id. */
+  contextBudgets?: Readonly<Record<string, number | undefined>>;
+}
+/** The JSON document the pool card renders. */
+interface PoolWebStatus {
+  ok: boolean;
+  accounts: readonly PoolWebAccount[];
+  /** The next account the pool would use (rotation cursor). */
+  activeAccountId?: string;
+  cooling: number;
+  models: readonly PoolWebModel[];
+  /** The saved selection the card diffs its draft against. */
+  selection: PoolWebModelSelection;
+  /**
+   * How the pool spreads requests: `priority` drains one account before
+   * moving on, `round-robin` splits the spend evenly.
+   */
+  distribution: PoolDistribution;
+  /** Which region this document describes. */
+  region: PoolRegion;
+  /** Every region holding at least one account, in display order. */
+  regions: readonly PoolRegion[];
+  shim: {
+    running: boolean;
+    baseUrl?: string;
+  };
+  /** Daily-points automation state, so the card can show what ran and when. */
+  automation: PoolWebAutomation;
+  /** Per-account credit floors currently in force, keyed by account id. */
+  creditReserves: Readonly<Record<string, number>>;
+  /**
+   * Accounts thrown out of the pool, in the order they were ignored.
+   *
+   * Reported so the card can show the list and offer a way back. These accounts
+   * are NOT in `accounts`: they are filtered out before their credentials are
+   * read, which is the whole point of the feature.
+   */
+  ignored: readonly PoolWebIgnoredAccount[];
+  /**
+   * Where THIS region's model list came from.
+   *
+   * `live` = fetched from the gateway (or a cached fetch survived a restart).
+   * `fallback` = the built-in static table, which means the startup fetch
+   * failed and the user is looking at a SHORTER, possibly stale roster — models
+   * they had enabled can be missing from it entirely.
+   *
+   * Surfaced because the failure used to be log-only: the picker quietly lost
+   * half its entries and nothing on screen said why, so it read as "the plugin
+   * deleted my models".
+   */
+  catalogSource?: PoolWebCatalogSource;
+  /** When the live catalog was last successfully fetched, ISO. */
+  catalogUpdatedAt?: string;
+  /** Why the last fetch failed, when it did. Redacted and length-capped. */
+  catalogError?: string;
+}
+/** How a region's model list was obtained. */
+type PoolWebCatalogSource = 'live' | 'fallback';
+/** One automation job's last run, as shown on the card. */
+interface PoolWebAutomationJob {
+  /** `YYYY-MM-DD` of the last run in this process, if it has run. */
+  lastRunDate?: string;
+  /**
+   * Epoch ms of the last run, so the card can show the TIME.
+   *
+   * Carried because a date-only stamp cannot tell one run from eight: every
+   * repeat inside the same day rendered as the identical `2026-09-28 · 2`,
+   * which is what kept a "re-runs every hour" defect invisible on the card.
+   */
+  lastRunAtMs?: number;
+  /**
+   * Configured slots consumed today, as `YYYY-MM-DDTHH`.
+   *
+   * Shown so "which of today's hours already ran" is answerable at a glance
+   * rather than inferred from a counter.
+   */
+  firedSlots?: readonly string[];
+  /** Accounts that finished without error on the last run. */
+  ok: number;
+  /** Accounts that failed on the last run (each one skipped, the run continued). */
+  failed: number;
+  /** Credits claimed by the task job on the last run. */
+  credit: number;
+  /** Energy claimed by the task job on the last run. */
+  energy: number;
+  /** Tasks claimed by the task job on the last run. */
+  claimed: number;
+  /** One-line summary of the last run. */
+  message?: string;
+  /**
+   * What the last run actually did, in the words of the task board.
+   *
+   * `message` is a count; this is the list a person can check off, which is
+   * what turns a row from "it ran" into "it did the things I care about".
+   */
+  detail?: readonly string[];
+  /** A pending milestone worth naming, e.g. the next streak tier countdown. */
+  progress?: string;
+}
+/**
+ * Automation block on the status document.
+ *
+ * Carries the schedule and each job's last outcome so the card can answer
+ * "is it on, when does it run, and what did it last do" without reaching into
+ * the scheduler itself.
+ */
+interface PoolWebAutomation {
+  /** Master switch, mirrored from the saved config. */
+  enabled: boolean;
+  /** Whether the loop is currently running. */
+  running: boolean;
+  /** Configured hours per job, so the card can show the schedule. */
+  checkinHours: readonly number[];
+  reportHours: readonly number[];
+  taskHours: readonly number[];
+  streakHours: readonly number[];
+  travelHours: readonly number[];
+  jobs: {
+    checkin: PoolWebAutomationJob;
+    report: PoolWebAutomationJob;
+    tasks: PoolWebAutomationJob;
+    streak: PoolWebAutomationJob;
+    travel: PoolWebAutomationJob;
+  };
+  /** Claimable tasks seen on the most recent task pass, across accounts. */
+  claimableSeen: number;
+  /**
+   * Whether a manual run is in flight. The card polls this to know when to
+   * stop showing progress and report the result.
+   */
+  runInProgress: boolean;
+  /**
+   * Per-account credits/energy/tasks the automation earned TODAY, keyed by
+   * account id. An account that earned nothing is simply absent, so the card
+   * can say "nothing yet" instead of showing a bare zero.
+   */
+  earningsToday: Readonly<Record<string, PoolWebAutomationEarnings>>;
+}
+/** Today's automation take for one account. */
+interface PoolWebAutomationEarnings {
+  /** Credits claimed from the task centre today. */
+  credit: number;
+  /** Energy claimed from the task centre today. */
+  energy: number;
+  /** Tasks claimed today. */
+  claimed: number;
+  /** Credits collected from check-in today. */
+  checkinCredit: number;
+  /** Credits from streak redemption and the lottery today. */
+  bonusCredit: number;
+  /** Credits from buddy adoption and the travel loop today. */
+  travelCredit: number;
+  /** Local date the counters belong to (YYYY-MM-DD). */
+  date: string;
+}
+/**
+ * The two gateways, matching the provider ids the host registers. `cn` is the
+ * domestic gateway (`copilot.tencent.com` / `codebuddy.cn`); `global` is the
+ * international one (`workbuddy.ai`).
+ */
+type PoolRegion = 'cn' | 'global';
+/** How the pool spreads requests across its accounts. */
+type PoolDistribution = 'priority' | 'round-robin' | 'balanced';
+/**
+ * The schedule every automation job falls back to.
+ *
+ * Shared by both halves on purpose. The host uses it when a configured hour
+ * list arrives empty (the settings schema materializes "never configured" into
+ * `[]`), and the card uses it when it writes the `automation` block back, so a
+ * document that already holds an empty list is healed instead of being saved
+ * back as an unrunnable schedule.
+ *
+ * This lives here rather than in `scheduler.ts` because the browser half cannot
+ * import the host module: `scheduler.ts` pulls in `node:crypto` and the whole
+ * upstream client, none of which exists in the browser bundle. Two hand-written
+ * copies would drift, and the drift is invisible — the card would write a
+ * schedule the scheduler does not run.
+ */
+export declare const DEFAULT_AUTOMATION_HOURS: {
+  readonly checkin: readonly [9];
+  readonly report: readonly [10];
+  readonly tasks: readonly [11];
+  readonly streak: readonly [12];
+  readonly travel: readonly [9, 21];
+};
+//#endregion
 //#region src/catalog.d.ts
 /** One model the provider exposes. */
 interface WorkBuddyModelInfo {
@@ -1083,12 +1496,17 @@ interface WorkBuddyModelInfo {
  * Static fallback used before the first live catalog fetch, and whenever the
  * upstream cannot be reached.
  *
- * The multipliers are carried on purpose. Without them the provider's model
- * picker silently loses every rate and every free badge the moment the live
- * fetch fails — which reads to the user as "the plugin broke my model list"
- * rather than "the upstream is unreachable". The values are the ones the two
- * gateways actually advertise for these ids (`credits: "x0.79 credits"` and so
- * on), so a fallback row looks the same as a live one.
+ * This table is the DOMESTIC (CN) roster, and it is kept in step with what
+ * `copilot.tencent.com` actually advertises. It matters more than a "just in
+ * case" list usually would: a failed startup fetch falls back to it, and the
+ * user sees that as "half my models were deleted" — `deepseek-v4.1-flash`
+ * and friends simply vanishing from the picker, with no visible explanation.
+ *
+ * Every row below was captured from the live endpoint, INCLUDING the window
+ * sizes: the previous version carried a 32K window for `hy3` when the gateway
+ * says 192K, and listed `kimi-k3` under an id the gateway no longer uses
+ * (`kimi-k3-1`). A stale fallback is worse than a short one — it looks
+ * authoritative while being wrong.
  *
  * `multiplier: 0` is the gateways' own spelling of "free" (`credits: "x0.00"`),
  * which is what turns on the free badge.
@@ -1118,6 +1536,19 @@ export declare class WorkBuddyCatalog {
   private listeners;
   /** User's model selection. Empty object = follow the catalog unfiltered. */
   private selection;
+  /**
+   * Whether `models` came from the gateway or from the static table.
+   *
+   * Tracked so the card can SAY which it is showing. A failed fetch used to be
+   * invisible on screen: the picker simply held fewer models than before, which
+   * the user reasonably read as "the plugin deleted my models" rather than "the
+   * network hiccuped at startup".
+   */
+  private source;
+  /** When the live list last landed. */
+  private lastUpdatedAt;
+  /** Why the last fetch failed, for display. */
+  private lastError;
   current(): readonly WorkBuddyModelInfo[];
   /**
    * The models DSH should actually offer, after applying the user's selection:
@@ -1136,10 +1567,37 @@ export declare class WorkBuddyCatalog {
   applySelection(selection: ModelSelection): void;
   /** The selection currently in force, for the card's save round-trip. */
   currentSelection(): ModelSelection;
+  /**
+   * Whether this catalog is serving live data or the built-in table.
+   *
+   * `fallback` is not an error state, but it IS a degraded one: the user is
+   * looking at a shorter roster than the gateway offers, so the card says so
+   * and offers a retry instead of letting them wonder where the models went.
+   */
+  currentSource(): PoolWebCatalogSource;
+  /**
+   * When the live list last landed, if it ever did.
+   *
+   * Named `catalogUpdatedAt()` rather than `updatedAt()` because the class
+   * already had an `updatedAt` member; two members of the same name is a
+   * compile error, and the awkwardness is a useful signal that the concept is
+   * "when THIS catalog was refreshed", not a generic timestamp.
+   */
+  catalogUpdatedAt(): string | undefined;
+  /** Why the last fetch failed, if it did. */
+  lastFetchError(): string | undefined;
   onChange(listener: () => void): () => void;
   find(id: string): WorkBuddyModelInfo | undefined;
   /** Replace the catalog from the live upstream list; keeps the fallback if empty. */
   updateFromUpstream(models: readonly WorkBuddyUpstreamModel[]): void;
+  /**
+   * Record that a fetch attempt failed, leaving the current list in place.
+   *
+   * The list is deliberately NOT reset here: a refresh that fails should keep
+   * whatever working catalog is already loaded, rather than demoting a healthy
+   * session to the static table because one retry ran out.
+   */
+  noteFetchFailure(message: string): void;
   private notify;
 }
 /** The user's model selection, as stored in the settings section. */
@@ -1283,6 +1741,34 @@ interface AutomationJobState {
    * repeat tick inside the same hour is still refused.
    */
   lastRunSlot?: string;
+  /**
+   * Every configured slot consumed TODAY, as `YYYY-MM-DDTHH`.
+   *
+   * This is what actually gates a re-run, and it is a SET rather than a single
+   * slot because one field could not express the contract: a job configured for
+   * `[9, 21]` runs twice, and a single "last slot" value can only remember one
+   * of them — the second run erased the first, so the 9 o'clock candidate looked
+   * unconsumed again and the job re-fired every hour after 21:00.
+   *
+   * The values are the CONFIGURED hours that were spent, never the clock time
+   * the run happened to finish at. Storing the finish time was the original
+   * defect: the reader compared it against a configured candidate, so the two
+   * almost never matched and the gate stayed open all day.
+   *
+   * In-memory like the rest of `states`: this is a per-process record, and the
+   * catch-up design deliberately re-runs an hour that passed while DSH was
+   * closed. See `automationEarnings` for the ledger that DOES persist.
+   */
+  firedSlots?: readonly string[];
+  /**
+   * The clock slot the last run STARTED in (`YYYY-MM-DDTHH`).
+   *
+   * Separate from {@link firedSlots} on purpose: this is a throttle ("do not
+   * start twice inside the same hour"), while `firedSlots` is the schedule
+   * ledger. Conflating the two is what let a catch-up run at 13:00 erase the
+   * record of the 9 o'clock slot.
+   */
+  lastFiredHour?: string;
   /** Epoch ms of the last completed run. */
   lastRunAtMs?: number;
   /** Accounts that completed without throwing. */
@@ -1553,7 +2039,27 @@ export declare class WorkBuddyScheduler {
    * two hours still runs twice a day — but a job whose hour passed while DSH was
    * closed runs immediately on the next tick instead of waiting for tomorrow.
    */
-  private isDue;
+  /**
+   * The configured slot `kind` should consume at `now`, or undefined when none.
+   *
+   * Returns the SLOT STRING (not a boolean) because the caller must record the
+   * same value it acted on. Returning a boolean was the original bug's enabler:
+   * the tick asked "is it due", then `runJob` independently wrote "what time is
+   * it now" — and those two answers were almost never equal.
+   *
+   * CATCH-UP semantics are deliberate: a candidate fires once its hour has
+   * PASSED and its slot is still unconsumed, so a laptop that slept through
+   * 10:00 still runs the job when it wakes, on the same day.
+   *
+   * The EARLIEST unconsumed candidate wins, which is what keeps a two-hour job
+   * (`travelHours: [9, 21]`) whole: consuming the earliest due slot leaves the
+   * later one for its own hour.
+   */
+  private dueSlot;
+  /** Today's consumed slots for one job, as a set. */
+  private firedSlotsOf;
+  /** Record one consumed slot on a job's state. */
+  private consumeSlot;
   private tick;
   /** Run one job against every eligible account and record the outcome. */
   /**
@@ -1585,6 +2091,12 @@ export declare class WorkBuddyScheduler {
   private persistEarnings;
   /**
    * Run one job against every eligible account and record the outcome.
+   *
+   * `consumedSlot` is the configured slot this run spends (`dueSlot`'s answer).
+   * It is passed IN rather than recomputed here so the value recorded is exactly
+   * the value the schedule decided on — the defect this replaces wrote
+   * `slotKey(now)` instead, i.e. the clock time the run finished at, which
+   * almost never equals the configured candidate the gate had compared against.
    *
    * The task job runs in TWO passes. The first sends the event chains that light
    * up client-scored tasks; the second collects rewards. They are separate
@@ -1743,355 +2255,6 @@ export declare function formatStatus(status: WorkBuddyStatus): string;
 /** Format the per-model credit multipliers. */
 export declare function formatRates(status: WorkBuddyStatus): string;
 //#endregion
-//#region src/status-paths.d.ts
-/**
- * Node-free constants and types shared by the Host and browser halves of the
- * WorkBuddy XD Pool settings card.
- *
- * Pool's runtime state already lives in `src/status.ts` (`buildStatus` /
- * `WorkBuddyStatus`); this module only carves the cross-domain (Host→browser)
- * JSON document into a shape that stays token-free and matches what the
- * browser card renders. Route paths are plugin-owned and mounted on the Host's
- * same-origin web server (see `src/web-status.ts`).
- *
- * @module dsh-workbuddy-xdpool/status-paths
- */
-/** Plugin-owned read-only pool status endpoint (account rows + models + shim). */
-export declare const POOL_STATUS_PATH = "/plugins/dsh-workbuddy-xdpool/status";
-/** Plugin-owned local account rescan endpoint (re-read desktop snapshots). */
-export declare const POOL_RESCAN_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/rescan";
-/** Plugin-owned cooldown reset endpoint (clear all 429 cooldowns). */
-export declare const POOL_RESET_COOLDOWN_PATH = "/plugins/dsh-workbuddy-xdpool/cooldowns/reset";
-/** Plugin-owned daily check-in action endpoint (claim today's reward). */
-export declare const POOL_CHECKIN_PATH = "/plugins/dsh-workbuddy-xdpool/checkin";
-/** Plugin-owned model-selection save endpoint (writes the settings section). */
-export declare const POOL_MODELS_SAVE_PATH = "/plugins/dsh-workbuddy-xdpool/models/save";
-/**
- * Throw one account out of the pool for good, or take it back.
- *
- * Separate from the disable route because the semantics differ: disabling is a
- * rotation preference the account survives, ignoring survives the account.
- */
-export declare const POOL_ACCOUNT_IGNORE_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/ignored";
-/** Run one automation job immediately, so the card can verify it on demand. */
-export declare const POOL_AUTOMATION_RUN_PATH = "/plugins/dsh-workbuddy-xdpool/automation/run";
-/** Set or clear one account's reserved-credit floor. */
-export declare const POOL_CREDIT_RESERVE_PATH = "/plugins/dsh-workbuddy-xdpool/accounts/credit-reserve";
-/** One account's row, token-free. */
-interface PoolWebAccount {
-  id: string;
-  label: string;
-  nickname?: string;
-  domain: string;
-  /** ISO timestamp; absent when the credential carries no expiry. */
-  expiresAt?: string;
-  /** Account-wide cooldown (every model blocked); only after a no-model penalize. */
-  cooling: boolean;
-  /** ISO timestamp when the account-wide 429 cooldown lifts; only while cooling. */
-  cooldownUntil?: string;
-  /**
-   * Per-model cooldowns currently active. The account is NOT `cooling` while a
-   * model is limited — its other models still serve — but each entry tells the
-   * card which model is out until when (e.g. `hy4-preview` cooling to 10:14,
-   * `hy3` normal).
-   */
-  modelCooldowns?: ReadonlyArray<{
-    modelId: string;
-    until: string;
-  }>;
-  /**
-   * Whether the user switched this account off. A disabled account never
-   * serves a request, but it stays listed so the card can switch it back on.
-   */
-  disabled: boolean;
-  rateLimitHits: number;
-  /**
-   * Credits the user asked to keep for this account. The pool stops picking the
-   * account once its balance reaches the reserve, so this many credits survive.
-   * 0 means the account may be spent down as before.
-   */
-  creditReserve: number;
-  /**
-   * Whether the account is held back purely by its reserve right now. Kept
-   * distinct from `cooling`: a reserved account is healthy and simply
-   * protected, which is a different thing to tell the user than rate-limited.
-   */
-  reserved: boolean;
-  /**
-   * What the automation earned for this account today. Absent when it earned
-   * nothing (or the automation never ran for it), so the card can stay quiet
-   * instead of printing a row of zeroes.
-   */
-  automationToday?: PoolWebAutomationEarnings;
-  /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
-  lastUsedAt?: string;
-  /** Aggregated credit summary for the account, read-only. */
-  credits?: PoolWebCredits;
-  creditsError?: string;
-  /**
-   * Today's check-in state for this account, read-only. Present only when the
-   * per-account check-in probe succeeded and the program is active. The card
-   * renders one claim button per account, so a multi-account pool can collect
-   * every account's daily reward without switching accounts by hand.
-   */
-  checkin?: PoolWebCheckin;
-  checkinError?: string;
-}
-/** One credit package (as surfaced by the pool's upstream client), node-free. */
-interface PoolWebCreditPackage {
-  packageName: string;
-  remain?: number;
-  size?: number;
-  /** CapacityType 4 — refreshed each cycle and never expires. */
-  monthly?: boolean;
-  /** Next cycle refresh point, ms. */
-  cycleRefreshMs?: number;
-  /** One-off expiry, ms. */
-  expiresAtMs?: number;
-}
-/** Aggregated credit answer the card renders under one account. */
-interface PoolWebCredits {
-  total?: number;
-  packages: readonly PoolWebCreditPackage[];
-  /** Credits expiring within 3 days. */
-  expiringSoon?: number;
-  /** When the nearest package expires, ms. */
-  nearestExpiryMs?: number;
-}
-/**
- * Daily check-in state the card renders under one account's credits. Mirrors
- * the upstream activity endpoint, minus anything the browser does not need.
- */
-interface PoolWebCheckin {
-  /** The activity is running; a claim button is offered only while true. */
-  active: boolean;
-  /** Already collected today — the button renders as a done state. */
-  todayCheckedIn: boolean;
-  /** Consecutive days checked in. */
-  streakDays: number;
-  /** Credits a single day grants. */
-  dailyCredit: number;
-  /** Credits collected today (0 before claiming). */
-  todayCredit: number;
-  /** Today is a streak milestone day. */
-  isStreakDay: boolean;
-  /** The day count the next milestone lands on. */
-  nextStreakDay: number;
-  /** Bonus credits granted on a milestone day. */
-  streakBonusCredit: number;
-}
-/** Result of one claim, so the card can confirm what was collected. */
-interface PoolWebCheckinClaim {
-  credit: number;
-  streakDays: number;
-  isStreakDay: boolean;
-}
-/** One model the pool exposes to DSH, with cost / free tags. */
-interface PoolWebModel {
-  id: string;
-  name: string;
-  /** Relative credit cost, e.g. 0.79 for x0.79. */
-  multiplier?: number;
-  /** Upstream tags: free / limited-free / night-discount. */
-  tags?: readonly string[];
-  /** Effective image support after the user's per-model toggle. */
-  supportsImages: boolean;
-  /** Effective context window after the user's budget cap. */
-  contextWindow: number;
-  /** The window the upstream advertises, before any cap. */
-  nativeContextWindow: number;
-  /** Upstream output ceiling, so the card can show both limits. */
-  maxOutputTokens: number;
-  /** Thinking levels the upstream declares, when it declares any. */
-  supportedEfforts?: readonly string[];
-  /** Whether this model is currently enabled in the picker. */
-  enabled: boolean;
-}
-/**
- * Body of the account ignore/unignore route: exactly one account per request.
- *
- * `ignored: true` throws the account out of the pool for good (its credential is
- * not even read on the next scan, and a fresh desktop sign-in will not bring it
- * back). `false` restores it, at which point the next scan discovers it again.
- */
-interface PoolWebAccountIgnore {
-  /** Pool account id, as reported in `PoolWebAccount.id`. */
-  accountId: string;
-  /** `true` ignores the account permanently; `false` takes it back. */
-  ignored: boolean;
-}
-/**
- * One account the user has thrown out of the pool.
- *
- * Kept on the status document so the card can list what was ignored and offer a
- * way back: without that, "ignored" is a one-way door the user cannot inspect or
- * undo from the UI, which is how a hidden list becomes a support burden.
- */
-interface PoolWebIgnoredAccount {
-  /** Pool account id, the same key `PoolWebAccount.id` uses. */
-  id: string;
-  /** Human label captured at ignore time, so the row reads without a rescan. */
-  label: string;
-  /** ISO timestamp of when it was ignored. */
-  ignoredAt: string;
-}
-interface PoolWebModelSelection {
-  /** Absent = every model is enabled. */
-  enabledModelIds?: readonly string[];
-  /** Absent = each model follows its upstream image capability. */
-  imageModelIds?: readonly string[];
-  /** Per-model context-window cap, keyed by model id. */
-  contextBudgets?: Readonly<Record<string, number | undefined>>;
-}
-/** The JSON document the pool card renders. */
-interface PoolWebStatus {
-  ok: boolean;
-  accounts: readonly PoolWebAccount[];
-  /** The next account the pool would use (rotation cursor). */
-  activeAccountId?: string;
-  cooling: number;
-  models: readonly PoolWebModel[];
-  /** The saved selection the card diffs its draft against. */
-  selection: PoolWebModelSelection;
-  /**
-   * How the pool spreads requests: `priority` drains one account before
-   * moving on, `round-robin` splits the spend evenly.
-   */
-  distribution: PoolDistribution;
-  /** Which region this document describes. */
-  region: PoolRegion;
-  /** Every region holding at least one account, in display order. */
-  regions: readonly PoolRegion[];
-  shim: {
-    running: boolean;
-    baseUrl?: string;
-  };
-  /** Daily-points automation state, so the card can show what ran and when. */
-  automation: PoolWebAutomation;
-  /** Per-account credit floors currently in force, keyed by account id. */
-  creditReserves: Readonly<Record<string, number>>;
-  /**
-   * Accounts thrown out of the pool, in the order they were ignored.
-   *
-   * Reported so the card can show the list and offer a way back. These accounts
-   * are NOT in `accounts`: they are filtered out before their credentials are
-   * read, which is the whole point of the feature.
-   */
-  ignored: readonly PoolWebIgnoredAccount[];
-}
-/** One automation job's last run, as shown on the card. */
-interface PoolWebAutomationJob {
-  /** `YYYY-MM-DD` of the last run in this process, if it has run. */
-  lastRunDate?: string;
-  /** Accounts that finished without error on the last run. */
-  ok: number;
-  /** Accounts that failed on the last run (each one skipped, the run continued). */
-  failed: number;
-  /** Credits claimed by the task job on the last run. */
-  credit: number;
-  /** Energy claimed by the task job on the last run. */
-  energy: number;
-  /** Tasks claimed by the task job on the last run. */
-  claimed: number;
-  /** One-line summary of the last run. */
-  message?: string;
-  /**
-   * What the last run actually did, in the words of the task board.
-   *
-   * `message` is a count; this is the list a person can check off, which is
-   * what turns a row from "it ran" into "it did the things I care about".
-   */
-  detail?: readonly string[];
-  /** A pending milestone worth naming, e.g. the next streak tier countdown. */
-  progress?: string;
-}
-/**
- * Automation block on the status document.
- *
- * Carries the schedule and each job's last outcome so the card can answer
- * "is it on, when does it run, and what did it last do" without reaching into
- * the scheduler itself.
- */
-interface PoolWebAutomation {
-  /** Master switch, mirrored from the saved config. */
-  enabled: boolean;
-  /** Whether the loop is currently running. */
-  running: boolean;
-  /** Configured hours per job, so the card can show the schedule. */
-  checkinHours: readonly number[];
-  reportHours: readonly number[];
-  taskHours: readonly number[];
-  streakHours: readonly number[];
-  travelHours: readonly number[];
-  jobs: {
-    checkin: PoolWebAutomationJob;
-    report: PoolWebAutomationJob;
-    tasks: PoolWebAutomationJob;
-    streak: PoolWebAutomationJob;
-    travel: PoolWebAutomationJob;
-  };
-  /** Claimable tasks seen on the most recent task pass, across accounts. */
-  claimableSeen: number;
-  /**
-   * Whether a manual run is in flight. The card polls this to know when to
-   * stop showing progress and report the result.
-   */
-  runInProgress: boolean;
-  /**
-   * Per-account credits/energy/tasks the automation earned TODAY, keyed by
-   * account id. An account that earned nothing is simply absent, so the card
-   * can say "nothing yet" instead of showing a bare zero.
-   */
-  earningsToday: Readonly<Record<string, PoolWebAutomationEarnings>>;
-}
-/** Today's automation take for one account. */
-interface PoolWebAutomationEarnings {
-  /** Credits claimed from the task centre today. */
-  credit: number;
-  /** Energy claimed from the task centre today. */
-  energy: number;
-  /** Tasks claimed today. */
-  claimed: number;
-  /** Credits collected from check-in today. */
-  checkinCredit: number;
-  /** Credits from streak redemption and the lottery today. */
-  bonusCredit: number;
-  /** Credits from buddy adoption and the travel loop today. */
-  travelCredit: number;
-  /** Local date the counters belong to (YYYY-MM-DD). */
-  date: string;
-}
-/**
- * The two gateways, matching the provider ids the host registers. `cn` is the
- * domestic gateway (`copilot.tencent.com` / `codebuddy.cn`); `global` is the
- * international one (`workbuddy.ai`).
- */
-type PoolRegion = 'cn' | 'global';
-/** How the pool spreads requests across its accounts. */
-type PoolDistribution = 'priority' | 'round-robin' | 'balanced';
-/**
- * The schedule every automation job falls back to.
- *
- * Shared by both halves on purpose. The host uses it when a configured hour
- * list arrives empty (the settings schema materializes "never configured" into
- * `[]`), and the card uses it when it writes the `automation` block back, so a
- * document that already holds an empty list is healed instead of being saved
- * back as an unrunnable schedule.
- *
- * This lives here rather than in `scheduler.ts` because the browser half cannot
- * import the host module: `scheduler.ts` pulls in `node:crypto` and the whole
- * upstream client, none of which exists in the browser bundle. Two hand-written
- * copies would drift, and the drift is invisible — the card would write a
- * schedule the scheduler does not run.
- */
-export declare const DEFAULT_AUTOMATION_HOURS: {
-  readonly checkin: readonly [9];
-  readonly report: readonly [10];
-  readonly tasks: readonly [11];
-  readonly streak: readonly [12];
-  readonly travel: readonly [9, 21];
-};
-//#endregion
 //#region src/ignored.d.ts
 /** Directory holding this plugin's own state (imported snapshots, ignore list). */
 export declare const PLUGIN_DATA_DIR_NAME = ".workbuddy-xdpool";
@@ -2220,6 +2383,19 @@ interface PoolStatusRouteOptions {
    * disk, including edits made by the CLI while the card is open.
    */
   ignoredAccounts?: () => readonly PoolWebIgnoredAccount[];
+  /**
+   * Re-fetch the model catalog for BOTH regions and report what landed.
+   *
+   * Absent when the host did not wire it: the route then answers 503 rather
+   * than pretending the refresh happened.
+   */
+  refreshCatalog?: () => Promise<{
+    regions: Readonly<Record<PoolRegion, {
+      source: PoolWebCatalogSource;
+      models: number;
+      error?: string;
+    }>>;
+  }>;
 }
 /**
  * Assemble the card's status document. Per-account credits and check-in state

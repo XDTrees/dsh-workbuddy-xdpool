@@ -98,9 +98,31 @@ describe('the static fallback keeps rates and free badges', () => {
     // badge — the user sees "the rates disappeared", not "the network failed".
     const byId = new Map(FALLBACK_WORKBUDDY_MODELS.map(m => [m.id, m]))
     expect(byId.get('glm-5.3')?.multiplier).toBeCloseTo(0.79)
-    expect(byId.get('kimi-k3')?.multiplier).toBeCloseTo(1.62)
-    // hy3 is genuinely free on the global gateway.
+    // The CN gateway names this one `kimi-k3-1`; the table used to carry the
+    // stale `kimi-k3`, which no longer resolves to anything upstream.
+    expect(byId.get('kimi-k3-1')?.multiplier).toBeCloseTo(1.62)
+    // hy3 is genuinely free.
     expect(byId.get('hy3')?.multiplier).toBe(0)
+  })
+
+  it('carries the models that only exist upstream, so a failed fetch does not hide them', () => {
+    // The reported incident: a startup fetch failed, the picker fell back to
+    // this table, and `deepseek-v4.1-flash` — which the user had enabled —
+    // vanished with no explanation. A table that does not name the models
+    // people actually use turns a network hiccup into "the plugin deleted my
+    // models".
+    const ids = new Set(FALLBACK_WORKBUDDY_MODELS.map(m => m.id))
+    for (const id of ['deepseek-v4.1-flash', 'kimi-k3-1', 'minimax-m3', 'auto']) {
+      expect(ids.has(id), `${id} must be in the fallback table`).toBe(true)
+    }
+  })
+
+  it('does not carry ids the gateway has retired', () => {
+    // A stale row is worse than a missing one: it looks authoritative, so the
+    // user can select it and then get UNKNOWN_MODEL from the provider.
+    const ids = new Set(FALLBACK_WORKBUDDY_MODELS.map(m => m.id))
+    expect(ids.has('kimi-k3')).toBe(false)
+    expect(ids.has('hy4-preview-f')).toBe(false)
   })
 
   it('the fallback is what shows before the first live fetch, rates included', () => {

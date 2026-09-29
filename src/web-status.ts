@@ -28,6 +28,7 @@ import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_ACCOUNT_IGNORE_PATH,
   POOL_AUTOMATION_RUN_PATH,
+  POOL_CATALOG_REFRESH_PATH,
   POOL_CREDIT_RESERVE_PATH,
   POOL_CHECKIN_PATH,
   POOL_MODELS_SAVE_PATH,
@@ -45,6 +46,7 @@ import {
   type PoolWebModelSelection,
   type PoolWebStatus,
   type PoolWebIgnoredAccount,
+  type PoolWebCatalogSource,
   type PoolRegion,
 } from './status-paths.ts'
 
@@ -114,6 +116,15 @@ export interface PoolStatusRouteOptions {
    * disk, including edits made by the CLI while the card is open.
    */
   ignoredAccounts?: () => readonly PoolWebIgnoredAccount[]
+  /**
+   * Re-fetch the model catalog for BOTH regions and report what landed.
+   *
+   * Absent when the host did not wire it: the route then answers 503 rather
+   * than pretending the refresh happened.
+   */
+  refreshCatalog?: () => Promise<{
+    regions: Readonly<Record<PoolRegion, { source: PoolWebCatalogSource; models: number; error?: string }>>
+  }>
 }
 
 /** Redact token-like content before it crosses to the browser. */
@@ -501,6 +512,16 @@ export async function poolWebStatus(
     // machine, and the user has to be able to find an ignored account no matter
     // which tab they happen to be looking at.
     ignored: deps.ignoredAccounts?.() ?? [],
+    // Where this region's list came from. The card shows a "built-in list
+    // (offline)" note plus a retry when it is the static table, so a failed
+    // startup fetch stops looking like the plugin deleted the user's models.
+    catalogSource: deps.catalogs[region].currentSource(),
+    ...deps.catalogs[region].catalogUpdatedAt() === undefined
+      ? {}
+      : { catalogUpdatedAt: deps.catalogs[region].catalogUpdatedAt() },
+    ...deps.catalogs[region].lastFetchError() === undefined
+      ? {}
+      : { catalogError: safeMessage(deps.catalogs[region].lastFetchError()) },
   }
 }
 
@@ -524,6 +545,36 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
           const requested = new URL(req.url ?? '/', 'http://localhost').searchParams.get('region')
           const region: PoolRegion = requested === 'global' ? 'global' : 'cn'
           json(res, 200, await poolWebStatus(deps, region))
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+
+    /**
+     * Re-fetch the upstream model catalog.
+     *
+     * Its own route, distinct from the account rescan, because that is the
+     * distinction users were missing: a model list that had fallen back to the
+     * static table could not be recovered from the card AT ALL — "detect
+     * accounts again" only re-read the desktop snapshots, so the only way back
+     * to the full roster was restarting DSH.
+     *
+     * POST only, loopback origin only. Returns the resulting roster size per
+     * region so the card can confirm the refresh actually changed something.
+     */
+    const disposeCatalogRefresh = ctx.webServer.register({
+      kind: 'exact',
+      path: POOL_CATALOG_REFRESH_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.refreshCatalog === undefined) {
+          return json(res, 503, { error: 'catalog refresh is not available in this build' })
+        }
+        try {
+          const result = await deps.refreshCatalog()
+          json(res, 200, { ok: true, ...result })
         } catch (error: unknown) {
           json(res, 500, { error: safeMessage(error) })
         }
@@ -744,6 +795,7 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
       disposeAutomationRun()
       disposeCreditReserve()
       disposeAccountIgnore()
+      disposeCatalogRefresh()
       disposeCheckin()
       disposeAccountDisable()
       disposeModelsSave()

@@ -135,6 +135,42 @@ export interface UpstreamClientOptions {
   fetchImpl?: typeof fetch
   /** Client version string sent to the upstream. */
   clientVersion?: string
+  /**
+   * Override the catalog-fetch backoff, in milliseconds.
+   *
+   * Tests set this to `[]` (or tiny values) so a retry case does not spend real
+   * seconds sleeping. Production uses {@link CATALOG_RETRY_BACKOFF_MS}.
+   */
+  catalogRetryBackoffMs?: readonly number[]
+}
+
+/**
+ * Backoff between catalog-fetch attempts.
+ *
+ * Three retries after the first try, so a startup network hiccup does not cost
+ * the user their model list for the whole session. The window covers the case
+ * that actually bit: several independent components reported `fetch failed`
+ * within the same second while the machine was still bringing its network up,
+ * and the very next request succeeded 0.7s later.
+ *
+ * Deliberately short and bounded. This runs during plugin startup, so a long
+ * ladder would delay the provider appearing at all; the total added latency
+ * here is ~12s in the worst case, and only when the network is genuinely down.
+ */
+export const CATALOG_RETRY_BACKOFF_MS: readonly number[] = [1_000, 3_000, 8_000]
+
+/**
+ * Sleep helper for the retry ladder.
+ *
+ * Deliberately NOT unref'd. An unref'd timer does not keep the event loop
+ * alive, so awaiting one can hang forever when nothing else is pending — the
+ * retry would simply never resume. That is exactly what the first version of
+ * this did, and it wedged the very first end-to-end run: `fetchModels` never
+ * settled. The wait is at most a few seconds and only happens on failure, so
+ * holding the loop open is the correct trade.
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => { setTimeout(resolve, ms) })
 }
 
 /** CN chat base per dingminhua's on-machine probe (HTTP 200 for chat/models). */
@@ -166,6 +202,16 @@ const MODELS_CATALOG_PATH = '/v2/enterprises/personal/models'
 const GLOBAL_CONFIG_PATH = '/v3/config'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
+
+/** True for a request the CALLER aborted, which must never be retried. */
+function isAbortError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const name = (error as { name?: unknown }).name
+  if (name === 'AbortError') return true
+  // Node's fetch wraps an aborted signal; undici exposes the reason on `cause`.
+  const cause = (error as { cause?: unknown }).cause
+  return typeof cause === 'object' && cause !== null && (cause as { name?: unknown }).name === 'AbortError'
+}
 
 /** Cap on the reassembled compaction reply, guarding against a runaway stream. */
 const COMPLETION_TEXT_LIMIT = 64 * 1024
@@ -925,10 +971,21 @@ function parseTask(value: unknown): WorkBuddyTask | undefined {
 export class WorkBuddyUpstreamClient {
   private readonly fetchImpl: typeof fetch
   private readonly clientVersion: string
+  /** Backoff ladder for `fetchModels`; empty means a single attempt. */
+  private readonly catalogRetryBackoffMs: readonly number[]
+  /**
+   * Optional logger for retry notices.
+   *
+   * Set by the host so a retry is visible in the log with its attempt count —
+   * without it, a retry that eventually succeeds is invisible, and an operator
+   * debugging "why was the catalog slow" has nothing to look at.
+   */
+  logger: { warn?(...args: unknown[]): void; info?(...args: unknown[]): void } | undefined
 
   constructor(options: UpstreamClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch
     this.clientVersion = options.clientVersion ?? '2.0.4'
+    this.catalogRetryBackoffMs = options.catalogRetryBackoffMs ?? CATALOG_RETRY_BACKOFF_MS
   }
 
   /**
@@ -1100,6 +1157,41 @@ export class WorkBuddyUpstreamClient {
    * below is common to the two branches.
    */
   async fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]> {
+    const attempts = this.catalogRetryBackoffMs.length + 1
+    let lastError: unknown
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await this.fetchModelsOnce(credential, signal)
+      } catch (error: unknown) {
+        lastError = error
+        // An aborted request is the CALLER giving up, not a flaky network:
+        // retrying it would keep working after the caller asked us to stop.
+        if (isAbortError(error)) throw error
+        const wait = this.catalogRetryBackoffMs[attempt]
+        if (wait === undefined) break
+        this.logger?.warn?.(
+          `dsh-workbuddy-xdpool: model catalog fetch failed (attempt ${attempt + 1}/${attempts}), retrying in ${wait}ms`,
+          error,
+        )
+        await delay(wait)
+      }
+    }
+    throw lastError
+  }
+
+  /**
+   * One catalog attempt, without retries.
+   *
+   * Split out so {@link fetchModels} can retry it: the failure this guards
+   * against is a startup network hiccup, where several independent components
+   * see `fetch failed` inside the same second and the very next request
+   * succeeds — exactly the case a single attempt turns into "the user's model
+   * list is missing half its entries for the rest of the session".
+   */
+  private async fetchModelsOnce(
+    credential: WorkBuddyCredential,
+    signal?: AbortSignal,
+  ): Promise<readonly WorkBuddyUpstreamModel[]> {
     const global = regionOf(credential.domain) === 'global'
     const url = global
       ? `${globalBase(credential)}${GLOBAL_CONFIG_PATH}`
