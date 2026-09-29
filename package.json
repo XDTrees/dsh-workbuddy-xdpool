@@ -53,6 +53,7 @@
   ],
   "scripts": {
     "build": "tsdown",
+    "watch": "tsdown --watch",
     "prepublishOnly": "tsdown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
