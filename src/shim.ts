@@ -20,6 +20,7 @@ import { Readable } from 'node:stream'
 import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { parseRateLimitReset, WorkBuddyUpstreamClient, type ChatStreamResult, type UpstreamErrorKind, type WorkBuddyRegion } from './upstream.ts'
+import { SseUsageReader } from './usage-stream.ts'
 import { compactWithSummary, estimateMessagesTokens, hardTruncate, type ChatMessage } from './context-budget.ts'
 
 export interface ShimLogger {
@@ -313,7 +314,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       const result = await client.chatStream(account.credential, prepared, controller.signal)
 
       if (result.ok) {
-        await serveSuccessfulStream(res, account, result, logger, refreshBalance, pool)
+        await serveSuccessfulStream(res, account, result, logger, refreshBalance, pool, modelId)
         return
       }
 
@@ -382,7 +383,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
           : catalog.current().find(m => m.id === modelId)?.contextWindow,
       })
       if (recovered.ok) {
-        await serveSuccessfulStream(res, recovered.account, recovered.result, logger, refreshBalance, pool)
+        await serveSuccessfulStream(res, recovered.account, recovered.result, logger, refreshBalance, pool, modelId)
         return
       }
       // The wording is a contract with the Harness; see `contextOverflowMessage`.
@@ -454,11 +455,26 @@ async function serveSuccessfulStream(
   logger: ShimLogger | undefined,
   refreshBalance: (account: WorkBuddyAccount) => Promise<void>,
   pool: WorkBuddyAccountPool,
+  modelId: string | undefined,
 ): Promise<void> {
   logger?.info?.(`dsh-workbuddy-xdpool: served by ${account.label}`)
   // Only now is this account the one actually serving the user: a request
   // that failed over to another account must not mark the tried one as used.
   pool.noteServed(account.id)
+  // Usage is counted here for the same reason, and it is the only record a
+  // free/quota-limited model leaves at all: such a model moves no credits, so
+  // the balance diff the reserve feature reads cannot see it.
+  //
+  // The count is written when the stream ENDS rather than when the headers
+  // arrive, because the upstream reports its token usage in the final frame.
+  // A stream that fails mid-flight still counts as one served request (the
+  // user did receive a partial answer), with whatever usage was seen by then.
+  let counted = false
+  const countUsage = (): void => {
+    if (counted) return
+    counted = true
+    pool.noteUsage(account.id, modelId, usageReader.result())
+  }
   // Refresh the balance in the background so the reserved-credit floor has a
   // fresh reading. Deliberately NOT awaited: the response is already ready and
   // a balance lookup must never delay the user's stream.
@@ -470,14 +486,23 @@ async function serveSuccessfulStream(
     'X-Accel-Buffering': 'no',
   })
   let sawDone = false
+  const usageReader = new SseUsageReader()
   const body = Readable.fromWeb(result.response.body as Parameters<typeof Readable.fromWeb>[0])
   body.on('data', (chunk: Buffer) => {
     if (chunk.includes('[DONE]')) sawDone = true
+    // Tap the bytes on their way through: the reader only accumulates the
+    // usage frame it needs, and the chunk itself is forwarded untouched by
+    // `pipe` below, so the client's stream is byte-for-byte what it was.
+    usageReader.push(chunk)
   })
   body.on('error', (error: unknown) => {
     logger?.warn('dsh-workbuddy-xdpool: upstream stream failed mid-flight', error)
     if (!sawDone && res.writable) res.end('data: [DONE]\n\n')
   })
+  // `end` fires for both a clean finish and the error path above, so the
+  // counter lands exactly once per served request either way.
+  body.on('end', countUsage)
+  body.on('close', countUsage)
   body.pipe(res)
 }
 

@@ -153,6 +153,9 @@ export const en = {
   'row.autoFromCheckin': 'Check-in +{credit} credits',
   'row.autoFromBonus': 'Streak bonus +{credit} credits',
   'row.autoFromTravel': 'Buddy travel +{credit} credits',
+  'row.usageToday': 'Usage today',
+  'row.usageRequests': '{count} request(s)',
+  'row.usageTokens': '{tokens} tokens',
 } as const
 
 export type WorkBuddyPoolSettingsKey = keyof typeof en
@@ -302,4 +305,7 @@ export const zh: Record<WorkBuddyPoolSettingsKey, string> = {
   'row.autoFromCheckin': '签到 +{credit} 积分',
   'row.autoFromBonus': '连登奖励 +{credit} 积分',
   'row.autoFromTravel': '猫猫旅行 +{credit} 积分',
+  'row.usageToday': '今日用量',
+  'row.usageRequests': '{count} 次请求',
+  'row.usageTokens': '{tokens} tokens',
 }

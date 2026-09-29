@@ -16,6 +16,16 @@ import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { regionOf, type WorkBuddyRegion } from './upstream.ts'
 import {
+  emptyLedger,
+  localDayKey,
+  normalizeLedger,
+  recordUsage,
+  usageRowsFor,
+  type UsageLedger,
+  type UsageRow,
+} from './usage.ts'
+import type { StreamUsage } from './usage-stream.ts'
+import {
   encryptedFieldKeyId,
   isEncryptedFieldWrapper,
   openEncryptedField,
@@ -590,6 +600,17 @@ export class WorkBuddyAccountPool {
    * misses because a removed account simply disappears from the map on re-scan.
    */
   private lastUsedAt = new Map<string, number>()
+  /**
+   * Today's per-(account, model) usage. See {@link noteUsage}.
+   *
+   * In memory, refreshed from the host's persisted copy at startup and written
+   * back after every served request. It is the ONLY record that a free or
+   * quota-limited model was used, because such a model moves no credits for the
+   * balance diff to pick up.
+   */
+  private usage: UsageLedger = emptyLedger()
+  /** Host hook that persists the usage ledger; absent leaves it in memory. */
+  private saveUsageFn: ((ledger: UsageLedger) => void | Promise<void>) | undefined
   private refreshInflight = new Map<string, Promise<void>>()
 
   constructor(options: AccountPoolOptions = {}) {
@@ -883,6 +904,91 @@ export class WorkBuddyAccountPool {
   noteServed(accountId: string): void {
     if (!this.accounts.some(account => account.id === accountId)) return
     this.lastUsedAt.set(accountId, Date.now())
+  }
+
+  /**
+   * Record one completed request against (account, model, today).
+   *
+   * Called from the SAME place as {@link noteServed} — once the upstream has
+   * answered 200 — so the counters inherit exactly the same idempotency rule: a
+   * request that failed over to a second account counts once, for the account
+   * that really served it, never for the one that was merely tried.
+   *
+   * This exists because a free or quota-limited model moves no credits, so the
+   * balance difference {@link noteCredits} records cannot see it; the count is
+   * the only evidence such a model was used at all. Persisted through the host
+   * hook when one was supplied, so a restart mid-day does not zero the day.
+   */
+  noteUsage(accountId: string, modelId: string | undefined, usage?: StreamUsage): void {
+    if (!this.accounts.some(account => account.id === accountId)) return
+    this.usage = recordUsage(this.usage, {
+      accountId,
+      modelId,
+      ...usage?.promptTokens === undefined ? {} : { promptTokens: usage.promptTokens },
+      ...usage?.completionTokens === undefined ? {} : { completionTokens: usage.completionTokens },
+    })
+    this.persistUsage()
+  }
+
+  /**
+   * Today's per-model usage for one account, newest used first.
+   *
+   * Empty for an account that served nothing today, which is what the card
+   * renders as "no usage recorded" rather than a row of zeroes.
+   */
+  usageFor(accountId: string): UsageRow[] {
+    return usageRowsFor(this.usage, accountId)
+  }
+
+  /** The whole usage ledger, for the status route and diagnostics. */
+  usageLedger(): UsageLedger {
+    return this.usage
+  }
+
+  /**
+   * Install the host's persistence hook for the usage ledger.
+   *
+   * Set separately from the constructor for the same reason the scheduler's is:
+   * the settings source does not exist yet while the pool is being built, so a
+   * ledger saved earlier today is folded back in through
+   * {@link applyUsageLedger} once the document is readable.
+   */
+  setUsagePersistence(save: (ledger: UsageLedger) => void | Promise<void>): void {
+    this.saveUsageFn = save
+  }
+
+  /**
+   * Fold a persisted ledger back in when it belongs to today.
+   *
+   * A ledger from an earlier day is ignored outright: the counters are daily,
+   * and adopting yesterday's rows would make "today" mean "since the last save".
+   */
+  applyUsageLedger(ledger: UsageLedger): void {
+    const today = localDayKey()
+    if (ledger.date !== today) return
+    this.usage = normalizeLedger({ date: today, accounts: ledger.accounts })
+  }
+
+  /**
+   * Write the ledger through the host hook, when one was supplied.
+   *
+   * Best effort: a failed save must never fail a request the user already got
+   * an answer to, and the in-memory ledger keeps serving the card either way.
+   * The rejection handler is attached rather than awaited because the host
+   * installs `installFailLoud`, which turns an unhandled rejection into exit(1).
+   */
+  private persistUsage(): void {
+    if (this.saveUsageFn === undefined) return
+    try {
+      const saved = this.saveUsageFn(this.usage)
+      if (saved !== undefined && typeof saved.then === 'function') {
+        void saved.then(undefined, (error: unknown) => {
+          this.logger?.warn('dsh-workbuddy-xdpool: could not persist usage ledger:', error)
+        })
+      }
+    } catch (error: unknown) {
+      this.logger?.warn('dsh-workbuddy-xdpool: could not persist usage ledger:', error)
+    }
   }
 
   /**

@@ -24,6 +24,7 @@ import type { WorkBuddyCatalog } from './catalog.ts'
 import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
+import { emptyLedger, usageRowsFor, type UsageLedger } from './usage.ts'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_ACCOUNT_IGNORE_PATH,
@@ -69,6 +70,13 @@ export interface PoolStatusRouteOptions {
    * reports the automation as off instead of showing a broken panel.
    */
   scheduler?: () => AutomationStatus
+  /**
+   * Today's usage ledger, when the host half keeps one.
+   *
+   * Optional so these routes still mount without a pool that records usage; the
+   * card then shows no usage rows rather than a broken panel.
+   */
+  usage?: () => UsageLedger
   /**
   /**
    * Start a manual pass, for the card's "run now" button.
@@ -402,6 +410,12 @@ export async function poolWebStatus(
     // Absent means "earned nothing today", which the card renders as silence.
     const earned = deps.scheduler?.().earningsToday[account.id]
     if (earned !== undefined) Object.assign(row, { automationToday: earned })
+    // Today's per-model usage. This is the ONLY evidence a free or
+    // quota-limited model leaves: it moves no credits, so the balance row below
+    // stays flat no matter how much of its daily allowance is gone.
+    const usage = deps.usage?.() ?? emptyLedger()
+    const usageRows = usageRowsFor(usage, account.id)
+    if (usageRows.length > 0) Object.assign(row, { usageToday: usageRows, usageDate: usage.date })
     if (!row.cooling) {
       try {
         const credits = await deps.client.fetchCredits(account.credential)

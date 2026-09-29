@@ -129,6 +129,19 @@ export interface PoolWebAccount {
    * instead of printing a row of zeroes.
    */
   automationToday?: PoolWebAutomationEarnings
+  /**
+   * Per-model usage recorded for this account today, newest used first.
+   *
+   * The only record a free or quota-limited model leaves: it moves no credits,
+   * so the balance reading above cannot show that it was used at all. Absent
+   * when nothing was recorded for this account today.
+   */
+  usageToday?: readonly PoolWebUsage[]
+  /**
+   * Local day `usageToday` covers, `YYYY-MM-DD`. Present only alongside it, so
+   * the card never has to guess which day a count belongs to.
+   */
+  usageDate?: string
   /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
   lastUsedAt?: string
   /** Aggregated credit summary for the account, read-only. */
@@ -419,6 +432,25 @@ export interface PoolWebAutomationEarnings {
   travelCredit: number
   /** Local date the counters belong to (YYYY-MM-DD). */
   date: string
+}
+
+/**
+ * One model's usage for one account today.
+ *
+ * `tokensReported` separates a real zero from an unknown: a gateway that sends
+ * no `usage` frame at all yields `tokens: 0, tokensReported: false`, and the
+ * card prints the request count without claiming a token figure it never got.
+ */
+export interface PoolWebUsage {
+  modelId: string
+  /** Completed requests this account served for this model today. */
+  requests: number
+  /** Prompt + completion tokens, summed over those requests. */
+  tokens: number
+  /** Whether `tokens` came from the upstream rather than defaulting to 0. */
+  tokensReported: boolean
+  /** ISO timestamp of the most recent request, when one was recorded. */
+  lastUsedAt?: string
 }
 
 

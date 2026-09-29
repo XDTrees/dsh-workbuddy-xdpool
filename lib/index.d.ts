@@ -736,6 +736,211 @@ export declare class WorkBuddyUpstreamClient {
   }>;
 }
 //#endregion
+//#region src/usage.d.ts
+/**
+ * Per-model daily usage ledger.
+ *
+ * A free or quota-limited model costs no credits, so the balance-difference
+ * method the reserve feature relies on cannot see it: the balance simply does
+ * not move. The upstream still enforces a per-model daily allowance, and it
+ * surfaces only as a 429 that cools the model on one account. Nothing in the
+ * pool then answers "how much of today's allowance has this model already
+ * used", which is the question the card has to answer before it can warn.
+ *
+ * So usage is counted here, keyed by (account, model, local day), from what the
+ * upstream itself reports: the request count, and the token counts carried in
+ * the SSE `usage` frame when the gateway sends one.
+ *
+ * On disk the ledger is one JSON document holding the CURRENT day only. Keeping
+ * history would grow without bound for a number the card only ever reads as
+ * "today", and a stale day is discarded on load rather than relabelled as
+ * today — the same rule the automation earnings ledger uses.
+ *
+ * @module dsh-workbuddy-xdpool/usage
+ */
+/** File holding the daily usage ledger, inside `pluginDataDir`. */
+export declare const USAGE_FILE_NAME = "usage.json";
+/** Absolute path of the usage ledger. */
+export declare function usageLedgerPath(env?: NodeJS.ProcessEnv): string;
+/**
+ * One model's counters for one account on one day.
+ *
+ * `requests` counts every completed stream this account served for the model;
+ * `tokens` is 0 when the upstream reported no usage at all, which is why the
+ * two are tracked separately — a card showing "3 requests, 0 tokens" is
+ * telling the truth about a gateway that sends no usage, whereas folding the
+ * tokens into an estimate would invent a number.
+ */
+interface UsageCounters {
+  /** Completed requests served by this account for this model today. */
+  requests: number;
+  /** Prompt tokens, summed over those requests (0 when unreported). */
+  promptTokens: number;
+  /** Completion tokens, summed over those requests (0 when unreported). */
+  completionTokens: number;
+  /** Requests that carried a usable upstream `usage` frame. */
+  reportedRequests: number;
+  /** ISO timestamp of the most recent request. */
+  lastUsedAt: string;
+}
+/**
+ * The whole ledger: one day, every account, every model.
+ *
+ * `accounts` maps account id → model id → counters. The nesting is nested
+ * rather than a flat `accountId/modelId` key because both halves of the key are
+ * opaque upstream strings that can contain any character; a separator-based key
+ * would collide on a model id that happens to contain the separator.
+ */
+interface UsageLedger {
+  /** Local day the counters belong to, `YYYY-MM-DD`. */
+  date: string;
+  accounts: Record<string, Record<string, UsageCounters>>;
+}
+/** `YYYY-MM-DD` in local time, matching how every other day key is built. */
+export declare function localDayKey(date?: Date): string;
+/** An empty ledger for one day. */
+export declare function emptyLedger(date?: string): UsageLedger;
+/**
+ * Normalize a decoded document into a ledger.
+ *
+ * Tolerant on purpose, exactly like the ignore list: this file is written on
+ * every served request, and a truncated or hand-edited one must degrade to
+ * "nothing recorded" rather than take the card down. Entries that carry no
+ * usable counter are dropped rather than kept as zero rows, so the card's list
+ * of "what used this model today" stays honest.
+ */
+export declare function normalizeLedger(raw: unknown): UsageLedger;
+/**
+ * Read the ledger, tolerating every "no ledger yet" shape.
+ *
+ * A missing file, an unreadable one, or invalid JSON all mean the same thing —
+ * nothing recorded — so none of them throws. A ledger left over from an earlier
+ * day is discarded rather than counted as today: the counters are daily by
+ * definition, and carrying them forward would make "today" mean "ever".
+ */
+export declare function readUsageLedger(path?: string): Promise<UsageLedger>;
+/** Synchronous read, for startup. See {@link readUsageLedger} for the rules. */
+export declare function readUsageLedgerSync(path?: string): UsageLedger;
+/**
+ * Replace the ledger, atomically.
+ *
+ * Written to a sibling temp file and renamed over the target, so a crash or a
+ * concurrent reader never observes a half-written document: a truncated ledger
+ * reads as "no usage", which would silently under-report a model that is
+ * already near its daily allowance — the one case the feature exists to catch.
+ */
+export declare function writeUsageLedger(ledger: UsageLedger, path?: string): Promise<void>;
+/**
+ * One usage report, as measured while a stream is served.
+ *
+ * `promptTokens` / `completionTokens` are undefined when the upstream sent no
+ * usage frame. Callers must pass them through as absent rather than as 0:
+ * {@link recordUsage} counts `reportedRequests` from exactly that distinction,
+ * and the card uses it to say whether a token figure is measured or unknown.
+ */
+interface UsageReport {
+  accountId: string;
+  modelId: string | undefined;
+  promptTokens?: number;
+  completionTokens?: number;
+  /** Instant the count belongs to; defaults to now. */
+  at?: Date;
+}
+/** Model id recorded when a request named no model. */
+export declare const UNKNOWN_MODEL_ID = "(unknown)";
+/**
+ * Fold one report into a ledger, returning a NEW ledger.
+ *
+ * Pure on purpose: the caller owns persistence and roll-over, so the counting
+ * rule (including the day boundary and the unreported-token distinction) is
+ * testable without touching the filesystem or a clock.
+ *
+ * A report for a different day than the ledger's resets the ledger first. That
+ * matters because the process outlives midnight: a long-running host would
+ * otherwise keep adding to yesterday's rows and the card would show a day that
+ * has already ended.
+ */
+export declare function recordUsage(ledger: UsageLedger, report: UsageReport, day?: string): UsageLedger;
+/** One account's row for one model, as the card renders it. */
+interface UsageRow {
+  modelId: string;
+  requests: number;
+  /** Total tokens, prompt + completion. */
+  tokens: number;
+  /** Whether the token figure came from the upstream (false = not reported). */
+  tokensReported: boolean;
+  lastUsedAt?: string;
+}
+/**
+ * One account's usage today, newest-used model first.
+ *
+ * Sorted by recency rather than by model id: the model a user is actually
+ * working with is the one they just used, and an alphabetical list buries it.
+ */
+export declare function usageRowsFor(ledger: UsageLedger, accountId: string): UsageRow[];
+/** Every account's usage today, keyed by account id. */
+export declare function usageByAccount(ledger: UsageLedger): Record<string, UsageRow[]>;
+//#endregion
+//#region src/usage-stream.d.ts
+/**
+ * Extraction of the upstream's `usage` report from an OpenAI-style SSE stream.
+ *
+ * The shim forwards the upstream's byte stream to the client untouched, so the
+ * only place a token count can be read is while that stream passes through. The
+ * frames arrive as `data: {...}` lines separated by blank lines, and the usage
+ * report — when the gateway sends one at all — arrives in the FINAL frame
+ * before `[DONE]`, as `usage: {prompt_tokens, completion_tokens}` either at the
+ * top level or nested under `data`.
+ *
+ * Two properties matter more than completeness here:
+ *
+ *  - a frame may be SPLIT ACROSS CHUNKS, so the parser buffers a trailing
+ *    partial line instead of parsing each chunk in isolation. Parsing per chunk
+ *    is what silently loses the usage frame on a large final chunk boundary.
+ *  - the parser must never throw or block the stream: it sits in the hot path
+ *    of every served request, and a malformed frame from the upstream must cost
+ *    at most the token figure, never the user's answer.
+ *
+ * @module dsh-workbuddy-xdpool/usage-stream
+ */
+/** Token counts read from the upstream, or undefined when it reported none. */
+interface StreamUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+}
+/**
+ * Pull token counts out of ONE already-decoded SSE frame.
+ *
+ * `usage` is looked for at the top level and under `data`, because the two
+ * gateways differ: the domestic one answers plain OpenAI-shaped frames while
+ * the international one wraps some payloads in an envelope. Later frames
+ * overwrite earlier ones at the call site, which is what makes the final
+ * `[DONE]`-adjacent frame win.
+ */
+export declare function usageFromSseFrame(frame: string): StreamUsage | undefined;
+/**
+ * Incremental SSE usage reader, fed the raw chunks of the forwarded stream.
+ *
+ * Stateful only for the partial line it is holding: a chunk boundary can fall
+ * anywhere, including between `data: {` and the JSON that follows, so the
+ * trailing fragment is carried until the next chunk completes it.
+ */
+export declare class SseUsageReader {
+  private buffer;
+  private usage;
+  /** Cap on the carried fragment, so a stream with no newline cannot grow it. */
+  private static readonly BUFFER_LIMIT;
+  /** Feed one chunk; safe on any bytes, malformed input included. */
+  push(chunk: Buffer | string): void;
+  /**
+   * The token counts seen so far.
+   *
+   * Best-effort by design: the caller records what it got and marks the request
+   * as unreported when this returns undefined, rather than inventing a number.
+   */
+  result(): StreamUsage | undefined;
+}
+//#endregion
 //#region src/accounts.d.ts
 /** Minimal upstream surface the pool needs to refresh a token (no circular import). */
 interface TokenRefresher {
@@ -919,6 +1124,17 @@ export declare class WorkBuddyAccountPool {
    * misses because a removed account simply disappears from the map on re-scan.
    */
   private lastUsedAt;
+  /**
+   * Today's per-(account, model) usage. See {@link noteUsage}.
+   *
+   * In memory, refreshed from the host's persisted copy at startup and written
+   * back after every served request. It is the ONLY record that a free or
+   * quota-limited model was used, because such a model moves no credits for the
+   * balance diff to pick up.
+   */
+  private usage;
+  /** Host hook that persists the usage ledger; absent leaves it in memory. */
+  private saveUsageFn;
   private refreshInflight;
   constructor(options?: AccountPoolOptions);
   /**
@@ -1016,6 +1232,54 @@ export declare class WorkBuddyAccountPool {
    * not count as used for the account that was merely tried.
    */
   noteServed(accountId: string): void;
+  /**
+   * Record one completed request against (account, model, today).
+   *
+   * Called from the SAME place as {@link noteServed} — once the upstream has
+   * answered 200 — so the counters inherit exactly the same idempotency rule: a
+   * request that failed over to a second account counts once, for the account
+   * that really served it, never for the one that was merely tried.
+   *
+   * This exists because a free or quota-limited model moves no credits, so the
+   * balance difference {@link noteCredits} records cannot see it; the count is
+   * the only evidence such a model was used at all. Persisted through the host
+   * hook when one was supplied, so a restart mid-day does not zero the day.
+   */
+  noteUsage(accountId: string, modelId: string | undefined, usage?: StreamUsage): void;
+  /**
+   * Today's per-model usage for one account, newest used first.
+   *
+   * Empty for an account that served nothing today, which is what the card
+   * renders as "no usage recorded" rather than a row of zeroes.
+   */
+  usageFor(accountId: string): UsageRow[];
+  /** The whole usage ledger, for the status route and diagnostics. */
+  usageLedger(): UsageLedger;
+  /**
+   * Install the host's persistence hook for the usage ledger.
+   *
+   * Set separately from the constructor for the same reason the scheduler's is:
+   * the settings source does not exist yet while the pool is being built, so a
+   * ledger saved earlier today is folded back in through
+   * {@link applyUsageLedger} once the document is readable.
+   */
+  setUsagePersistence(save: (ledger: UsageLedger) => void | Promise<void>): void;
+  /**
+   * Fold a persisted ledger back in when it belongs to today.
+   *
+   * A ledger from an earlier day is ignored outright: the counters are daily,
+   * and adopting yesterday's rows would make "today" mean "since the last save".
+   */
+  applyUsageLedger(ledger: UsageLedger): void;
+  /**
+   * Write the ledger through the host hook, when one was supplied.
+   *
+   * Best effort: a failed save must never fail a request the user already got
+   * an answer to, and the in-memory ledger keeps serving the card either way.
+   * The rejection handler is attached rather than awaited because the host
+   * installs `installFailLoud`, which turns an unhandled rejection into exit(1).
+   */
+  private persistUsage;
   /**
    * Record an account latest known credit balance.
    *
@@ -1173,6 +1437,19 @@ interface PoolWebAccount {
    * instead of printing a row of zeroes.
    */
   automationToday?: PoolWebAutomationEarnings;
+  /**
+   * Per-model usage recorded for this account today, newest used first.
+   *
+   * The only record a free or quota-limited model leaves: it moves no credits,
+   * so the balance reading above cannot show that it was used at all. Absent
+   * when nothing was recorded for this account today.
+   */
+  usageToday?: readonly PoolWebUsage[];
+  /**
+   * Local day `usageToday` covers, `YYYY-MM-DD`. Present only alongside it, so
+   * the card never has to guess which day a count belongs to.
+   */
+  usageDate?: string;
   /** ISO timestamp of the last successful use (best-effort pool bookkeeping). */
   lastUsedAt?: string;
   /** Aggregated credit summary for the account, read-only. */
@@ -1444,6 +1721,24 @@ interface PoolWebAutomationEarnings {
   travelCredit: number;
   /** Local date the counters belong to (YYYY-MM-DD). */
   date: string;
+}
+/**
+ * One model's usage for one account today.
+ *
+ * `tokensReported` separates a real zero from an unknown: a gateway that sends
+ * no `usage` frame at all yields `tokens: 0, tokensReported: false`, and the
+ * card prints the request count without claiming a token figure it never got.
+ */
+interface PoolWebUsage {
+  modelId: string;
+  /** Completed requests this account served for this model today. */
+  requests: number;
+  /** Prompt + completion tokens, summed over those requests. */
+  tokens: number;
+  /** Whether `tokens` came from the upstream rather than defaulting to 0. */
+  tokensReported: boolean;
+  /** ISO timestamp of the most recent request, when one was recorded. */
+  lastUsedAt?: string;
 }
 /**
  * The two gateways, matching the provider ids the host registers. `cn` is the
@@ -2337,6 +2632,13 @@ interface PoolStatusRouteOptions {
    */
   scheduler?: () => AutomationStatus;
   /**
+   * Today's usage ledger, when the host half keeps one.
+   *
+   * Optional so these routes still mount without a pool that records usage; the
+   * card then shows no usage rows rather than a broken panel.
+   */
+  usage?: () => UsageLedger;
+  /**
     /**
      * Start a manual pass, for the card's "run now" button.
      *
@@ -2493,6 +2795,14 @@ export interface Config {
    * does not wipe what the automation already earned.
    */
   automationEarnings?: AutomationLedger;
+  /**
+   * The per-model daily usage ledger, written by the pool.
+   *
+   * Persisted for the same reason, and one more: a free or quota-limited model
+   * moves no credits, so these counters are the ONLY record that it was used —
+   * losing them to a restart would blank the figure the card needs.
+   */
+  modelUsage?: UsageLedger;
 }
 /** One region's saved model selection. */
 export interface ModelSelectionConfig {
@@ -2605,4 +2915,4 @@ export declare function createCore(logger?: {
  */
 export declare function apply(ctx: Context, config?: Config): void;
 //#endregion
-export type { AccountStatus, AutomationLedger, AutomationRunSummary, AutomationStatus, Context, ExpertUseMode, IgnoredAccount, MarketExpert, ModelSelection, PoolStatusRouteOptions, PoolWebAccountIgnore, PoolWebCheckin, PoolWebCheckinClaim, PoolWebIgnoredAccount, PoolWebModel, PoolWebModelSelection, PoolWebStatus, SchedulerLogger, TaskEventChain, TaskEventTransport, UpstreamErrorKind, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };
+export type { AccountStatus, AutomationLedger, AutomationRunSummary, AutomationStatus, Context, ExpertUseMode, IgnoredAccount, MarketExpert, ModelSelection, PoolStatusRouteOptions, PoolWebAccountIgnore, PoolWebCheckin, PoolWebCheckinClaim, PoolWebIgnoredAccount, PoolWebModel, PoolWebModelSelection, PoolWebStatus, SchedulerLogger, StreamUsage, TaskEventChain, TaskEventTransport, UpstreamErrorKind, UsageCounters, UsageLedger, UsageReport, UsageRow, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };

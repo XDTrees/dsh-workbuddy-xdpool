@@ -21,6 +21,7 @@ import {
   type WorkBuddyAdapter,
 } from './adapter.ts'
 import { WorkBuddyScheduler, type AutomationJobKind, type AutomationLedger, type AutomationOptions } from './scheduler.ts'
+import type { UsageLedger } from './usage.ts'
 import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 import { buildStatus } from './status.ts'
 export {
@@ -96,6 +97,29 @@ export {
   type IgnoredAccount,
 } from './ignored.ts'
 export type { ModelSelection } from './catalog.ts'
+
+// The per-model daily usage ledger, and the SSE parsing that reads token counts
+// out of the upstream stream. Exported so a probe can exercise the counting
+// rule and the frame parser without a live gateway.
+export {
+  UNKNOWN_MODEL_ID,
+  USAGE_FILE_NAME,
+  emptyLedger,
+  localDayKey,
+  normalizeLedger,
+  readUsageLedger,
+  readUsageLedgerSync,
+  recordUsage,
+  usageByAccount,
+  usageLedgerPath,
+  usageRowsFor,
+  writeUsageLedger,
+  type UsageCounters,
+  type UsageLedger,
+  type UsageReport,
+  type UsageRow,
+} from './usage.ts'
+export { SseUsageReader, usageFromSseFrame, type StreamUsage } from './usage-stream.ts'
 
 // The card half talks to these routes over HTTP; exporting the registrar and
 // its option shape lets a probe mount the real table instead of trusting that
@@ -187,6 +211,14 @@ export interface Config {
    * does not wipe what the automation already earned.
    */
   automationEarnings?: AutomationLedger
+  /**
+   * The per-model daily usage ledger, written by the pool.
+   *
+   * Persisted for the same reason, and one more: a free or quota-limited model
+   * moves no credits, so these counters are the ONLY record that it was used —
+   * losing them to a restart would blank the figure the card needs.
+   */
+  modelUsage?: UsageLedger
 }
 
 /** One region's saved model selection. */
@@ -373,7 +405,8 @@ export const Config: z<Config> = z.object({
   modelSelectionCn: asVolatile(modelSelectionSchema.description('Model selection for the domestic gateway')),
   modelSelectionGlobal: asVolatile(modelSelectionSchema.description('Model selection for the international gateway')),
   automation: asVolatile(automationSchema.description('Daily points automation (activity report, task claiming, check-in)')),
-  automationEarnings: asVolatile(z.any().description('Automation earnings ledger (written by the scheduler)'))
+  automationEarnings: asVolatile(z.any().description('Automation earnings ledger (written by the scheduler)')),
+  modelUsage: asVolatile(z.any().description('Per-model daily usage ledger (written by the pool)'))
 
 })
 
@@ -790,6 +823,17 @@ function canonicalJson(value: unknown): string {
   const storedLedger = current().automationEarnings
   if (storedLedger !== undefined) core.scheduler.applyEarningsLedger(storedLedger)
 
+  // Persist the per-model daily usage ledger the same way. This one carries the
+  // ONLY record of a free or quota-limited model's use, because such a model
+  // moves no credits for the balance reading to show, so losing it to a restart
+  // would blank the very number the card needs to warn before an allowance runs
+  // out. A ledger from an earlier day is discarded by `applyUsageLedger`.
+  core.pool.setUsagePersistence(async (ledger) => {
+    await setSetting('modelUsage', ledger, ledger)
+  })
+  const storedUsage = current().modelUsage
+  if (storedUsage !== undefined) core.pool.applyUsageLedger(storedUsage)
+
 
   // One shim per region. Each carries its own ephemeral port and secret, and
   // each is scoped to its gateway's accounts, so the two providers are fully
@@ -831,6 +875,9 @@ function canonicalJson(value: unknown): string {
     // The automation is pool-wide, not per region, so both routes read the same
     // scheduler snapshot.
     scheduler: () => core.scheduler.status(),
+    // Today's per-model usage, likewise pool-wide: it is the only visible trace
+    // of a free or quota-limited model, which leaves no credit movement.
+    usage: () => core.pool.usageLedger(),
     // Starts the pass in the background and returns immediately: a full run takes
     // tens of seconds, and the card polls the status document for the result.
     runAutomation: (_job: string, _force: boolean) => core.scheduler.startRunAll(),

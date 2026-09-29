@@ -1571,6 +1571,33 @@ function AccountBlock({
                   : null}
               </span>
             </div>}
+        {/* Per-model usage recorded today. This is the only trace a free or
+            quota-limited model leaves: it moves no credits, so the balance above
+            is identical whether it was used once or up to its daily allowance.
+            The token figure is printed only when the upstream reported one —
+            `tokensReported` separates a real zero from a gateway that sends no
+            usage at all, and claiming a token count that was never measured
+            would be worse than staying quiet. */}
+        {account.usageToday === undefined || account.usageToday.length === 0
+          ? null
+          : <div className="dsm-workbuddy-xdpool-usage">
+              <span className="dsm-workbuddy-xdpool-usage-label">
+                {t?.('row.usageToday') ?? 'Usage today'}
+              </span>
+              <span className="dsm-workbuddy-xdpool-usage-list">
+                {account.usageToday.map(row => (
+                  <span key={row.modelId} className="dsm-workbuddy-xdpool-usage-row">
+                    <span className="dsm-workbuddy-xdpool-usage-model">{row.modelId}</span>
+                    {t?.('row.usageRequests', { count: row.requests })
+                      ?? `${row.requests} request(s)`}
+                    {row.tokensReported
+                      ? ` · ${t?.('row.usageTokens', { tokens: formatNumber(row.tokens) })
+                          ?? `${formatNumber(row.tokens)} tokens`}`
+                      : null}
+                  </span>
+                ))}
+              </span>
+            </div>}
       </div>
     </div>
   )
