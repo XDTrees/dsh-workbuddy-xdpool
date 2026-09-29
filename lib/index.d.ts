@@ -1265,6 +1265,34 @@ interface AutomationJobState {
    * repeat tick inside the same hour is still refused.
    */
   lastRunSlot?: string;
+  /**
+   * Every configured slot consumed TODAY, as `YYYY-MM-DDTHH`.
+   *
+   * This is what actually gates a re-run, and it is a SET rather than a single
+   * slot because one field could not express the contract: a job configured for
+   * `[9, 21]` runs twice, and a single "last slot" value can only remember one
+   * of them — the second run erased the first, so the 9 o'clock candidate looked
+   * unconsumed again and the job re-fired every hour after 21:00.
+   *
+   * The values are the CONFIGURED hours that were spent, never the clock time
+   * the run happened to finish at. Storing the finish time was the original
+   * defect: the reader compared it against a configured candidate, so the two
+   * almost never matched and the gate stayed open all day.
+   *
+   * In-memory like the rest of `states`: this is a per-process record, and the
+   * catch-up design deliberately re-runs an hour that passed while DSH was
+   * closed. See `automationEarnings` for the ledger that DOES persist.
+   */
+  firedSlots?: readonly string[];
+  /**
+   * The clock slot the last run STARTED in (`YYYY-MM-DDTHH`).
+   *
+   * Separate from {@link firedSlots} on purpose: this is a throttle ("do not
+   * start twice inside the same hour"), while `firedSlots` is the schedule
+   * ledger. Conflating the two is what let a catch-up run at 13:00 erase the
+   * record of the 9 o'clock slot.
+   */
+  lastFiredHour?: string;
   /** Epoch ms of the last completed run. */
   lastRunAtMs?: number;
   /** Accounts that completed without throwing. */
@@ -1535,7 +1563,27 @@ export declare class WorkBuddyScheduler {
    * two hours still runs twice a day — but a job whose hour passed while DSH was
    * closed runs immediately on the next tick instead of waiting for tomorrow.
    */
-  private isDue;
+  /**
+   * The configured slot `kind` should consume at `now`, or undefined when none.
+   *
+   * Returns the SLOT STRING (not a boolean) because the caller must record the
+   * same value it acted on. Returning a boolean was the original bug's enabler:
+   * the tick asked "is it due", then `runJob` independently wrote "what time is
+   * it now" — and those two answers were almost never equal.
+   *
+   * CATCH-UP semantics are deliberate: a candidate fires once its hour has
+   * PASSED and its slot is still unconsumed, so a laptop that slept through
+   * 10:00 still runs the job when it wakes, on the same day.
+   *
+   * The EARLIEST unconsumed candidate wins, which is what keeps a two-hour job
+   * (`travelHours: [9, 21]`) whole: consuming the earliest due slot leaves the
+   * later one for its own hour.
+   */
+  private dueSlot;
+  /** Today's consumed slots for one job, as a set. */
+  private firedSlotsOf;
+  /** Record one consumed slot on a job's state. */
+  private consumeSlot;
   private tick;
   /** Run one job against every eligible account and record the outcome. */
   /**
@@ -1567,6 +1615,12 @@ export declare class WorkBuddyScheduler {
   private persistEarnings;
   /**
    * Run one job against every eligible account and record the outcome.
+   *
+   * `consumedSlot` is the configured slot this run spends (`dueSlot`'s answer).
+   * It is passed IN rather than recomputed here so the value recorded is exactly
+   * the value the schedule decided on — the defect this replaces wrote
+   * `slotKey(now)` instead, i.e. the clock time the run finished at, which
+   * almost never equals the configured candidate the gate had compared against.
    *
    * The task job runs in TWO passes. The first sends the event chains that light
    * up client-scored tasks; the second collects rewards. They are separate
@@ -1965,6 +2019,21 @@ interface PoolWebStatus {
 interface PoolWebAutomationJob {
   /** `YYYY-MM-DD` of the last run in this process, if it has run. */
   lastRunDate?: string;
+  /**
+   * Epoch ms of the last run, so the card can show the TIME.
+   *
+   * Carried because a date-only stamp cannot tell one run from eight: every
+   * repeat inside the same day rendered as the identical `2026-09-28 · 2`,
+   * which is what kept a "re-runs every hour" defect invisible on the card.
+   */
+  lastRunAtMs?: number;
+  /**
+   * Configured slots consumed today, as `YYYY-MM-DDTHH`.
+   *
+   * Shown so "which of today's hours already ran" is answerable at a glance
+   * rather than inferred from a counter.
+   */
+  firedSlots?: readonly string[];
   /** Accounts that finished without error on the last run. */
   ok: number;
   /** Accounts that failed on the last run (each one skipped, the run continued). */

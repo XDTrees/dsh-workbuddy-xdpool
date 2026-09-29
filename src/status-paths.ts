@@ -295,6 +295,21 @@ export interface PoolWebStatus {
 export interface PoolWebAutomationJob {
   /** `YYYY-MM-DD` of the last run in this process, if it has run. */
   lastRunDate?: string
+  /**
+   * Epoch ms of the last run, so the card can show the TIME.
+   *
+   * Carried because a date-only stamp cannot tell one run from eight: every
+   * repeat inside the same day rendered as the identical `2026-09-28 · 2`,
+   * which is what kept a "re-runs every hour" defect invisible on the card.
+   */
+  lastRunAtMs?: number
+  /**
+   * Configured slots consumed today, as `YYYY-MM-DDTHH`.
+   *
+   * Shown so "which of today's hours already ran" is answerable at a glance
+   * rather than inferred from a counter.
+   */
+  firedSlots?: readonly string[]
   /** Accounts that finished without error on the last run. */
   ok: number
   /** Accounts that failed on the last run (each one skipped, the run continued). */

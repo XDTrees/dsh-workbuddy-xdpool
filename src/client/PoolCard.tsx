@@ -1042,9 +1042,16 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                                       : hours.map(hour => `${String(hour).padStart(2, '0')}:00`).join(' · ')}
                                   </span>
                                   <span className="dsm-workbuddy-xdpool-auto-job-last">
-                                    {job?.lastRunDate === undefined
+                                    {/* The TIME, not just the date. A date-only
+                                        stamp cannot answer "did this run once
+                                        today or eight times" — every repeat
+                                        rendered as the same `2026-09-28 · 2`,
+                                        which is exactly why the runaway
+                                        re-run defect stayed invisible on the
+                                        card and had to be found in the logs. */}
+                                    {job?.lastRunAtMs === undefined
                                       ? (t?.('row.autoNever') ?? 'not run yet')
-                                      : `${job.lastRunDate} · ${job.ok}${job.failed > 0 ? `/${job.failed}` : ''}`}
+                                      : `${formatTime(job.lastRunAtMs)} · ${job.ok}${job.failed > 0 ? `/${job.failed}` : ''}`}
                                   </span>
                                   {job?.progress === undefined ? null
                                     : <span className="dsm-workbuddy-xdpool-auto-job-note">{job.progress}</span>}

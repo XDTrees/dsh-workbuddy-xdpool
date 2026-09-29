@@ -167,6 +167,34 @@ export interface AutomationJobState {
    * repeat tick inside the same hour is still refused.
    */
   lastRunSlot?: string
+  /**
+   * Every configured slot consumed TODAY, as `YYYY-MM-DDTHH`.
+   *
+   * This is what actually gates a re-run, and it is a SET rather than a single
+   * slot because one field could not express the contract: a job configured for
+   * `[9, 21]` runs twice, and a single "last slot" value can only remember one
+   * of them — the second run erased the first, so the 9 o'clock candidate looked
+   * unconsumed again and the job re-fired every hour after 21:00.
+   *
+   * The values are the CONFIGURED hours that were spent, never the clock time
+   * the run happened to finish at. Storing the finish time was the original
+   * defect: the reader compared it against a configured candidate, so the two
+   * almost never matched and the gate stayed open all day.
+   *
+   * In-memory like the rest of `states`: this is a per-process record, and the
+   * catch-up design deliberately re-runs an hour that passed while DSH was
+   * closed. See `automationEarnings` for the ledger that DOES persist.
+   */
+  firedSlots?: readonly string[]
+  /**
+   * The clock slot the last run STARTED in (`YYYY-MM-DDTHH`).
+   *
+   * Separate from {@link firedSlots} on purpose: this is a throttle ("do not
+   * start twice inside the same hour"), while `firedSlots` is the schedule
+   * ledger. Conflating the two is what let a catch-up run at 13:00 erase the
+   * record of the 9 o'clock slot.
+   */
+  lastFiredHour?: string
   /** Epoch ms of the last completed run. */
   lastRunAtMs?: number
   /** Accounts that completed without throwing. */
@@ -646,9 +674,13 @@ export class WorkBuddyScheduler {
   async runNow(kind: AutomationJobKind, force = false): Promise<AutomationJobState> {
     const today = dayKey(this.now())
     const state = this.states[kind]
-    if (!force && state.lastRunSlot === slotKey(this.now())) return { ...state }
+    // Throttle on the START hour, not on the schedule ledger: a manual run is
+    // an explicit "do it now", so a second press inside the same hour is a
+    // no-op, but it never pretends a scheduled slot ran.
+    if (!force && state.lastFiredHour === slotKey(this.now())) return { ...state }
     this.busy = true
     try {
+      // No `consumedSlot`: a manual run does not spend a scheduled candidate.
       await this.runJob(kind, today)
     } finally {
       this.busy = false
@@ -696,6 +728,14 @@ export class WorkBuddyScheduler {
       // Runs EVERY job, including one whose hour list is empty: the button
       // is an explicit "do everything now", and a job with no schedule is
       // still one the user can want executed on demand.
+      //
+      // No `consumedSlot` is passed, deliberately. A manual pass is an EXTRA
+      // run, not a substitute for the schedule: consuming the day's remaining
+      // candidates here would mean one button press cancels today's 21:00 cat
+      // trip. The scheduled hours still fire on their own; this only adds a
+      // run on top. (The trade-off is that a manual pass does not suppress the
+      // next automated one — which is the safer direction, and each job is
+      // idempotent anyway.)
       jobsRun += 1
       this.busy = true
       try {
@@ -755,15 +795,57 @@ export class WorkBuddyScheduler {
    * two hours still runs twice a day — but a job whose hour passed while DSH was
    * closed runs immediately on the next tick instead of waiting for tomorrow.
    */
-  private isDue(kind: JobKind, now: Date): boolean {
+  /**
+   * The configured slot `kind` should consume at `now`, or undefined when none.
+   *
+   * Returns the SLOT STRING (not a boolean) because the caller must record the
+   * same value it acted on. Returning a boolean was the original bug's enabler:
+   * the tick asked "is it due", then `runJob` independently wrote "what time is
+   * it now" — and those two answers were almost never equal.
+   *
+   * CATCH-UP semantics are deliberate: a candidate fires once its hour has
+   * PASSED and its slot is still unconsumed, so a laptop that slept through
+   * 10:00 still runs the job when it wakes, on the same day.
+   *
+   * The EARLIEST unconsumed candidate wins, which is what keeps a two-hour job
+   * (`travelHours: [9, 21]`) whole: consuming the earliest due slot leaves the
+   * later one for its own hour.
+   */
+  private dueSlot(kind: JobKind, now: Date): string | undefined {
     const hours = this.hoursOf(kind)
-    if (hours.length === 0) return false
-    const { hour } = zonedParts(now)
-    const current = Number(hour)
+    if (hours.length === 0) return undefined
+    const current = Number(zonedParts(now).hour)
     const today = dayKey(now)
-    // Any configured hour that has come due today and whose slot is still unrun.
-    return hours.some(candidate => candidate <= current
-      && this.states[kind].lastRunSlot !== `${today}T${String(candidate).padStart(2, '0')}`)
+    const fired = this.firedSlotsOf(kind)
+    // Ordered by configured hour, so the first match is the earliest due one.
+    for (const candidate of [...hours].sort((a, b) => a - b)) {
+      if (candidate > current) break
+      const slot = `${today}T${String(candidate).padStart(2, '0')}`
+      if (!fired.has(slot)) return slot
+    }
+    return undefined
+  }
+
+  /** Today's consumed slots for one job, as a set. */
+  private firedSlotsOf(kind: JobKind): Set<string> {
+    const state = this.states[kind]
+    const stored = state.firedSlots
+    if (stored === undefined) return new Set<string>()
+    // Drop entries from earlier days as we read: the set only ever answers
+    // "has TODAY's candidate run", so carrying yesterday's keys forward would
+    // grow it without bound and never change an answer.
+    const today = dayKey(this.now())
+    return new Set(stored.filter(slot => slot.startsWith(`${today}T`)))
+  }
+
+  /** Record one consumed slot on a job's state. */
+  private consumeSlot(kind: JobKind, slot: string): void {
+    const state = this.states[kind]
+    const today = dayKey(this.now())
+    const next = new Set([...this.firedSlotsOf(kind), slot])
+    // Persist in a stable order so the status document (and any future
+    // persistence of it) does not churn between reads.
+    state.firedSlots = [...next].filter(entry => entry.startsWith(`${today}T`)).sort()
   }
 
   private async tick(): Promise<void> {
@@ -773,20 +855,23 @@ export class WorkBuddyScheduler {
       const now = this.now()
       const slot = slotKey(now)
       const today = dayKey(now)
-      // Per SLOT, not per day: a job with two configured hours must run in both.
-      // Keying on the date is what left the cat out overnight.
       for (const kind of JOB_KINDS) {
         if (this.stopped) return
-        if (this.states[kind].lastRunSlot === slot) continue
-        // CATCH-UP: run if the configured hour has already PASSED and no slot
-        // for it has run today. The old equality test (`hour === configured`)
+        // Throttle only: never start the same job twice inside one clock hour.
+        // This is NOT the schedule ledger — that is `firedSlots`, checked by
+        // `dueSlot` below. Tying the throttle to the ledger is what let a
+        // catch-up run consume a slot it had not actually been scheduled for.
+        if (this.states[kind].lastFiredHour === slot) continue
+        // CATCH-UP: run if the configured hour has already PASSED and that
+        // slot is still unconsumed. The old equality test (`hour === configured`)
         // silently skipped the day whenever DSH was not running at that exact
         // hour — a 09:00 check-in never ran if the app started at 10:00. Asking
-        // "has the hour passed, and is that slot still unrun" makes a missed
+        // "has the hour passed, and is that slot still unspent" makes a missed
         // schedule self-heal on the next tick, which is what a laptop that
         // slept through the hour needs.
-        if (!this.isDue(kind, now)) continue
-        await this.runJob(kind, today)
+        const consumed = this.dueSlot(kind, now)
+        if (consumed === undefined) continue
+        await this.runJob(kind, today, consumed)
       }
     } catch (error: unknown) {
       // A defect in the loop itself must not kill the timer.
@@ -894,6 +979,12 @@ export class WorkBuddyScheduler {
   /**
    * Run one job against every eligible account and record the outcome.
    *
+   * `consumedSlot` is the configured slot this run spends (`dueSlot`'s answer).
+   * It is passed IN rather than recomputed here so the value recorded is exactly
+   * the value the schedule decided on — the defect this replaces wrote
+   * `slotKey(now)` instead, i.e. the clock time the run finished at, which
+   * almost never equals the configured candidate the gate had compared against.
+   *
    * The task job runs in TWO passes. The first sends the event chains that light
    * up client-scored tasks; the second collects rewards. They are separate
    * because scoring lands asynchronously — a chain sent and claimed within the
@@ -901,7 +992,7 @@ export class WorkBuddyScheduler {
    * while claiming wants the whole pool to have been lit up first. Splitting
    * them costs one shared wait instead of one wait per account.
    */
-  private async runJob(kind: JobKind, today: string): Promise<void> {
+  private async runJob(kind: JobKind, today: string, consumedSlot?: string): Promise<void> {
     const accountWord = kind === 'report' ? 'report' : kind
     let ok = 0
     let failed = 0
@@ -986,9 +1077,19 @@ export class WorkBuddyScheduler {
     }
 
     const state = this.states[kind]
-    // Both stamps: the slot is what the tick de-duplicates on, the date is what
-    // the card shows and what the ledger resets on.
-    state.lastRunSlot = slotKey(this.now())
+    // Three separate facts, three separate fields — collapsing any two of them
+    // is what produced the "runs every hour" defect:
+    //
+    //   firedSlots    what the SCHEDULE spent (configured hours, a set)
+    //   lastFiredHour when the run STARTED (throttle only)
+    //   lastRunAtMs   when the run FINISHED (displayed on the card)
+    //
+    // A manual run passes no `consumedSlot`; it still stamps `lastFiredHour`
+    // and `lastRunAtMs`, but it does NOT silently spend a scheduled slot it was
+    // never meant to consume — pressing "run now" at 10:35 must not cancel the
+    // 21:00 cat trip.
+    if (consumedSlot !== undefined) this.consumeSlot(kind, consumedSlot)
+    state.lastFiredHour = slotKey(this.now())
     state.lastRunDate = today
     state.lastRunAtMs = this.now().getTime()
     state.ok = ok
