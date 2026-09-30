@@ -291,42 +291,162 @@ export function macosBundleExecutable(bundle: string): string | undefined {
 }
 
 /**
+ * Encodings a Windows console child process may emit in, most likely first.
+ *
+ * `reg.exe` writes with the ACTIVE CODE PAGE, never UTF-8: a Chinese Windows
+ * (code page 936) returns a path containing 「腾讯」 as GBK bytes. Decoding
+ * those as UTF-8 mangles them into `��Ѷ`, every `existsSync` then fails, and the
+ * plugin concludes no desktop app is installed while one is running fine.
+ *
+ * The list is ordered and each entry is TRIED rather than guessed: the first
+ * decoding that yields usable text wins, and the decision is validated against
+ * the filesystem rather than by sniffing bytes.
+ */
+const WINDOWS_CONSOLE_ENCODINGS: readonly string[] = [
+  'utf-8',
+  // CJK code pages: 936 / 950 / 932 / 949.
+  'gbk', 'big5', 'shift_jis', 'euc-kr',
+  // Western single-byte pages, for a path with accented characters.
+  'windows-1252',
+]
+
+/**
+ * Decode bytes from a Windows console child process.
+ *
+ * `accept` decides whether a decoding is usable — the callers pass "this text
+ * contains a path that actually exists". Bytes that are already UTF-8 pass on
+ * the first attempt, so the healthy case pays nothing.
+ */
+function decodeWindowsConsole(buf: Buffer, accept: (text: string) => boolean): string {
+  for (const label of WINDOWS_CONSOLE_ENCODINGS) {
+    let text: string
+    try {
+      text = new TextDecoder(label, { fatal: false }).decode(buf)
+    } catch {
+      // Label unsupported by this Node build (small-icu): try the next one.
+      continue
+    }
+    if (accept(text)) return text
+  }
+  // Nothing satisfied the caller: return the UTF-8 reading so the failure is
+  // reported with the bytes we actually got, rather than silently empty.
+  return new TextDecoder('utf-8', { fatal: false }).decode(buf)
+}
+
+/** Strip the `"<path>",<index>` decoration DisplayIcon carries. */
+function cleanIconPath(raw: string): string {
+  return raw.replace(/^"/u, '').replace(/",-?\d+$/u, '').replace(/,-?\d+$/u, '').trim()
+}
+
+/** Registry locations the installer records its own product under. */
+const UNINSTALL_KEY_ROOTS: readonly string[] = [
+  'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+]
+
+/**
  * Windows install locations recorded by the app's own uninstaller.
  *
  * The registry is the authoritative answer: it survives a non-default drive, a
  * renamed folder and a differently-named executable, none of which any fixed
  * path list can predict. Real machines put the app at `D:\workbuddy\WorkBuddy.exe`
- * and `D:\workbuddyai\WorkBuddyAI.exe` — exactly the layouts a
- * `%ProgramFiles%\WorkBuddy\WorkBuddy.exe` probe cannot see, which is why the
- * plugin reported "the desktop app could not provide the key" for an app that was
- * installed and running.
+ * and `D:\ruanjian\anzhuang\腾讯\WorkBuddy\WorkBuddy.exe` — layouts a
+ * `%ProgramFiles%\WorkBuddy\WorkBuddy.exe` probe cannot see.
  *
  * `DisplayIcon` is the field that actually carries the path (observed as
  * `D:\workbuddy\WorkBuddy.exe,0`); `InstallLocation` is usually empty for these
  * installers, so both are read and either may contribute.
+ *
+ * Two readers, because neither alone is enough:
+ *
+ *  - **PowerShell first.** `Get-ItemProperty` talks to the registry API, so no
+ *    console code page is involved and non-ASCII paths come back intact. This
+ *    is the encoding-proof path.
+ *  - **`reg.exe` as a fallback**, for a machine where PowerShell is unavailable
+ *    (locked-down or stripped images). Its raw bytes are decoded through
+ *    {@link decodeWindowsConsole}, which is what the original code got wrong.
  *
  * Returns [] on any failure — a missing registry key is the normal case on
  * non-Windows, not an error.
  */
 function windowsRegistryAppPaths(): string[] {
   if (process.platform !== 'win32') return []
-  const roots: readonly [string, string][] = [
-    ['HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/**'],
-    ['HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/**'],
-    ['HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/**'],
-  ]
+  const viaPowerShell = windowsRegistryAppPathsViaPowerShell()
+  if (viaPowerShell.length > 0) return viaPowerShell
+  return windowsRegistryAppPathsViaReg()
+}
+
+/**
+ * Registry read through PowerShell, immune to the console code page.
+ *
+ * `[Console]::OutputEncoding` is set to UTF-8 so the bytes Node receives are
+ * UTF-8 regardless of the machine's code page. Values are printed one per line
+ * and matched by the caller, so a Chinese path survives the round trip.
+ *
+ * Best-effort: any failure (no PowerShell, no keys, a policy restriction)
+ * returns [], and the `reg.exe` reader takes over.
+ */
+function windowsRegistryAppPathsViaPowerShell(): string[] {
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    'try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}',
+    "$roots=@('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
+      + "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
+      + "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*')",
+    'foreach($r in $roots){',
+    '  Get-ItemProperty -Path $r | ForEach-Object {',
+    '    $dn=[string]$_.DisplayName; $di=[string]$_.DisplayIcon; $il=[string]$_.InstallLocation',
+    "    if($dn -match 'WorkBuddy|CodeBuddy' -or $di -match 'WorkBuddy|CodeBuddy'){",
+    "      if($di -ne ''){ Write-Output $di }",
+    "      if($il -ne ''){ Write-Output $il }",
+    '    }',
+    '  }',
+    '}',
+  ].join('\n')
+
+  let stdout: string
+  try {
+    stdout = execFileSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { encoding: 'utf8', timeout: 20_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+    )
+  } catch {
+    return []
+  }
   const out: string[] = []
-  for (const [root] of roots) {
-    let listing: string
+  for (const line of stdout.split(/\r?\n/u)) {
+    const cleaned = cleanIconPath(line.trim())
+    if (cleaned !== '') out.push(cleaned)
+  }
+  return out
+}
+
+/**
+ * Registry read through `reg.exe`, with console-code-page detection.
+ *
+ * Kept as the fallback for machines without PowerShell. The decode step is the
+ * fix: the output is captured as BYTES and decoded with whichever encoding
+ * yields a path that exists, instead of assuming UTF-8 and quietly producing
+ * mojibake that no existence check can ever match.
+ */
+function windowsRegistryAppPathsViaReg(): string[] {
+  const out: string[] = []
+  for (const root of UNINSTALL_KEY_ROOTS) {
+    let listingBuf: Buffer
     try {
       // reg.exe is part of Windows and needs no native module; asking it for the
       // whole hive in one call is far cheaper than shelling out per entry.
-      listing = execFileSync('reg', ['query', root, '/s', '/v', 'DisplayName'], {
-        encoding: 'utf8', timeout: 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+      listingBuf = execFileSync('reg', ['query', root, '/s', '/v', 'DisplayName'], {
+        timeout: 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
       })
     } catch {
       continue
     }
+    // Accept a decoding that mentions the product at all; the key NAMES are
+    // ASCII, so this stays robust even when a display name is Chinese.
+    const listing = decodeWindowsConsole(listingBuf, text => /WorkBuddy|CodeBuddy/iu.test(text))
     // Each key block we care about mentions WorkBuddy by display name; walk the
     // hive and read the value under the SAME key once it is recognised.
     const keys = listing.split(/\r?\n(?=HKEY_)/u).filter(block => /WorkBuddy|CodeBuddy/iu.test(block))
@@ -334,19 +454,28 @@ function windowsRegistryAppPaths(): string[] {
       const keyPath = /^(HKEY_[^\r\n]+)/u.exec(key)?.[1]?.trim()
       if (keyPath === undefined) continue
       for (const name of ['DisplayIcon', 'InstallLocation']) {
+        let valueBuf: Buffer
         try {
-          const value = execFileSync('reg', ['query', keyPath, '/v', name], {
-            encoding: 'utf8', timeout: 5_000, windowsHide: true,
+          valueBuf = execFileSync('reg', ['query', keyPath, '/v', name], {
+            timeout: 5_000, windowsHide: true,
           })
-          const match = /REG_(?:SZ|EXPAND_SZ)\s+(.+)$/mu.exec(value)
-          const raw = match?.[1]?.trim()
-          if (raw === undefined || raw === '') continue
-          // DisplayIcon is `"<path>",<index>` or `<path>,<index>`.
-          const cleaned = raw.replace(/^"/u, '').replace(/",-?\d+$/u, '').replace(/,-?\d+$/u, '').trim()
-          out.push(cleaned)
         } catch {
           // Value absent on this key: try the next one.
+          continue
         }
+        // Ask for a decoding whose path ACTUALLY EXISTS — that is the only
+        // signal that distinguishes correct bytes from plausible-looking
+        // mojibake, and it is why this validates against the filesystem.
+        const value = decodeWindowsConsole(valueBuf, text => {
+          const candidate = /REG_(?:SZ|EXPAND_SZ)\s+(.+)$/mu.exec(text)?.[1]?.trim()
+          if (candidate === undefined) return false
+          const path = cleanIconPath(candidate)
+          return path !== '' && existsSync(path)
+        })
+        const match = /REG_(?:SZ|EXPAND_SZ)\s+(.+)$/mu.exec(value)
+        const raw = match?.[1]?.trim()
+        if (raw === undefined || raw === '') continue
+        out.push(cleanIconPath(raw))
       }
     }
   }

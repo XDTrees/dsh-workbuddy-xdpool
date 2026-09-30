@@ -175,7 +175,9 @@ export class WorkBuddyEncryptedCredentialError extends Error {
         + ' If the app IS installed, it is simply outside the paths this plugin probes — set '
         + 'WORKBUDDY_APP_EXECUTABLE to its full .exe path (then restart DSH) and the credential will open.'
         + ' Signing in again will not help: the credential itself is intact. '
-        + 'Run `dsh-workbuddy-xdpool doctor` to see which paths were probed.',
+        + 'Run `dsh-workbuddy-xdpool doctor` to see which paths were probed — if one of them looks like '
+        + 'mojibake (e.g. "??" where a Chinese folder name should be), the registry value could not be '
+        + 'decoded on this machine; report that line and use the override above in the meantime.',
     )
     this.name = 'WorkBuddyEncryptedCredentialError'
   }
