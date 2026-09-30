@@ -24,7 +24,8 @@ import type { WorkBuddyCatalog } from './catalog.ts'
 import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
-import { emptyLedger, usageRowsFor, usageTotalsFor, type UsageLedger } from './usage.ts'
+import { emptyLedger, usageRowsFor, usageTotalsFor, localDayKey, usageSummary } from './usage.ts'
+import type { UsageLedger } from './usage.ts'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_ACCOUNT_IGNORE_PATH,
@@ -77,6 +78,14 @@ export interface PoolStatusRouteOptions {
    * card then shows no usage rows rather than a broken panel.
    */
   usage?: () => UsageLedger
+  /**
+   * Which gateway one account id belongs to.
+   *
+   * The ledger is keyed by account id alone, so this is what lets the usage
+   * panel split by region. Absent means every account reads as `cn`, which is
+   * the same default `regionOf` applies to an empty domain.
+   */
+  accountRegion?: (accountId: string) => string
   /**
   /**
    * Start a manual pass, for the card's "run now" button.
@@ -398,6 +407,10 @@ export async function poolWebStatus(
   const selection: PoolWebModelSelection = deps.catalogs[region].currentSelection()
   const rows: PoolWebAccount[] = []
   const now = Date.now()
+  // The usage ledger is read ONCE per document: it backs the per-account rows
+  // below, the usage window, AND the summary section. Reading it per account
+  // would be O(accounts) passes over the same list.
+  const usage = deps.usage?.() ?? emptyLedger()
 
   for (const account of accounts) {
     const row = toWebAccount(
@@ -413,9 +426,9 @@ export async function poolWebStatus(
     // Today's per-model usage. This is the ONLY evidence a free or
     // quota-limited model leaves: it moves no credits, so the balance row below
     // stays flat no matter how much of its daily allowance is gone.
-    const usage = deps.usage?.() ?? emptyLedger()
     const usageRows = usageRowsFor(usage, account.id)
-    if (usageRows.length > 0) Object.assign(row, { usageToday: usageRows, usageDate: usage.date })
+    const today = localDayKey()
+    if (usageRows.length > 0) Object.assign(row, { usageToday: usageRows, usageDate: today })
     // The same day, summed: the account ROW shows today's spend at a glance,
     // while the dialog keeps the per-model breakdown.
     const usageTotals = usageTotalsFor(usage, account.id)
@@ -524,6 +537,10 @@ export async function poolWebStatus(
     regions,
     shim,
     automation,
+    // The usage window, split every way the panel shows it. Region-scoped like
+    // the rest of the document: each tab charts its own gateway's accounts, and
+    // a shared figure would put the other region's traffic in this one.
+    usage: usageSummary(usage, { accountRegion: deps.accountRegion }),
     creditReserves: deps.pool.creditReservesInOrder(),
     // The accounts thrown out of the pool. Reported on every region's document
     // (not just the one they came from) because the list is a property of the

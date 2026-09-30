@@ -20,9 +20,12 @@ import {
   localDayKey,
   normalizeLedger,
   recordUsage,
+  retainRecentDays,
+  usageTotalsFor,
   usageRowsFor,
   type UsageLedger,
   type UsageRow,
+  type UsageTotals,
 } from './usage.ts'
 import type { StreamUsage } from './usage-stream.ts'
 import {
@@ -942,6 +945,16 @@ export class WorkBuddyAccountPool {
     return usageRowsFor(this.usage, accountId)
   }
 
+  /**
+   * Today's usage for one account, summed over models.
+   *
+   * Absent for an account that served nothing today. This is what the account
+   * ROW shows; {@link usageFor} is the dialog's per-model breakdown of it.
+   */
+  usageToday(accountId: string): UsageTotals | undefined {
+    return usageTotalsFor(this.usage, accountId)
+  }
+
   /** The whole usage ledger, for the status route and diagnostics. */
   usageLedger(): UsageLedger {
     return this.usage
@@ -960,15 +973,17 @@ export class WorkBuddyAccountPool {
   }
 
   /**
-   * Fold a persisted ledger back in when it belongs to today.
+   * Fold a persisted ledger back in at startup.
    *
-   * A ledger from an earlier day is ignored outright: the counters are daily,
-   * and adopting yesterday's rows would make "today" mean "since the last save".
+   * The whole window is adopted, not just today: the days are what the usage
+   * panel charts, and dropping them would erase the trend on every restart.
+   * `normalizeLedger` has already dropped anything malformed, and the retention
+   * window is re-applied so a document written by a build with a longer window
+   * cannot grow the file back.
    */
   applyUsageLedger(ledger: UsageLedger): void {
-    const today = localDayKey()
-    if (ledger.date !== today) return
-    this.usage = normalizeLedger({ date: today, accounts: ledger.accounts })
+    const normalized = normalizeLedger(ledger)
+    this.usage = { days: retainRecentDays(normalized.days) }
   }
 
   /**

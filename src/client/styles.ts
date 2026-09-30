@@ -183,6 +183,33 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-switch:disabled{cursor:default;opacity:.55}
 .dsm-workbuddy-xdpool-switch-on{background:var(--dsw-alias-state-success-primary,#22a06b);border-color:var(--dsw-alias-state-success-primary,#22a06b)}
 
+/* ------------------------------------------------------------ usage ----- */
+/*
+ * The usage panel sits below the two columns and owns the full width: the
+ * chart needs horizontal room that a half-width column cannot give it.
+ */
+.dsm-workbuddy-xdpool-usage-body{flex-direction:column;gap:10px;padding:10px 12px 12px;display:flex}
+/*
+ * The trend strip. Columns share the width equally rather than being sized by
+ * their value, so a 30-day window stays readable and the gaps line up.
+ */
+.dsm-workbuddy-xdpool-usage-chart{align-items:flex-end;gap:2px;height:56px;padding:2px 0;display:flex}
+.dsm-workbuddy-xdpool-usage-bar{flex:1 1 0;min-width:2px;height:100%;border-radius:2px;background:color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 35%, transparent);display:flex;align-items:flex-end}
+/* A day with no traffic keeps its slot, so the gap is visible. */
+.dsm-workbuddy-xdpool-usage-bar-empty{background:transparent}
+.dsm-workbuddy-xdpool-usage-bar-fill{width:100%;border-radius:2px;background:var(--dsw-alias-state-success-primary,#22a06b);transition:height .18s}
+.dsm-workbuddy-xdpool-usage-bar-empty .dsm-workbuddy-xdpool-usage-bar-fill{display:none}
+/*
+ * One line per model / account / region: name on the left, then the two
+ * figures in fixed columns so the numbers line up as a table would.
+ */
+.dsm-workbuddy-xdpool-usage-table{flex-direction:column;display:flex}
+.dsm-workbuddy-xdpool-usage-line{align-items:center;gap:10px;padding:4px 2px;display:flex}
+.dsm-workbuddy-xdpool-usage-line+.dsm-workbuddy-xdpool-usage-line{border-top:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 22%, transparent)}
+.dsm-workbuddy-xdpool-usage-name{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-workbuddy-xdpool-usage-num{flex:none;width:82px;text-align:right;color:var(--dsw-alias-label-primary,#e6e6e6);font-size:11.5px;line-height:17px;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-usage-num-dim{color:var(--dsw-alias-label-tertiary,#9aa0a8)}
+
 /* ------------------------------------------------------- automation row -- */
 .dsm-workbuddy-xdpool-auto{align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;display:flex}
 .dsm-workbuddy-xdpool-auto-copy{flex-direction:column;gap:1px;min-width:0;flex:1 1 180px;display:flex}

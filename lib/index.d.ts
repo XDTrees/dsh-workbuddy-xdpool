@@ -751,10 +751,15 @@ export declare class WorkBuddyUpstreamClient {
  * upstream itself reports: the request count, and the token counts carried in
  * the SSE `usage` frame when the gateway sends one.
  *
- * On disk the ledger is one JSON document holding the CURRENT day only. Keeping
- * history would grow without bound for a number the card only ever reads as
- * "today", and a stale day is discarded on load rather than relabelled as
- * today — the same rule the automation earnings ledger uses.
+ * On disk the ledger keeps the last {@link USAGE_RETENTION_DAYS} days of these
+ * buckets, which is what lets the card show a trend rather than a single day.
+ * Today is always the LAST entry and every reader asks for it by date, so a
+ * document written by an older build — one flat day — still reads correctly.
+ * Anything older than the retention window is dropped as the document is
+ * written, so the file cannot grow without bound.
+ *
+ * History starts when this build first runs: earlier usage was never persisted
+ * and cannot be reconstructed, so the trend begins on the day of the upgrade.
  *
  * @module dsh-workbuddy-xdpool/usage
  */
@@ -784,21 +789,33 @@ interface UsageCounters {
   lastUsedAt: string;
 }
 /**
- * The whole ledger: one day, every account, every model.
+ * One day's counters: every account, every model.
  *
  * `accounts` maps account id → model id → counters. The nesting is nested
  * rather than a flat `accountId/modelId` key because both halves of the key are
  * opaque upstream strings that can contain any character; a separator-based key
  * would collide on a model id that happens to contain the separator.
  */
-interface UsageLedger {
+interface UsageDay {
   /** Local day the counters belong to, `YYYY-MM-DD`. */
   date: string;
   accounts: Record<string, Record<string, UsageCounters>>;
 }
+/**
+ * The whole ledger: an ordered list of days, oldest first.
+ *
+ * A list rather than a `date → day` map so the days keep a stable order without
+ * anyone having to sort them on read, and so "today" is simply the last entry.
+ * Every consumer that only cares about one day asks for it by date, which is
+ * what keeps this backwards-compatible with a document holding a single day.
+ */
+interface UsageLedger {
+  /** Oldest first; the last entry is the most recent day held. */
+  days: readonly UsageDay[];
+}
 /** `YYYY-MM-DD` in local time, matching how every other day key is built. */
 export declare function localDayKey(date?: Date): string;
-/** An empty ledger for one day. */
+/** An empty ledger holding one day. */
 export declare function emptyLedger(date?: string): UsageLedger;
 /**
  * Normalize a decoded document into a ledger.
@@ -808,28 +825,26 @@ export declare function emptyLedger(date?: string): UsageLedger;
  * "nothing recorded" rather than take the card down. Entries that carry no
  * usable counter are dropped rather than kept as zero rows, so the card's list
  * of "what used this model today" stays honest.
+ *
+ * Two shapes are accepted. `{version, days: [...]}` is what this build writes.
+ * `{version, date, accounts}` is a single-day document from an earlier build;
+ * it is read as one day so an upgrade does not throw away today's counts.
+ * Both are normalized to the same list, sorted oldest-first and de-duplicated
+ * by date (later entries win, which matters only for a hand-edited file).
  */
 export declare function normalizeLedger(raw: unknown): UsageLedger;
 /**
  * Read the ledger, tolerating every "no ledger yet" shape.
  *
  * A missing file, an unreadable one, or invalid JSON all mean the same thing —
- * nothing recorded — so none of them throws. A ledger left over from an earlier
- * day is discarded rather than counted as today: the counters are daily by
- * definition, and carrying them forward would make "today" mean "ever".
+ * nothing recorded — so none of them throws. Days are NOT filtered by date
+ * here: history is the point, and a ledger whose newest day is older than today
+ * simply has nothing for today (which the readers handle). The retention window
+ * is applied on write.
  */
 export declare function readUsageLedger(path?: string): Promise<UsageLedger>;
 /** Synchronous read, for startup. See {@link readUsageLedger} for the rules. */
 export declare function readUsageLedgerSync(path?: string): UsageLedger;
-/**
- * Replace the ledger, atomically.
- *
- * Written to a sibling temp file and renamed over the target, so a crash or a
- * concurrent reader never observes a half-written document: a truncated ledger
- * reads as "no usage", which would silently under-report a model that is
- * already near its daily allowance — the one case the feature exists to catch.
- */
-export declare function writeUsageLedger(ledger: UsageLedger, path?: string): Promise<void>;
 /**
  * One usage report, as measured while a stream is served.
  *
@@ -851,16 +866,25 @@ export declare const UNKNOWN_MODEL_ID = "(unknown)";
 /**
  * Fold one report into a ledger, returning a NEW ledger.
  *
- * Pure on purpose: the caller owns persistence and roll-over, so the counting
- * rule (including the day boundary and the unreported-token distinction) is
- * testable without touching the filesystem or a clock.
+ * Pure on purpose: the caller owns persistence, so the counting rule (including
+ * the day boundary, retention and the unreported-token distinction) is testable
+ * without touching the filesystem or a clock.
  *
- * A report for a different day than the ledger's resets the ledger first. That
- * matters because the process outlives midnight: a long-running host would
- * otherwise keep adding to yesterday's rows and the card would show a day that
- * has already ended.
+ * A report for a day the ledger does not hold appends that day, which is what
+ * carries the ledger across midnight in a long-running process: without it,
+ * every request after midnight would keep adding to yesterday's row and the
+ * card would show a day that has already ended.
  */
 export declare function recordUsage(ledger: UsageLedger, report: UsageReport, day?: string): UsageLedger;
+/**
+ * Replace the ledger, atomically.
+ *
+ * Written to a sibling temp file and renamed over the target, so a crash or a
+ * concurrent reader never observes a half-written document: a truncated ledger
+ * reads as "no usage", which would silently under-report a model that is
+ * already near its daily allowance — the one case the feature exists to catch.
+ */
+export declare function writeUsageLedger(ledger: UsageLedger, path?: string): Promise<void>;
 /** One account's row for one model, as the card renders it. */
 interface UsageRow {
   modelId: string;
@@ -878,22 +902,22 @@ interface UsageTotals {
   tokensReported: boolean;
 }
 /**
- * One account's usage today, newest-used model first.
+ * One account's usage on one day, newest-used model first.
  *
  * Sorted by recency rather than by model id: the model a user is actually
  * working with is the one they just used, and an alphabetical list buries it.
  */
-export declare function usageRowsFor(ledger: UsageLedger, accountId: string): UsageRow[];
+export declare function usageRowsFor(ledger: UsageLedger, accountId: string, date?: string): UsageRow[];
 /** Every account's usage today, keyed by account id. */
-export declare function usageByAccount(ledger: UsageLedger): Record<string, UsageRow[]>;
+export declare function usageByAccount(ledger: UsageLedger, date?: string): Record<string, UsageRow[]>;
 /**
- * One account's usage today, summed over every model.
+ * One account's usage on one day, summed over every model.
  *
  * `tokens` adds only the models that reported a usage frame, and
  * `tokensReported` says whether any did: a gateway that sends no usage frame
  * yields a request count with no token claim rather than a token figure of 0.
  */
-export declare function usageTotalsFor(ledger: UsageLedger, accountId: string): UsageTotals | undefined;
+export declare function usageTotalsFor(ledger: UsageLedger, accountId: string, date?: string): UsageTotals | undefined;
 //#endregion
 //#region src/usage-stream.d.ts
 /**
@@ -1267,6 +1291,13 @@ export declare class WorkBuddyAccountPool {
    * renders as "no usage recorded" rather than a row of zeroes.
    */
   usageFor(accountId: string): UsageRow[];
+  /**
+   * Today's usage for one account, summed over models.
+   *
+   * Absent for an account that served nothing today. This is what the account
+   * ROW shows; {@link usageFor} is the dialog's per-model breakdown of it.
+   */
+  usageToday(accountId: string): UsageTotals | undefined;
   /** The whole usage ledger, for the status route and diagnostics. */
   usageLedger(): UsageLedger;
   /**
@@ -1279,10 +1310,13 @@ export declare class WorkBuddyAccountPool {
    */
   setUsagePersistence(save: (ledger: UsageLedger) => void | Promise<void>): void;
   /**
-   * Fold a persisted ledger back in when it belongs to today.
+   * Fold a persisted ledger back in at startup.
    *
-   * A ledger from an earlier day is ignored outright: the counters are daily,
-   * and adopting yesterday's rows would make "today" mean "since the last save".
+   * The whole window is adopted, not just today: the days are what the usage
+   * panel charts, and dropping them would erase the trend on every restart.
+   * `normalizeLedger` has already dropped anything malformed, and the retention
+   * window is re-applied so a document written by a build with a longer window
+   * cannot grow the file back.
    */
   applyUsageLedger(ledger: UsageLedger): void;
   /**
@@ -1615,6 +1649,13 @@ interface PoolWebStatus {
   };
   /** Daily-points automation state, so the card can show what ran and when. */
   automation: PoolWebAutomation;
+  /**
+   * Usage over the retained window, for THIS region's accounts.
+   *
+   * Region-scoped like the rest of the document: each tab charts its own
+   * gateway, and one shared figure would put the other region's traffic here.
+   */
+  usage: PoolWebUsageSummary;
   /** Per-account credit floors currently in force, keyed by account id. */
   creditReserves: Readonly<Record<string, number>>;
   /**
@@ -1773,6 +1814,34 @@ interface PoolWebUsageTotals {
   requests: number;
   tokens: number;
   tokensReported: boolean;
+}
+/** One row of the usage panel: a slice of the window, with its counters. */
+interface PoolWebUsageSlice {
+  /** Date, model id, account id, or region — whichever dimension the slice is on. */
+  key: string;
+  requests: number;
+  tokens: number;
+  /** False when no request in this slice carried a token count. */
+  tokensReported: boolean;
+}
+/**
+ * Usage over the retained window, split every way the panel shows it.
+ *
+ * All four breakdowns are computed host-side from one ledger so the card never
+ * has to agree with the host about what "a day" or "a model" means. `days`
+ * includes quiet days as zero rows on purpose: the chart's job is to show the
+ * gap, and dropping empty days would compress a quiet weekend into nothing.
+ */
+interface PoolWebUsageSummary {
+  /** First and last day covered, `YYYY-MM-DD`. */
+  from: string;
+  to: string;
+  days: readonly PoolWebUsageSlice[];
+  models: readonly PoolWebUsageSlice[];
+  accounts: readonly PoolWebUsageSlice[];
+  /** Keyed `cn` / `global`. */
+  regions: readonly PoolWebUsageSlice[];
+  totals: PoolWebUsageTotals;
 }
 /**
  * The two gateways, matching the provider ids the host registers. `cn` is the
@@ -2672,6 +2741,14 @@ interface PoolStatusRouteOptions {
    * card then shows no usage rows rather than a broken panel.
    */
   usage?: () => UsageLedger;
+  /**
+   * Which gateway one account id belongs to.
+   *
+   * The ledger is keyed by account id alone, so this is what lets the usage
+   * panel split by region. Absent means every account reads as `cn`, which is
+   * the same default `regionOf` applies to an empty domain.
+   */
+  accountRegion?: (accountId: string) => string;
   /**
     /**
      * Start a manual pass, for the card's "run now" button.

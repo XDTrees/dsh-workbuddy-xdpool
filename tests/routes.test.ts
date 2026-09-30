@@ -26,6 +26,7 @@ import {
   POOL_STATUS_PATH,
 } from '../src/status-paths.ts'
 import { WorkBuddyUpstreamClient } from '../src/upstream.ts'
+import { emptyLedger, localDayKey, recordUsage } from '../src/usage.ts'
 import { registerPoolStatusRoute } from '../src/web-status.ts'
 
 /** Write a fake auth directory holding `count` accounts. */
@@ -75,7 +76,10 @@ function fakeContext(routes: Map<string, unknown>): { ctx: unknown; disposers: (
 }
 
 /** Mount the routes over a scanned pool and hand back the route table. */
-async function mount(accounts = 1): Promise<Map<string, unknown>> {
+async function mount(
+  accounts = 1,
+  extra: Record<string, unknown> = {},
+): Promise<Map<string, unknown>> {
   const pool = new WorkBuddyAccountPool({ authDirs: [await fakeAuthDir(accounts)], logger: { warn() {} } })
   await pool.scan()
   const routes = new Map<string, unknown>()
@@ -88,8 +92,22 @@ async function mount(accounts = 1): Promise<Map<string, unknown>> {
     setAccountDisabled() {},
     setCreditReserve() {},
     runAutomation: async () => ({ ok: 1, failed: 0, credit: 0, energy: 0, claimed: 0 }),
-  })
+    ...extra,
+  } as never)
   return routes
+}
+
+/** Call the status route and decode its JSON body. */
+async function fetchStatus(routes: Map<string, unknown>): Promise<Record<string, unknown>> {
+  const handler = routes.get(POOL_STATUS_PATH) as (req: unknown, res: unknown) => Promise<void>
+  const res = {
+    status: 0,
+    body: undefined as unknown,
+    writeHead(status: number) { this.status = status },
+    end(payload: string) { this.body = JSON.parse(payload) },
+  }
+  await handler({ method: 'GET', headers: { origin: 'http://localhost:3000' }, on() {}, destroy() {} }, res)
+  return res.body as Record<string, unknown>
 }
 
 describe('pool card route table', () => {
@@ -171,5 +189,39 @@ describe('pool card route table', () => {
     }
     await handler({ method: 'GET', headers: { origin: 'http://localhost:3000' }, on() {}, destroy() {} }, res)
     expect(res.status).toBe(405)
+  })
+
+  /**
+   * The status document must carry a usage summary. This is the wiring a UI
+   * test cannot cover: the panel renders whatever it is handed, and if the host
+   * never passes `usage` the card silently shows nothing while every component
+   * test still passes.
+   */
+  it('carries a usage summary built from the pool ledger', async () => {
+    let ledger = emptyLedger('2026-09-21')
+    ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3', promptTokens: 30, completionTokens: 20 }, '2026-09-21')
+    const routes = await mount(1, {
+      usage: () => ledger,
+      accountRegion: () => 'cn',
+    })
+
+    const body = await fetchStatus(routes)
+    const usage = body['usage'] as Record<string, unknown>
+    expect(usage).toBeDefined()
+    expect(usage['to']).toBe(localDayKey())
+    // The traffic landed on a day inside the window, so the totals see it.
+    expect(usage['totals']).toEqual({ requests: 1, tokens: 50, tokensReported: true })
+    expect((usage['models'] as unknown[])[0]).toMatchObject({ key: 'hy3', requests: 1 })
+    expect((usage['regions'] as unknown[])[0]).toMatchObject({ key: 'cn', requests: 1 })
+  })
+
+  it('reports an empty usage window when the host keeps no ledger', async () => {
+    const routes = await mount()
+    const body = await fetchStatus(routes)
+    const usage = body['usage'] as Record<string, unknown>
+    // Present and well-formed, so the card can render its "nothing yet" state
+    // without guarding every field.
+    expect(usage['totals']).toEqual({ requests: 0, tokens: 0, tokensReported: false })
+    expect((usage['days'] as unknown[]).length).toBeGreaterThan(0)
   })
 })

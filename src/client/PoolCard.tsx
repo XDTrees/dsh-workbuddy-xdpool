@@ -36,6 +36,7 @@ import {
   type PoolWebAutomationJob,
   type PoolWebModel,
   type PoolWebStatus,
+  type PoolWebUsageSummary,
   type PoolRegion,
   type PoolWebCreditPackage,
   type PoolWebCredits,
@@ -134,6 +135,27 @@ function splitLabel(label: string): { name: string; discriminator?: string } {
   const discriminator = label.slice(cut + 1)
   if (discriminator === '') return { name: label }
   return { name: label.slice(0, cut), discriminator }
+}
+
+/**
+ * The display name for an account id, as the account list shows it.
+ *
+ * The usage ledger outlives an account's presence in the pool — an account
+ * removed since it served a request still has rows — so an unresolved id falls
+ * back to the id itself rather than vanishing from the breakdown.
+ */
+function accountLabelOf(status: PoolWebStatus, accountId: string): string {
+  const account = status.accounts.find(entry => entry.id === accountId)
+  if (account === undefined) return accountId
+  const { name } = splitLabel(account.label)
+  return name
+}
+
+/** Localized name for a region key in the usage breakdown. */
+function regionLabelOf(key: string, t?: PoolCardProps['t']): string {
+  if (key === 'cn') return t?.('row.tabCn') ?? 'cn'
+  if (key === 'global') return t?.('row.tabGlobal') ?? 'global'
+  return key
 }
 
 function formatTime(value: number): string {
@@ -1314,6 +1336,11 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
           </div>
         : null}
 
+      {/* ---- usage panel ---- */}
+      {status === undefined
+        ? null
+        : <UsagePanel usage={status.usage} t={t} accountLabel={id => accountLabelOf(status, id)} />}
+
       {/* ---- dialogs ---- */}
       {openAccount === undefined
         ? null
@@ -1460,6 +1487,149 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
             </div>
           </Dialog>
         : null}
+    </section>
+  )
+}
+
+/**
+ * The usage panel: what the pool served over the retained window.
+ *
+ * Four breakdowns of one window, all computed host-side so the card never has
+ * to agree with the host about what a day or a model is:
+ *
+ *  - the totals, which answer "how much today / this window";
+ *  - a per-day bar strip, which is the trend;
+ *  - per-model and per-account tables, which answer "what spent it";
+ *  - a per-region split, which is the one dimension a reader cannot infer,
+ *    because the two gateways' accounts are otherwise just rows in one list.
+ *
+ * Tokens are shown only for requests that carried a usage frame. A model the
+ * gateway reports nothing for still gets its request count — the alternative is
+ * a confident "0" for traffic that demonstrably happened.
+ *
+ * Nothing is drawn when the window holds no requests at all: an empty panel
+ * with four zeroed tables is worse than no panel, because it looks like a
+ * broken feature rather than an idle pool.
+ */
+function UsagePanel({
+  usage,
+  t,
+  accountLabel,
+}: {
+  usage: PoolWebUsageSummary | undefined
+  t?: PoolCardProps['t']
+  /** Resolve an account id to the name the account list shows. */
+  accountLabel: (accountId: string) => string
+}) {
+  const [tab, setTab] = useState<'models' | 'accounts' | 'regions'>('models')
+  if (usage === undefined || usage.totals.requests === 0) return null
+
+  const peak = usage.days.reduce((max, day) => Math.max(max, day.requests), 0)
+  const rows = tab === 'models' ? usage.models : tab === 'accounts' ? usage.accounts : usage.regions
+  const today = usage.days[usage.days.length - 1]
+
+  return (
+    <section className="dsm-workbuddy-xdpool-card" aria-label={t?.('row.usageTitle') ?? 'Usage'}>
+      <div className="dsm-workbuddy-xdpool-col-head">
+        <h3 className="dsm-workbuddy-xdpool-col-title">{t?.('row.usageTitle') ?? 'Usage'}</h3>
+        <span className="dsm-workbuddy-xdpool-col-count">
+          {t?.('row.usageWindow', { from: usage.from, to: usage.to }) ?? `${usage.from} → ${usage.to}`}
+        </span>
+        <span className="dsm-workbuddy-xdpool-col-actions">
+          <div className="dsm-workbuddy-xdpool-seg" role="tablist">
+            {(['models', 'accounts', 'regions'] as const).map(kind => (
+              <button
+                key={kind}
+                type="button"
+                role="tab"
+                aria-selected={tab === kind}
+                className={`dsm-workbuddy-xdpool-seg-btn${tab === kind ? ' dsm-workbuddy-xdpool-seg-btn-active' : ''}`}
+                onClick={() => { setTab(kind) }}
+              >
+                {kind === 'models'
+                  ? (t?.('row.usageByModel') ?? 'Models')
+                  : kind === 'accounts'
+                    ? (t?.('row.usageByAccount') ?? 'Accounts')
+                    : (t?.('row.usageByRegion') ?? 'Regions')}
+              </button>
+            ))}
+          </div>
+        </span>
+      </div>
+
+      <div className="dsm-workbuddy-xdpool-usage-body">
+        {/* Totals. Requests always; tokens only when something reported them. */}
+        <div className="dsm-workbuddy-xdpool-facts">
+          <div className="dsm-workbuddy-xdpool-fact">
+            <span className="dsm-workbuddy-xdpool-fact-label">
+              {t?.('row.usageRequestsTotal') ?? 'Requests'}
+            </span>
+            <span className="dsm-workbuddy-xdpool-fact-value">{formatNumber(usage.totals.requests)}</span>
+            {today === undefined
+              ? null
+              : <span className="dsm-workbuddy-xdpool-fact-when">
+                  {t?.('row.usageTodayCount', { count: formatNumber(today.requests) })
+                    ?? `${formatNumber(today.requests)} today`}
+                </span>}
+          </div>
+          <div className="dsm-workbuddy-xdpool-fact">
+            <span className="dsm-workbuddy-xdpool-fact-label">
+              {t?.('row.usageTokensTotal') ?? 'Tokens'}
+            </span>
+            <span className="dsm-workbuddy-xdpool-fact-value">
+              {usage.totals.tokensReported ? formatNumber(usage.totals.tokens) : '–'}
+            </span>
+            {usage.totals.tokensReported
+              ? null
+              : <span className="dsm-workbuddy-xdpool-fact-when">
+                  {t?.('row.usageTokensUnknown') ?? 'not reported'}
+                </span>}
+          </div>
+        </div>
+
+        {/* The trend. One column per day, scaled to the busiest day in the
+            window, with the quiet days kept as empty slots so a gap reads as a
+            gap instead of silently closing up. */}
+        <div className="dsm-workbuddy-xdpool-usage-chart" title={t?.('row.usageChartHint') ?? 'Requests per day'}>
+          {usage.days.map(day => (
+            <span
+              key={day.key}
+              className={`dsm-workbuddy-xdpool-usage-bar${day.requests === 0 ? ' dsm-workbuddy-xdpool-usage-bar-empty' : ''}`}
+              title={`${day.key} · ${t?.('row.usageRequests', { count: day.requests }) ?? `${day.requests} req`}`
+                + (day.tokensReported
+                  ? ` · ${t?.('row.usageTokens', { tokens: formatNumber(day.tokens) }) ?? `${formatNumber(day.tokens)} tok`}`
+                  : '')}
+            >
+              <span
+                className="dsm-workbuddy-xdpool-usage-bar-fill"
+                style={{ height: `${peak === 0 ? 0 : Math.max(6, Math.round((day.requests / peak) * 100))}%` }}
+              />
+            </span>
+          ))}
+        </div>
+
+        {/* The breakdown for the selected tab. */}
+        <div className="dsm-workbuddy-xdpool-usage-table">
+          {rows.length === 0
+            ? <p className="dsm-workbuddy-xdpool-col-empty">{t?.('row.usageEmpty') ?? 'Nothing yet'}</p>
+            : rows.map(row => (
+                <div key={row.key} className="dsm-workbuddy-xdpool-usage-line">
+                  <span className="dsm-workbuddy-xdpool-usage-name" title={row.key}>
+                    {tab === 'accounts' ? accountLabel(row.key) : regionLabelOf(row.key, t)}
+                  </span>
+                  <span className="dsm-workbuddy-xdpool-usage-num">
+                    {t?.('row.usageRequests', { count: formatNumber(row.requests) })
+                      ?? `${formatNumber(row.requests)} req`}
+                  </span>
+                  <span className="dsm-workbuddy-xdpool-usage-num dsm-workbuddy-xdpool-usage-num-dim">
+                    {row.tokensReported
+                      ? (t?.('row.usageTokens', { tokens: formatNumber(row.tokens) }) ?? `${formatNumber(row.tokens)} tok`)
+                      : '–'}
+                  </span>
+                </div>
+              ))}
+        </div>
+      </div>
     </section>
   )
 }

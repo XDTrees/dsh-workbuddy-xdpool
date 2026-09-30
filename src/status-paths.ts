@@ -308,6 +308,13 @@ export interface PoolWebStatus {
   shim: { running: boolean; baseUrl?: string }
   /** Daily-points automation state, so the card can show what ran and when. */
   automation: PoolWebAutomation
+  /**
+   * Usage over the retained window, for THIS region's accounts.
+   *
+   * Region-scoped like the rest of the document: each tab charts its own
+   * gateway, and one shared figure would put the other region's traffic here.
+   */
+  usage: PoolWebUsageSummary
   /** Per-account credit floors currently in force, keyed by account id. */
   creditReserves: Readonly<Record<string, number>>
   /**
@@ -472,6 +479,36 @@ export interface PoolWebUsageTotals {
   requests: number
   tokens: number
   tokensReported: boolean
+}
+
+/** One row of the usage panel: a slice of the window, with its counters. */
+export interface PoolWebUsageSlice {
+  /** Date, model id, account id, or region — whichever dimension the slice is on. */
+  key: string
+  requests: number
+  tokens: number
+  /** False when no request in this slice carried a token count. */
+  tokensReported: boolean
+}
+
+/**
+ * Usage over the retained window, split every way the panel shows it.
+ *
+ * All four breakdowns are computed host-side from one ledger so the card never
+ * has to agree with the host about what "a day" or "a model" means. `days`
+ * includes quiet days as zero rows on purpose: the chart's job is to show the
+ * gap, and dropping empty days would compress a quiet weekend into nothing.
+ */
+export interface PoolWebUsageSummary {
+  /** First and last day covered, `YYYY-MM-DD`. */
+  from: string
+  to: string
+  days: readonly PoolWebUsageSlice[]
+  models: readonly PoolWebUsageSlice[]
+  accounts: readonly PoolWebUsageSlice[]
+  /** Keyed `cn` / `global`. */
+  regions: readonly PoolWebUsageSlice[]
+  totals: PoolWebUsageTotals
 }
 
 

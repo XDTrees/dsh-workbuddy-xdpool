@@ -826,11 +826,11 @@ function canonicalJson(value: unknown): string {
   const storedLedger = current().automationEarnings
   if (storedLedger !== undefined) core.scheduler.applyEarningsLedger(storedLedger)
 
-  // Persist the per-model daily usage ledger the same way. This one carries the
-  // ONLY record of a free or quota-limited model's use, because such a model
-  // moves no credits for the balance reading to show, so losing it to a restart
-  // would blank the very number the card needs to warn before an allowance runs
-  // out. A ledger from an earlier day is discarded by `applyUsageLedger`.
+  // Persist the daily usage ledger the same way. This one carries the ONLY
+  // record of a free or quota-limited model's use, because such a model moves no
+  // credits for the balance reading to show, so losing it to a restart would
+  // blank the very number the card needs to warn before an allowance runs out.
+  // It also holds the history the usage panel charts.
   core.pool.setUsagePersistence(async (ledger) => {
     await setSetting('modelUsage', ledger, ledger)
   })
@@ -881,6 +881,14 @@ function canonicalJson(value: unknown): string {
     // Today's per-model usage, likewise pool-wide: it is the only visible trace
     // of a free or quota-limited model, which leaves no credit movement.
     usage: () => core.pool.usageLedger(),
+    // Which gateway an account id belongs to, so the usage panel can split by
+    // region: the ledger is keyed by account id, and the region lives on the
+    // credential. An id this pool no longer knows (an account removed since it
+    // served a request) reads as the default region rather than throwing.
+    accountRegion: (accountId: string) => {
+      const account = core.pool.list().find(entry => entry.id === accountId)
+      return account === undefined ? 'cn' : regionOf(account.credential.domain)
+    },
     // Starts the pass in the background and returns immediately: a full run takes
     // tens of seconds, and the card polls the status document for the result.
     runAutomation: (_job: string, _force: boolean) => core.scheduler.startRunAll(),

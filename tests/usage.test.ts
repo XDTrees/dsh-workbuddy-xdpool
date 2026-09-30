@@ -22,13 +22,17 @@ import { WorkBuddyCatalog } from '../src/catalog.ts'
 import { createWorkBuddyShim } from '../src/shim.ts'
 import {
   UNKNOWN_MODEL_ID,
+  USAGE_RETENTION_DAYS,
   emptyLedger,
   localDayKey,
   normalizeLedger,
   readUsageLedger,
   recordUsage,
   usageRowsFor,
+  usageSummary,
   writeUsageLedger,
+  type UsageDay,
+  type UsageLedger,
 } from '../src/usage.ts'
 import { SseUsageReader, usageFromSseFrame } from '../src/usage-stream.ts'
 import { WorkBuddyUpstreamClient } from '../src/upstream.ts'
@@ -38,6 +42,13 @@ const shims: { close(): Promise<void> }[] = []
 afterEach(async () => {
   while (shims.length > 0) await shims.pop()?.close()
 })
+
+/** One day of a ledger, failing loudly rather than returning undefined. */
+function dayOf(ledger: UsageLedger, date: string): UsageDay {
+  const day = ledger.days.find(entry => entry.date === date)
+  if (day === undefined) throw new Error(`no day ${date} in ${ledger.days.map(entry => entry.date).join(', ')}`)
+  return day
+}
 
 /** Write a fake auth directory holding `count` distinct accounts. */
 async function fakeAuthDir(count: number): Promise<string> {
@@ -125,9 +136,10 @@ describe('usage ledger arithmetic', () => {
     ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy4' }, '2026-09-23')
     ledger = recordUsage(ledger, { accountId: 'b', modelId: 'hy3' }, '2026-09-23')
 
-    expect(ledger.accounts['a']!['hy3']!.requests).toBe(2)
-    expect(ledger.accounts['a']!['hy4']!.requests).toBe(1)
-    expect(ledger.accounts['b']!['hy3']!.requests).toBe(1)
+    const day = dayOf(ledger, '2026-09-23')
+    expect(day.accounts['a']!['hy3']!.requests).toBe(2)
+    expect(day.accounts['a']!['hy4']!.requests).toBe(1)
+    expect(day.accounts['b']!['hy3']!.requests).toBe(1)
   })
 
   it('sums reported tokens and marks the request as reported', () => {
@@ -142,7 +154,7 @@ describe('usage ledger arithmetic', () => {
       { accountId: 'a', modelId: 'hy3', promptTokens: 80, completionTokens: 20 },
       '2026-09-23',
     )
-    const counters = ledger.accounts['a']!['hy3']!
+    const counters = dayOf(ledger, '2026-09-23').accounts['a']!['hy3']!
     expect(counters.promptTokens).toBe(200)
     expect(counters.completionTokens).toBe(50)
     expect(counters.reportedRequests).toBe(2)
@@ -151,27 +163,43 @@ describe('usage ledger arithmetic', () => {
   it('does not treat an absent usage frame as a measured zero', () => {
     let ledger = emptyLedger('2026-09-23')
     ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, '2026-09-23')
-    const counters = ledger.accounts['a']!['hy3']!
+    const counters = dayOf(ledger, '2026-09-23').accounts['a']!['hy3']!
     expect(counters.requests).toBe(1)
     expect(counters.reportedRequests).toBe(0)
 
-    const rows = usageRowsFor(ledger, 'a')
+    const rows = usageRowsFor(ledger, 'a', '2026-09-23')
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ modelId: 'hy3', requests: 1, tokens: 0, tokensReported: false })
   })
 
   it('files a request with no model under a stable marker', () => {
     const ledger = recordUsage(emptyLedger('2026-09-23'), { accountId: 'a', modelId: undefined }, '2026-09-23')
-    expect(ledger.accounts['a']![UNKNOWN_MODEL_ID]!.requests).toBe(1)
+    expect(dayOf(ledger, '2026-09-23').accounts['a']![UNKNOWN_MODEL_ID]!.requests).toBe(1)
   })
 
-  it('resets when the day rolls over, so today never means ever', () => {
+  it('keeps yesterday when the day rolls over, and files today separately', () => {
     let ledger = emptyLedger('2026-09-23')
     ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, '2026-09-23')
     ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, '2026-09-24')
 
-    expect(ledger.date).toBe('2026-09-24')
-    expect(ledger.accounts['a']!['hy3']!.requests).toBe(1)
+    // History is the point of the multi-day ledger, so yesterday survives...
+    expect(dayOf(ledger, '2026-09-23').accounts['a']!['hy3']!.requests).toBe(1)
+    // ...and today counts only today, so "today" never means "ever".
+    expect(dayOf(ledger, '2026-09-24').accounts['a']!['hy3']!.requests).toBe(1)
+    expect(ledger.days.map(day => day.date)).toEqual(['2026-09-23', '2026-09-24'])
+  })
+
+  it('drops the oldest day once the retention window is full', () => {
+    let ledger: ReturnType<typeof emptyLedger> = { days: [] }
+    for (let index = 0; index < USAGE_RETENTION_DAYS + 3; index += 1) {
+      const date = new Date(2026, 0, 1 + index)
+      const key = localDayKey(date)
+      ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, key)
+    }
+
+    expect(ledger.days).toHaveLength(USAGE_RETENTION_DAYS)
+    // The retained window is the most recent one, not the first one written.
+    expect(ledger.days[0]!.date).toBe(localDayKey(new Date(2026, 0, 1 + 3)))
   })
 
   it('orders rows by most recent use', () => {
@@ -186,19 +214,17 @@ describe('usage ledger arithmetic', () => {
       { accountId: 'a', modelId: 'new', at: new Date('2026-09-23T05:00:00Z') },
       '2026-09-23',
     )
-    expect(usageRowsFor(ledger, 'a').map(row => row.modelId)).toEqual(['new', 'old'])
+    expect(usageRowsFor(ledger, 'a', '2026-09-23').map(row => row.modelId)).toEqual(['new', 'old'])
   })
 
   it('returns nothing for an account that served nothing', () => {
-    expect(usageRowsFor(emptyLedger('2026-09-23'), 'nobody')).toEqual([])
+    expect(usageRowsFor(emptyLedger('2026-09-23'), 'nobody', '2026-09-23')).toEqual([])
   })
 })
 
 describe('usage ledger persistence', () => {
   it('round-trips through the file', async () => {
     const path = join(await mkdtemp(join(tmpdir(), 'wbp-usage-file-')), 'usage.json')
-    // Today's real key: `readUsageLedger` deliberately discards a ledger from
-    // another day, so a fixed fixture date would test the discard path instead.
     const today = localDayKey()
     const ledger = recordUsage(
       emptyLedger(today),
@@ -211,27 +237,42 @@ describe('usage ledger persistence', () => {
     await expect(readFile(`${path}.tmp`, 'utf8')).rejects.toThrow()
   })
 
-  it('reads a missing file as an empty ledger rather than throwing', async () => {
-    const ledger = await readUsageLedger(join(tmpdir(), 'wbp-usage-absent', 'usage.json'))
-    expect(ledger.accounts).toEqual({})
+  it('keeps earlier days across a restart', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'wbp-usage-history-')), 'usage.json')
+    let ledger = emptyLedger('2026-09-22')
+    ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, '2026-09-22')
+    ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, '2026-09-23')
+    await writeUsageLedger(ledger, path)
+
+    const restored = await readUsageLedger(path)
+    expect(restored.days.map(day => day.date)).toEqual(['2026-09-22', '2026-09-23'])
+    expect(usageRowsFor(restored, 'a', '2026-09-22')[0]!.requests).toBe(1)
   })
 
-  it('drops a ledger left over from an earlier day', async () => {
-    const path = join(await mkdtemp(join(tmpdir(), 'wbp-usage-stale-')), 'usage.json')
-    // A day that is never today, so the assertion does not depend on the clock.
-    await writeUsageLedger(
-      recordUsage(emptyLedger('1999-01-01'), { accountId: 'a', modelId: 'hy3' }, '1999-01-01'),
-      path,
-    )
-    const ledger = await readUsageLedger(path)
-    expect(ledger.date).not.toBe('1999-01-01')
-    expect(ledger.accounts).toEqual({})
+  it('reads a missing file as an empty ledger rather than throwing', async () => {
+    const ledger = await readUsageLedger(join(tmpdir(), 'wbp-usage-absent', 'usage.json'))
+    expect(ledger.days[0]!.accounts).toEqual({})
+  })
+
+  it('reads a single-day document written by an older build', () => {
+    // The version-1 shape: one flat day. An upgrade must not throw today away.
+    const ledger = normalizeLedger({
+      version: 1,
+      date: '2026-09-23',
+      accounts: { a: { hy3: { requests: 2, promptTokens: 5, completionTokens: 7, reportedRequests: 1, lastUsedAt: '2026-09-23T01:00:00.000Z' } } },
+    })
+
+    expect(ledger.days).toHaveLength(1)
+    expect(ledger.days[0]!.date).toBe('2026-09-23')
+    expect(usageRowsFor(ledger, 'a', '2026-09-23')[0]).toMatchObject({ requests: 2, tokens: 12 })
   })
 
   it('survives a malformed document by reading nothing', () => {
-    expect(normalizeLedger({ date: '2026-09-23', accounts: 'nonsense' }).accounts).toEqual({})
-    expect(normalizeLedger(null).accounts).toEqual({})
-    expect(normalizeLedger({ accounts: {} }).accounts).toEqual({})
+    expect(normalizeLedger({ date: '2026-09-23', accounts: 'nonsense' }).days[0]!.accounts).toEqual({})
+    expect(normalizeLedger(null).days[0]!.accounts).toEqual({})
+    expect(normalizeLedger({ accounts: {} }).days[0]!.accounts).toEqual({})
+    expect(normalizeLedger({ days: 'nonsense' }).days).toHaveLength(1)
+    expect(normalizeLedger({ days: [{ nope: true }, 7] }).days).toHaveLength(1)
   })
 })
 
@@ -426,13 +467,77 @@ describe('usage through the shim', () => {
     expect(restored.usageFor(account.id)[0]).toMatchObject({ requests: 1, tokens: 150 })
   })
 
-  it('drops a restored ledger from an earlier day', async () => {
+  it('keeps a restored ledger from an earlier day, but reports no usage today', async () => {
     const pool = new WorkBuddyAccountPool({ authDirs: [await fakeAuthDir(1)] })
     await pool.scan()
     const account = pool.list()[0]!
     pool.applyUsageLedger(
       recordUsage(emptyLedger('1999-01-01'), { accountId: account.id, modelId: 'hy3' }, '1999-01-01'),
     )
+    // History survives the restart...
+    expect(pool.usageLedger().days.map(day => day.date)).toContain('1999-01-01')
+    // ...but `usageFor` reads TODAY, which that day is not.
     expect(pool.usageFor(account.id)).toEqual([])
+    expect(pool.usageToday(account.id)).toBeUndefined()
+  })
+})
+
+describe('usage summary', () => {
+  /** A ledger with traffic on three days, one model on two accounts. */
+  function threeDayLedger(): UsageLedger {
+    let ledger = emptyLedger('2026-09-21')
+    ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3', promptTokens: 100, completionTokens: 50 }, '2026-09-21')
+    ledger = recordUsage(ledger, { accountId: 'b', modelId: 'hy3' }, '2026-09-21')
+    ledger = recordUsage(ledger, { accountId: 'a', modelId: 'glm', promptTokens: 10, completionTokens: 5 }, '2026-09-23')
+    return ledger
+  }
+
+  it('totals the window and keeps a row per day', () => {
+    const out = usageSummary(threeDayLedger(), {
+      windowDays: ['2026-09-21', '2026-09-22', '2026-09-23'],
+    })
+
+    expect(out.from).toBe('2026-09-21')
+    expect(out.to).toBe('2026-09-23')
+    expect(out.totals).toEqual({ requests: 3, tokens: 165, tokensReported: true })
+    // The quiet middle day is present as a zero row, not dropped.
+    expect(out.days).toEqual([
+      { key: '2026-09-21', requests: 2, tokens: 150, tokensReported: true },
+      { key: '2026-09-22', requests: 0, tokens: 0, tokensReported: false },
+      { key: '2026-09-23', requests: 1, tokens: 15, tokensReported: true },
+    ])
+  })
+
+  it('ranks the breakdowns by requests, heaviest first', () => {
+    const out = usageSummary(threeDayLedger(), { windowDays: ['2026-09-21', '2026-09-23'] })
+
+    expect(out.models.map(row => row.key)).toEqual(['hy3', 'glm'])
+    expect(out.models[0]).toMatchObject({ requests: 2, tokens: 150 })
+    expect(out.accounts.map(row => row.key).sort()).toEqual(['a', 'b'])
+    expect(out.accounts[0]).toMatchObject({ key: 'a', requests: 2, tokens: 165 })
+  })
+
+  it('splits by region through the account lookup', () => {
+    const out = usageSummary(threeDayLedger(), {
+      windowDays: ['2026-09-21', '2026-09-23'],
+      accountRegion: id => (id === 'b' ? 'global' : 'cn'),
+    })
+
+    expect(out.regions.map(row => [row.key, row.requests])).toEqual([['cn', 2], ['global', 1]])
+  })
+
+  it('claims no token figure when nothing in the window reported one', () => {
+    let ledger = emptyLedger('2026-09-21')
+    ledger = recordUsage(ledger, { accountId: 'a', modelId: 'hy3' }, '2026-09-21')
+    const out = usageSummary(ledger, { windowDays: ['2026-09-21'] })
+
+    expect(out.totals).toEqual({ requests: 1, tokens: 0, tokensReported: false })
+    expect(out.models[0]).toMatchObject({ key: 'hy3', requests: 1, tokensReported: false })
+  })
+
+  it('covers the retention window by default, with today last', () => {
+    const out = usageSummary(emptyLedger())
+    expect(out.days).toHaveLength(USAGE_RETENTION_DAYS)
+    expect(out.to).toBe(localDayKey())
   })
 })
