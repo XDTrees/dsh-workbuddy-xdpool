@@ -7,6 +7,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -16,6 +17,7 @@ import {
   WORKBUDDY_LIVE_FILENAME,
   workbuddyAccountId,
 } from './accounts.ts'
+import { WORKBUDDY_APP_EXECUTABLE_ENV, workbuddyAppExecutableCandidates } from './at-rest.ts'
 import { createCore } from './index.ts'
 import { ignoreAccount, readIgnoredAccounts, unignoreAccount } from './ignored.ts'
 import { formatRates, formatStatus } from './status.ts'
@@ -301,6 +303,52 @@ async function commandDoctor(): Promise<number> {
     /* directory may not exist yet */
   }
   lines.push(imported.length === 0 ? '  (none)' : imported.map(name => `  ✓ ${name}`).join('\n'))
+
+  // Desktop-app discovery. Printed verbatim, and that is the point: this is the
+  // diagnostic for "the app is installed but the plugin cannot find it", and
+  // the failure mode is usually a path that looks WRONG in a specific way — a
+  // mojibake path from a non-UTF-8 console, a truncated one, or one pointing at
+  // a directory that no longer exists. Showing the resolved strings (rather
+  // than a count) is what makes those visible at a glance.
+  lines.push('')
+  lines.push('WorkBuddy desktop app:')
+  const override = process.env[WORKBUDDY_APP_EXECUTABLE_ENV]?.trim()
+  if (override !== undefined && override !== '') {
+    lines.push(`  env ${WORKBUDDY_APP_EXECUTABLE_ENV} = ${override}`)
+  }
+  let candidates: string[] = []
+  try {
+    candidates = workbuddyAppExecutableCandidates()
+  } catch (error: unknown) {
+    lines.push(`  ✗ candidate probe threw: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  let firstExisting: string | undefined
+  for (const candidate of candidates) {
+    const exists = existsSync(candidate)
+    if (exists && firstExisting === undefined) firstExisting = candidate
+    lines.push(`  ${exists ? '✓' : '·'} ${candidate}`)
+  }
+  lines.push(`  probed ${candidates.length} candidate path(s)`)
+  if (firstExisting === undefined) {
+    healthy = false
+    lines.push(
+      '  ✗ no WorkBuddy desktop executable found at any probed path.',
+    )
+    lines.push(
+      '    If the app IS installed, set WORKBUDDY_APP_EXECUTABLE to its full .exe path',
+    )
+    lines.push(
+      '    (or put that line in $DSH_HOME/.env) and restart DSH. A path shown above that',
+    )
+    lines.push(
+      '    looks like mojibake (e.g. "???" for a Chinese folder) indicates the registry',
+    )
+    lines.push(
+      '    value could not be decoded on this machine — please report it with the line.',
+    )
+  } else {
+    lines.push(`  ✓ using ${firstExisting}`)
+  }
 
   console.log(lines.join('\n'))
   return healthy ? 0 : 1
