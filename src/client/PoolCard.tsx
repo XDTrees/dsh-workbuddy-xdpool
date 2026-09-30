@@ -38,6 +38,7 @@ import {
   type PoolWebStatus,
   type PoolRegion,
   type PoolWebCreditPackage,
+  type PoolWebCredits,
   type PoolDistribution,
 } from '../status-paths.ts'
 import { DEFAULT_AUTOMATION_HOURS } from '../status-paths.ts'
@@ -244,10 +245,44 @@ function formatExpiry(ms: number | undefined): string {
   }).format(new Date(ms))
 }
 
-/** Whole days until `ms`, floored at 0; undefined when there is no deadline. */
+/**
+ * Whole days until `ms`, floored at 0; undefined when there is no deadline.
+ */
 function daysUntil(ms: number | undefined): number | undefined {
   if (ms === undefined || !Number.isFinite(ms)) return undefined
   return Math.max(0, Math.floor((ms - Date.now()) / 86_400_000))
+}
+
+/**
+ * The batch of credits that runs out first, and when.
+ *
+ * Credits do not expire as one lump. A daily check-in adds a batch that lapses
+ * on its own clock, a gift adds a batch with its own deadline, and the balance
+ * is the sum — so "2000 credits" can mean "1000 gone in three days". Summing is
+ * what the plain total does; this finds the FIRST batch to go, which is the
+ * number that decides whether any of it gets spent in time.
+ *
+ * Built from the one-off packages only. A monthly package has no expiry at all
+ * (it refreshes on a cycle), so counting it would invent a deadline; packages
+ * already empty or already past are skipped for the same reason.
+ *
+ * Ties are summed: two batches lapsing at the same moment are one event as far
+ * as the user is concerned.
+ */
+function oldestExpiringBatch(
+  credits: PoolWebCredits | undefined,
+): { remain: number; expiresAtMs: number; days: number } | undefined {
+  const dated = (credits?.packages ?? [])
+    .filter(pack => pack.monthly !== true)
+    .filter(pack => (pack.remain ?? 0) > 0)
+    .filter(pack => pack.expiresAtMs !== undefined && Number.isFinite(pack.expiresAtMs))
+    .filter(pack => (pack.expiresAtMs ?? 0) > Date.now())
+  if (dated.length === 0) return undefined
+  const soonest = Math.min(...dated.map(pack => pack.expiresAtMs as number))
+  const remain = dated
+    .filter(pack => pack.expiresAtMs === soonest)
+    .reduce((sum, pack) => sum + (pack.remain ?? 0), 0)
+  return { remain, expiresAtMs: soonest, days: daysUntil(soonest) ?? 0 }
 }
 
 /** True when a one-off package lapses inside the "expiring soon" window. */
@@ -595,6 +630,24 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const modelsEditable = settingsWritable
   const modelsDirty = draft !== undefined && status !== undefined && draftIsDirty(status, draft)
   const enabledCount = Object.values(modelDraft).filter(entry => entry.enabled).length
+  /**
+   * The models the pool will actually serve, in catalog order.
+   *
+   * Read off the DRAFT rather than off `model.enabled`, so unchecking a model
+   * removes its row immediately instead of at the next poll.
+   */
+  const enabledModels = (status?.models ?? [])
+    .filter(model => (modelDraft[model.id] ?? { enabled: model.enabled }).enabled)
+  /**
+   * How many enabled models accept images AND cost nothing to call.
+   *
+   * Both halves matter: an image-capable model that charges credits is not a
+   * free way to send a screenshot, so counting it would overstate what the pool
+   * can do for free.
+   */
+  const freeImageCount = enabledModels
+    .filter(model => (modelDraft[model.id] ?? { images: model.supportsImages }).images && model.multiplier === 0)
+    .length
 
   const toggleModel = (id: string): void => {
     if (status === undefined) return
@@ -1192,6 +1245,17 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                     total: status?.models.length ?? 0,
                   }) ?? `${enabledCount} / ${status?.models.length ?? 0}`}
                 </span>
+                {/* The free-image figure rides on this head rather than getting a
+                    card of its own: it is one number, and a card holding one
+                    number left the right-hand side of the grid empty. */}
+                {freeImageCount === 0
+                  ? null
+                  : <span
+                      className="dsm-workbuddy-xdpool-chip"
+                      title={t?.('row.freeImagesHint') ?? 'Enabled models that accept images at no charge'}
+                    >
+                      {t?.('row.freeImages', { count: freeImageCount }) ?? `${freeImageCount} free images`}
+                    </span>}
                 <span className="dsm-workbuddy-xdpool-col-actions">
                   {/* The offline notice sits in the open, not in a tooltip: the
                       failure it reports is "you are looking at a SHORTER list
@@ -1214,9 +1278,13 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 </span>
               </div>
               <div className="dsm-workbuddy-xdpool-col-body">
-                {(status?.models.length ?? 0) === 0
+                {/* Only the enabled models: the column is a summary of what the
+                    pool will actually serve, and an unchecked row answered a
+                    question nobody was asking. Turning one off here removes it
+                    from the list; "Choose models" is where it comes back. */}
+                {enabledModels.length === 0
                   ? <p className="dsm-workbuddy-xdpool-col-empty">{t?.('row.noModels') ?? 'No models'}</p>
-                  : status?.models.map(model => (
+                  : enabledModels.map(model => (
                       <ModelLine
                         key={model.id}
                         model={model}
@@ -1405,13 +1473,21 @@ function AccountRow({
   const isDisabled = account.disabled === true
   const isCooling = account.cooling === true
   const credits = account.credits?.total
+  const firstBatch = oldestExpiringBatch(account.credits)
   // The sub-line carries only what the row itself cannot say: where the account
   // stands when it is not simply healthy.
   const sub = isCooling && account.cooldownUntil !== undefined
     ? `${t?.('row.cooling') ?? 'Cooling'} ${t?.('row.cooldownUntil', { time: formatTime(Date.parse(account.cooldownUntil)) }) ?? ''}`.trim()
     : isCurrent
       ? (t?.('row.currentAccount') ?? 'In use')
-      : undefined
+      : firstBatch === undefined
+        ? undefined
+        // The batch that lapses first, on its own line: a total tells the user
+        // what they hold, this tells them what they are about to lose.
+        : (t?.('row.creditsFirstExpiry', {
+            credit: formatNumber(firstBatch.remain),
+            days: firstBatch.days,
+          }) ?? `${formatNumber(firstBatch.remain)} expire in ${firstBatch.days}d`)
   return (
     <div
       className={`dsm-workbuddy-xdpool-row${isDisabled ? ' dsm-workbuddy-xdpool-row-off' : ''}`}
@@ -1455,6 +1531,12 @@ function AccountRow({
  *
  * Read-only beyond the enable checkbox: the row is the summary, and the
  * context-window and image controls live in the "Choose models" dialog.
+ *
+ * The row deliberately does NOT print the model id. The id is what the gateway
+ * keys on, not what the user picks by — the name is unique within a region, and
+ * the id only ever appeared here as noise beside it. What the user does need at
+ * a glance is the credit multiplier, which is what decides the cost of a
+ * request, so that is the line's figure.
  */
 function ModelLine({
   model,
@@ -1477,6 +1559,10 @@ function ModelLine({
       : tag === 'night'
         ? (t?.('row.nightDiscount') ?? 'night')
         : null
+  /** `x0.00` for free models, `x0.29` otherwise; empty when the gateway is silent. */
+  const rate = model.multiplier === undefined
+    ? ''
+    : `x${model.multiplier.toFixed(2)}`
   return (
     <div className={`dsm-workbuddy-xdpool-row${draft.enabled ? '' : ' dsm-workbuddy-xdpool-row-off'}`}>
       <input
@@ -1489,8 +1575,15 @@ function ModelLine({
       />
       <span className="dsm-workbuddy-xdpool-row-main">
         <span className="dsm-workbuddy-xdpool-row-name">{model.name}</span>
-        <span className="dsm-workbuddy-xdpool-row-sub">{model.id}</span>
       </span>
+      {rate === ''
+        ? null
+        : <span
+            className="dsm-workbuddy-xdpool-row-rate"
+            title={t?.('row.modelRateHint') ?? 'Credits charged per unit, relative to the base rate'}
+          >
+            {rate}
+          </span>}
       <span className="dsm-workbuddy-xdpool-row-tags">
         {tagText === null ? null : <span className="dsm-workbuddy-xdpool-chip">{tagText}</span>}
         {draft.images ? <span className="dsm-workbuddy-xdpool-chip dsm-workbuddy-xdpool-chip-dim">
@@ -1599,6 +1692,8 @@ function AccountDialog({
   const credits = account.credits
   const checkin = account.checkin
   const packages = (credits?.packages ?? []).filter(p => (p.size ?? 0) > 0)
+  /** The batch that lapses first: the balance says how much, this says how long. */
+  const oldestBatch = oldestExpiringBatch(credits)
 
   return (
     <Dialog
@@ -1639,6 +1734,26 @@ function AccountDialog({
             {account.creditsError !== undefined ? '–' : formatNumber(credits?.total)}
           </span>
         </div>
+        {oldestBatch === undefined
+          ? null
+          : <div className="dsm-workbuddy-xdpool-fact">
+              <span className="dsm-workbuddy-xdpool-fact-label">
+                {t?.('row.creditsFirstBatch') ?? 'Expiring first'}
+              </span>
+              <span className="dsm-workbuddy-xdpool-fact-value">
+                {formatNumber(oldestBatch.remain)}
+              </span>
+              {/* When, on its own line: the deadline is the half of this fact
+                  that the balance above it cannot supply. */}
+              <span className="dsm-workbuddy-xdpool-fact-when">
+                {oldestBatch.days <= 0
+                  ? (t?.('row.creditsExpiresToday') ?? 'today')
+                  : (t?.('row.creditsExpiresIn', { days: oldestBatch.days })
+                      ?? `in ${oldestBatch.days}d`)}
+                {' · '}
+                {formatExpiry(oldestBatch.expiresAtMs)}
+              </span>
+            </div>}
         {credits?.expiringSoon !== undefined && credits.expiringSoon > 0
           ? <div className="dsm-workbuddy-xdpool-fact">
               <span className="dsm-workbuddy-xdpool-fact-label">{t?.('row.creditsSoon') ?? 'Expiring ≤3d'}</span>

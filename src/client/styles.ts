@@ -126,6 +126,11 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-row-name{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12.5px;font-weight:500;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-row-sub{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-row-value{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12.5px;font-weight:600;line-height:18px;flex:none;font-variant-numeric:tabular-nums}
+/*
+ * The credit multiplier, pinned to the right edge of every model row so the
+ * column of figures scans as one, whatever the name before it costs.
+ */
+.dsm-workbuddy-xdpool-row-rate{margin-left:auto;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11.5px;font-weight:600;line-height:17px;flex:none;font-variant-numeric:tabular-nums;letter-spacing:.01em}
 .dsm-workbuddy-xdpool-row-tags{align-items:center;gap:4px;flex:none;display:flex}
 .dsm-workbuddy-xdpool-row-chev{color:var(--dsw-alias-label-dimmed,#777);flex:none;font-size:11px;line-height:1}
 
@@ -184,6 +189,8 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-fact-label{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:10.5px;line-height:14px}
 .dsm-workbuddy-xdpool-fact-value{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:15px;font-weight:700;line-height:20px;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-fact-value-ok{color:var(--dsw-alias-state-success-primary,#22a06b)}
+/* The deadline under a fact's figure, e.g. "in 3d · 03/14 09:00". */
+.dsm-workbuddy-xdpool-fact-when{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:10.5px;line-height:14px;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Package list inside the account dialog. */
 .dsm-workbuddy-xdpool-packs{flex-direction:column;display:flex;margin:0;padding:0;list-style:none;border:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 50%, transparent);border-radius:9px;overflow:hidden}
