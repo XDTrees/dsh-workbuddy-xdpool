@@ -113,7 +113,7 @@ export const POOL_CARD_CSS = `
  * so there is no small "details" link to aim at. Inner controls (the account
  * switch) stop propagation.
  */
-.dsm-workbuddy-xdpool-row{align-items:center;gap:9px;width:100%;text-align:left;appearance:none;font:inherit;cursor:pointer;border:0;border-radius:8px;padding:7px 8px;background:transparent;transition:background .14s}
+.dsm-workbuddy-xdpool-row{display:flex;align-items:center;gap:9px;width:100%;text-align:left;appearance:none;font:inherit;cursor:pointer;border:0;border-radius:8px;padding:7px 8px;background:transparent;transition:background .14s}
 .dsm-workbuddy-xdpool-row:hover{background:rgba(255,255,255,.045)}
 .dsm-workbuddy-xdpool-row:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:-1px}
 .dsm-workbuddy-xdpool-row+.dsm-workbuddy-xdpool-row{border-top:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 30%, transparent)}
@@ -127,10 +127,19 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-row-sub{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-row-value{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12.5px;font-weight:600;line-height:18px;flex:none;font-variant-numeric:tabular-nums}
 /*
- * The credit multiplier, pinned to the right edge of every model row so the
- * column of figures scans as one, whatever the name before it costs.
+ * The credit multiplier, on the right-hand meta line beside the capability
+ * chips, so one line carries everything except the name.
  */
-.dsm-workbuddy-xdpool-row-rate{margin-left:auto;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11.5px;font-weight:600;line-height:17px;flex:none;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.dsm-workbuddy-xdpool-row-rate{color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11.5px;font-weight:600;line-height:17px;flex:none;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+/*
+ * One model line: name on the left, capabilities and the multiplier on the
+ * right of the SAME line. One row per model, so the column stays dense and the
+ * right half carries the figures instead of sitting empty.
+ */
+.dsm-workbuddy-xdpool-mrow-line{align-items:center;gap:9px;padding:5px 8px;min-width:0;display:flex}
+.dsm-workbuddy-xdpool-mrow-line+.dsm-workbuddy-xdpool-mrow-line{border-top:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 30%, transparent)}
+.dsm-workbuddy-xdpool-row-meta{margin-left:auto;align-items:center;gap:5px;flex:none;display:flex}
+.dsm-workbuddy-xdpool-row-meta .dsm-workbuddy-xdpool-row-rate{margin-left:3px}
 .dsm-workbuddy-xdpool-row-tags{align-items:center;gap:4px;flex:none;display:flex}
 .dsm-workbuddy-xdpool-row-chev{color:var(--dsw-alias-label-dimmed,#777);flex:none;font-size:11px;line-height:1}
 

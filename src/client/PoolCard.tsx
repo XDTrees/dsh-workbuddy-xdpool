@@ -638,16 +638,6 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    */
   const enabledModels = (status?.models ?? [])
     .filter(model => (modelDraft[model.id] ?? { enabled: model.enabled }).enabled)
-  /**
-   * How many enabled models accept images AND cost nothing to call.
-   *
-   * Both halves matter: an image-capable model that charges credits is not a
-   * free way to send a screenshot, so counting it would overstate what the pool
-   * can do for free.
-   */
-  const freeImageCount = enabledModels
-    .filter(model => (modelDraft[model.id] ?? { images: model.supportsImages }).images && model.multiplier === 0)
-    .length
 
   const toggleModel = (id: string): void => {
     if (status === undefined) return
@@ -1239,23 +1229,6 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 <h3 className="dsm-workbuddy-xdpool-col-title">
                   {t?.('row.modelsTitle') ?? 'Models'}
                 </h3>
-                <span className="dsm-workbuddy-xdpool-col-count">
-                  {t?.('row.modelsEnabledCount', {
-                    enabled: enabledCount,
-                    total: status?.models.length ?? 0,
-                  }) ?? `${enabledCount} / ${status?.models.length ?? 0}`}
-                </span>
-                {/* The free-image figure rides on this head rather than getting a
-                    card of its own: it is one number, and a card holding one
-                    number left the right-hand side of the grid empty. */}
-                {freeImageCount === 0
-                  ? null
-                  : <span
-                      className="dsm-workbuddy-xdpool-chip"
-                      title={t?.('row.freeImagesHint') ?? 'Enabled models that accept images at no charge'}
-                    >
-                      {t?.('row.freeImages', { count: freeImageCount }) ?? `${freeImageCount} free images`}
-                    </span>}
                 <span className="dsm-workbuddy-xdpool-col-actions">
                   {/* The offline notice sits in the open, not in a tooltip: the
                       failure it reports is "you are looking at a SHORTER list
@@ -1279,9 +1252,8 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
               </div>
               <div className="dsm-workbuddy-xdpool-col-body">
                 {/* Only the enabled models: the column is a summary of what the
-                    pool will actually serve, and an unchecked row answered a
-                    question nobody was asking. Turning one off here removes it
-                    from the list; "Choose models" is where it comes back. */}
+                    pool will actually serve. "Choose models" is where the
+                    selection is edited. */}
                 {enabledModels.length === 0
                   ? <p className="dsm-workbuddy-xdpool-col-empty">{t?.('row.noModels') ?? 'No models'}</p>
                   : enabledModels.map(model => (
@@ -1290,8 +1262,6 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         model={model}
                         t={t}
                         draft={modelDraft[model.id] ?? { enabled: model.enabled, images: model.supportsImages }}
-                        onToggle={() => { toggleModel(model.id) }}
-                        editable={modelsEditable}
                       />
                     ))}
               </div>
@@ -1542,14 +1512,10 @@ function ModelLine({
   model,
   t,
   draft,
-  onToggle,
-  editable,
 }: {
   model: PoolWebModel
   t?: PoolCardProps['t']
   draft: ModelDraftEntry
-  onToggle: () => void
-  editable: boolean
 }) {
   const tag = tagFor(model)
   const tagText = tag === 'free'
@@ -1563,32 +1529,32 @@ function ModelLine({
   const rate = model.multiplier === undefined
     ? ''
     : `x${model.multiplier.toFixed(2)}`
+  // Read-only: the row reports what the pool serves. Changing the selection is
+  // the "Choose models" dialog's job, so there is no checkbox competing with the
+  // name for the left edge of every line.
   return (
-    <div className={`dsm-workbuddy-xdpool-row${draft.enabled ? '' : ' dsm-workbuddy-xdpool-row-off'}`}>
-      <input
-        type="checkbox"
-        checked={draft.enabled}
-        disabled={!editable}
-        aria-label={model.name}
-        style={{ margin: 0, accentColor: 'var(--dsw-alias-brand-primary,#5686fe)', flex: 'none' }}
-        onChange={onToggle}
-      />
+    <div className="dsm-workbuddy-xdpool-mrow-line">
       <span className="dsm-workbuddy-xdpool-row-main">
         <span className="dsm-workbuddy-xdpool-row-name">{model.name}</span>
       </span>
-      {rate === ''
-        ? null
-        : <span
-            className="dsm-workbuddy-xdpool-row-rate"
-            title={t?.('row.modelRateHint') ?? 'Credits charged per unit, relative to the base rate'}
-          >
-            {rate}
-          </span>}
-      <span className="dsm-workbuddy-xdpool-row-tags">
+      {/* Rate and capabilities share ONE right-hand line: two short figures do
+          not each deserve a line of their own, and stacking them left the right
+          half of the column empty. */}
+      <span className="dsm-workbuddy-xdpool-row-meta">
         {tagText === null ? null : <span className="dsm-workbuddy-xdpool-chip">{tagText}</span>}
-        {draft.images ? <span className="dsm-workbuddy-xdpool-chip dsm-workbuddy-xdpool-chip-dim">
-          {t?.('row.modelImage') ?? 'Images'}
-        </span> : null}
+        {draft.images
+          ? <span className="dsm-workbuddy-xdpool-chip dsm-workbuddy-xdpool-chip-dim">
+              {t?.('row.modelImage') ?? 'Images'}
+            </span>
+          : null}
+        {rate === ''
+          ? null
+          : <span
+              className="dsm-workbuddy-xdpool-row-rate"
+              title={t?.('row.modelRateHint') ?? 'Credits charged per unit, relative to the base rate'}
+            >
+              {rate}
+            </span>}
       </span>
     </div>
   )
