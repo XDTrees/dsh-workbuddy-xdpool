@@ -138,6 +138,12 @@ export interface PoolWebAccount {
    */
   usageToday?: readonly PoolWebUsage[]
   /**
+   * `usageToday` summed over every model, so the account ROW can carry today's
+   * spend without expanding the per-model list. Absent on the same terms as
+   * `usageToday`: nothing recorded means no figures to show.
+   */
+  usageTotals?: PoolWebUsageTotals
+  /**
    * Local day `usageToday` covers, `YYYY-MM-DD`. Present only alongside it, so
    * the card never has to guess which day a count belongs to.
    */
@@ -451,6 +457,21 @@ export interface PoolWebUsage {
   tokensReported: boolean
   /** ISO timestamp of the most recent request, when one was recorded. */
   lastUsedAt?: string
+}
+
+/**
+ * One account's usage today, summed over every model.
+ *
+ * Two figures, counted separately on purpose: `tokens` only adds up the models
+ * whose gateway actually reported a usage frame, while `requests` counts every
+ * completed request. Folding an unreported model in as zero tokens would quietly
+ * understate the day, which is why `tokensReported` says whether any model at
+ * all supplied a token count.
+ */
+export interface PoolWebUsageTotals {
+  requests: number
+  tokens: number
+  tokensReported: boolean
 }
 
 

@@ -24,7 +24,7 @@ import type { WorkBuddyCatalog } from './catalog.ts'
 import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
-import { emptyLedger, usageRowsFor, type UsageLedger } from './usage.ts'
+import { emptyLedger, usageRowsFor, usageTotalsFor, type UsageLedger } from './usage.ts'
 import {
   POOL_ACCOUNT_DISABLE_PATH,
   POOL_ACCOUNT_IGNORE_PATH,
@@ -416,6 +416,10 @@ export async function poolWebStatus(
     const usage = deps.usage?.() ?? emptyLedger()
     const usageRows = usageRowsFor(usage, account.id)
     if (usageRows.length > 0) Object.assign(row, { usageToday: usageRows, usageDate: usage.date })
+    // The same day, summed: the account ROW shows today's spend at a glance,
+    // while the dialog keeps the per-model breakdown.
+    const usageTotals = usageTotalsFor(usage, account.id)
+    if (usageTotals !== undefined) Object.assign(row, { usageTotals })
     if (!row.cooling) {
       try {
         const credits = await deps.client.fetchCredits(account.credential)

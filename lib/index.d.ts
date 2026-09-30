@@ -871,6 +871,12 @@ interface UsageRow {
   tokensReported: boolean;
   lastUsedAt?: string;
 }
+/** One account's day, summed over every model. See {@link usageTotalsFor}. */
+interface UsageTotals {
+  requests: number;
+  tokens: number;
+  tokensReported: boolean;
+}
 /**
  * One account's usage today, newest-used model first.
  *
@@ -880,6 +886,14 @@ interface UsageRow {
 export declare function usageRowsFor(ledger: UsageLedger, accountId: string): UsageRow[];
 /** Every account's usage today, keyed by account id. */
 export declare function usageByAccount(ledger: UsageLedger): Record<string, UsageRow[]>;
+/**
+ * One account's usage today, summed over every model.
+ *
+ * `tokens` adds only the models that reported a usage frame, and
+ * `tokensReported` says whether any did: a gateway that sends no usage frame
+ * yields a request count with no token claim rather than a token figure of 0.
+ */
+export declare function usageTotalsFor(ledger: UsageLedger, accountId: string): UsageTotals | undefined;
 //#endregion
 //#region src/usage-stream.d.ts
 /**
@@ -1446,6 +1460,12 @@ interface PoolWebAccount {
    */
   usageToday?: readonly PoolWebUsage[];
   /**
+   * `usageToday` summed over every model, so the account ROW can carry today's
+   * spend without expanding the per-model list. Absent on the same terms as
+   * `usageToday`: nothing recorded means no figures to show.
+   */
+  usageTotals?: PoolWebUsageTotals;
+  /**
    * Local day `usageToday` covers, `YYYY-MM-DD`. Present only alongside it, so
    * the card never has to guess which day a count belongs to.
    */
@@ -1739,6 +1759,20 @@ interface PoolWebUsage {
   tokensReported: boolean;
   /** ISO timestamp of the most recent request, when one was recorded. */
   lastUsedAt?: string;
+}
+/**
+ * One account's usage today, summed over every model.
+ *
+ * Two figures, counted separately on purpose: `tokens` only adds up the models
+ * whose gateway actually reported a usage frame, while `requests` counts every
+ * completed request. Folding an unreported model in as zero tokens would quietly
+ * understate the day, which is why `tokensReported` says whether any model at
+ * all supplied a token count.
+ */
+interface PoolWebUsageTotals {
+  requests: number;
+  tokens: number;
+  tokensReported: boolean;
 }
 /**
  * The two gateways, matching the provider ids the host registers. `cn` is the
@@ -2915,4 +2949,4 @@ export declare function createCore(logger?: {
  */
 export declare function apply(ctx: Context, config?: Config): void;
 //#endregion
-export type { AccountStatus, AutomationLedger, AutomationRunSummary, AutomationStatus, Context, ExpertUseMode, IgnoredAccount, MarketExpert, ModelSelection, PoolStatusRouteOptions, PoolWebAccountIgnore, PoolWebCheckin, PoolWebCheckinClaim, PoolWebIgnoredAccount, PoolWebModel, PoolWebModelSelection, PoolWebStatus, SchedulerLogger, StreamUsage, TaskEventChain, TaskEventTransport, UpstreamErrorKind, UsageCounters, UsageLedger, UsageReport, UsageRow, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };
+export type { AccountStatus, AutomationLedger, AutomationRunSummary, AutomationStatus, Context, ExpertUseMode, IgnoredAccount, MarketExpert, ModelSelection, PoolStatusRouteOptions, PoolWebAccountIgnore, PoolWebCheckin, PoolWebCheckinClaim, PoolWebIgnoredAccount, PoolWebModel, PoolWebModelSelection, PoolWebStatus, PoolWebUsageTotals, SchedulerLogger, StreamUsage, TaskEventChain, TaskEventTransport, UpstreamErrorKind, UsageCounters, UsageLedger, UsageReport, UsageRow, UsageTotals, WorkBuddyAccount, WorkBuddyAdapter, WorkBuddyCredential, WorkBuddyModelInfo, WorkBuddyShim, WorkBuddyStatus };

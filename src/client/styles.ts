@@ -118,11 +118,32 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-row:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:-1px}
 .dsm-workbuddy-xdpool-row+.dsm-workbuddy-xdpool-row{border-top:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 30%, transparent)}
 .dsm-workbuddy-xdpool-row-off{opacity:.5}
+/*
+ * Pick order, printed as a number. It is the pool's own serving order under the
+ * default priority distribution, which is why it earns a column of its own
+ * rather than hiding in the row's text.
+ */
+.dsm-workbuddy-xdpool-row-rank{width:14px;flex:none;text-align:right;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:17px;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-xdpool-row-body{flex-direction:column;gap:1px;min-width:0;flex:1 1 auto;display:flex}
+.dsm-workbuddy-xdpool-row-top{align-items:center;gap:6px;min-width:0;display:flex}
 .dsm-workbuddy-xdpool-row-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-xdpool-row-dot[data-state="idle"]{background:var(--dsw-alias-label-dimmed,#9aa0a6)}
 .dsm-workbuddy-xdpool-row-dot[data-state="warn"]{background:var(--dsw-alias-state-warning-primary,#d97706)}
 .dsm-workbuddy-xdpool-row-dot[data-state="error"]{background:var(--dsw-alias-state-error-primary,#ef4444)}
-.dsm-workbuddy-xdpool-row-main{flex-direction:column;gap:1px;min-width:0;flex:1 1 auto;display:flex}
+/*
+ * The state vocabulary, colour only. The dot says it too; the name's colour is
+ * what carries it across the whole row at a glance:
+ *   ok      — in the pool, nothing to report
+ *   current — the account serving right now, and deliberately brighter
+ *   warn    — cooling down, so the next request goes elsewhere
+ *   off     — switched off by the user
+ */
+.dsm-workbuddy-xdpool-row-current .dsm-workbuddy-xdpool-row-name{color:var(--dsw-alias-state-success-primary,#22a06b);font-weight:600}
+.dsm-workbuddy-xdpool-row-current .dsm-workbuddy-xdpool-row-rank{color:var(--dsw-alias-state-success-primary,#22a06b);font-weight:700}
+.dsm-workbuddy-xdpool-row-warn .dsm-workbuddy-xdpool-row-name{color:var(--dsw-alias-state-warning-primary,#d97706)}
+.dsm-workbuddy-xdpool-row-off .dsm-workbuddy-xdpool-row-name{color:var(--dsw-alias-label-dimmed,#9aa0a6)}
+/* Today's spend, pushed to the right of the name line. */
+.dsm-workbuddy-xdpool-row-usage{margin-left:auto;flex:none;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:10.5px;line-height:15px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .dsm-workbuddy-xdpool-row-name{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12.5px;font-weight:500;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-row-sub{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-row-value{color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12.5px;font-weight:600;line-height:18px;flex:none;font-variant-numeric:tabular-nums}
@@ -149,12 +170,18 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-chip-warn{background:var(--dsw-alias-state-warning-subtle,rgba(217,119,6,.16));color:var(--dsw-alias-state-warning-primary,#d97706)}
 .dsm-workbuddy-xdpool-chip-error{background:var(--dsw-alias-state-error-subtle,rgba(239,68,68,.14));color:var(--dsw-alias-state-error-primary,#ef4444)}
 
-/* Account switch, inside a row: a real toggle, stops the row click. */
-.dsm-workbuddy-xdpool-switch{appearance:none;font:inherit;cursor:pointer;flex:none;border:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 75%, transparent);border-radius:999px;padding:1px 8px;font-size:10px;line-height:15px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .14s,border-color .14s,background .14s}
-.dsm-workbuddy-xdpool-switch:hover:not(:disabled){color:var(--dsw-alias-label-primary,#e6e6e6);border-color:var(--dsw-alias-label-dimmed,#777)}
-.dsm-workbuddy-xdpool-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+/*
+ * Account switch, inside a row: a real toggle that stops the row click.
+ *
+ * A bare pill, coloured by state: the row already says "in the pool" with its
+ * dot and name, so the switch carries the ACTION and its state, never a word.
+ * Green = in the pool, grey = switched off.
+ */
+.dsm-workbuddy-xdpool-switch{appearance:none;font:inherit;cursor:pointer;flex:none;width:26px;height:15px;border:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 75%, transparent);border-radius:999px;padding:0;background:transparent;transition:border-color .14s,background .14s}
+.dsm-workbuddy-xdpool-switch:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-workbuddy-xdpool-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:2px}
 .dsm-workbuddy-xdpool-switch:disabled{cursor:default;opacity:.55}
-.dsm-workbuddy-xdpool-switch-on{background:color-mix(in oklab, var(--dsw-alias-state-success-primary,#22a06b) 15%, transparent);border-color:color-mix(in oklab, var(--dsw-alias-state-success-primary,#22a06b) 55%, transparent);color:var(--dsw-alias-state-success-primary,#22a06b);font-weight:600}
+.dsm-workbuddy-xdpool-switch-on{background:var(--dsw-alias-state-success-primary,#22a06b);border-color:var(--dsw-alias-state-success-primary,#22a06b)}
 
 /* ------------------------------------------------------- automation row -- */
 .dsm-workbuddy-xdpool-auto{align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;display:flex}

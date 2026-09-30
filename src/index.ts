@@ -82,6 +82,7 @@ export {
   type PoolWebModel,
   type PoolWebModelSelection,
   type PoolWebStatus,
+  type PoolWebUsageTotals,
 } from './status-paths.ts'
 export {
   IGNORED_FILE_NAME,
@@ -113,11 +114,13 @@ export {
   usageByAccount,
   usageLedgerPath,
   usageRowsFor,
+  usageTotalsFor,
   writeUsageLedger,
   type UsageCounters,
   type UsageLedger,
   type UsageReport,
   type UsageRow,
+  type UsageTotals,
 } from './usage.ts'
 export { SseUsageReader, usageFromSseFrame, type StreamUsage } from './usage-stream.ts'
 

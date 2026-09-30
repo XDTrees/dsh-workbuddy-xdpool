@@ -241,6 +241,13 @@ export interface UsageRow {
   lastUsedAt?: string
 }
 
+/** One account's day, summed over every model. See {@link usageTotalsFor}. */
+export interface UsageTotals {
+  requests: number
+  tokens: number
+  tokensReported: boolean
+}
+
 /**
  * One account's usage today, newest-used model first.
  *
@@ -269,4 +276,27 @@ export function usageByAccount(ledger: UsageLedger): Record<string, UsageRow[]> 
     if (rows.length > 0) out[accountId] = rows
   }
   return out
+}
+
+/**
+ * One account's usage today, summed over every model.
+ *
+ * `tokens` adds only the models that reported a usage frame, and
+ * `tokensReported` says whether any did: a gateway that sends no usage frame
+ * yields a request count with no token claim rather than a token figure of 0.
+ */
+export function usageTotalsFor(ledger: UsageLedger, accountId: string): UsageTotals | undefined {
+  const rows = usageRowsFor(ledger, accountId)
+  if (rows.length === 0) return undefined
+  let requests = 0
+  let tokens = 0
+  let tokensReported = false
+  for (const row of rows) {
+    requests += row.requests
+    if (row.tokensReported) {
+      tokens += row.tokens
+      tokensReported = true
+    }
+  }
+  return { requests, tokens, tokensReported }
 }

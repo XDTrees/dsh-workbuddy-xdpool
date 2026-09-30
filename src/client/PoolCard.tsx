@@ -120,6 +120,22 @@ function formatNumber(value: number | undefined): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
 }
 
+/**
+ * Split an account label into its display name and its discriminator.
+ *
+ * Labels are built as `name#uidprefix` (see `accountLabel` on the host) so two
+ * accounts sharing a nickname stay apart. The discriminator is an identifier,
+ * not something to read at a glance, so the row shows the name alone and the
+ * dialog keeps the full label where the detail belongs.
+ */
+function splitLabel(label: string): { name: string; discriminator?: string } {
+  const cut = label.lastIndexOf('#')
+  if (cut <= 0) return { name: label }
+  const discriminator = label.slice(cut + 1)
+  if (discriminator === '') return { name: label }
+  return { name: label.slice(0, cut), discriminator }
+}
+
 function formatTime(value: number): string {
   return new Intl.DateTimeFormat(undefined, {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
@@ -923,6 +939,30 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     ? undefined
     : status?.accounts.find(account => account.id === openAccountId)
 
+  /**
+   * The account list in PICK ORDER, each entry carrying its 1-based rank.
+   *
+   * Under the default `priority` distribution the pool answers from the head of
+   * its list until that account is rate-limited, so the rank is the real order
+   * and the first entry is the one serving. `round-robin` and `balanced` rotate
+   * instead, and the numbers there are only the list's own order.
+   *
+   * Enabled accounts come first because the host's order is credential
+   * freshness: a disabled account would otherwise interleave with the live ones
+   * and the numbers would not read as a queue. Disabled entries stay listed,
+   * ranked last, so they can be switched back on.
+   */
+  const rankedAccounts = (() => {
+    const accounts = status?.accounts ?? []
+    const rows = accounts.map((account, index) => ({ account, index }))
+    rows.sort((a, b) => {
+      const offA = a.account.disabled === true ? 1 : 0
+      const offB = b.account.disabled === true ? 1 : 0
+      return offA - offB || a.index - b.index
+    })
+    return rows.map(({ account }, index) => ({ account, rank: index + 1 }))
+  })()
+
   const automationToday = automationTotals.credit + automationTotals.checkinCredit
     + automationTotals.bonusCredit + automationTotals.travelCredit
 
@@ -1209,12 +1249,17 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 </span>
               </div>
               <div className="dsm-workbuddy-xdpool-col-body">
-                {status?.accounts.map(account => (
+                {/* Ranked copy: the ROW NUMBER is the pick order, so the list is
+                    sorted enabled-first here rather than trusting the host's
+                    order (which is credential freshness, not spend order).
+                    Disabled accounts keep their number and sink to the bottom. */}
+                {rankedAccounts.map(({ account, rank }) => (
                   <AccountRow
                     key={account.id}
                     account={account}
                     t={t}
-                    isCurrent={status.activeAccountId === account.id}
+                    isCurrent={status?.activeAccountId === account.id}
+                    rank={rank}
                     busy={accountBusyId === account.id}
                     onOpen={() => { setOpenAccountId(account.id) }}
                     onToggle={(disabled) => { void toggleAccountDisabled(account.id, disabled) }}
@@ -1429,6 +1474,7 @@ function AccountRow({
   account,
   t,
   isCurrent,
+  rank,
   busy,
   onOpen,
   onToggle,
@@ -1436,6 +1482,8 @@ function AccountRow({
   account: PoolWebAccount
   t?: PoolCardProps['t']
   isCurrent: boolean
+  /** Position in the pick order, 1-based. See the list's own note. */
+  rank: number
   busy: boolean
   onOpen: () => void
   onToggle: (disabled: boolean) => void
@@ -1444,23 +1492,39 @@ function AccountRow({
   const isCooling = account.cooling === true
   const credits = account.credits?.total
   const firstBatch = oldestExpiringBatch(account.credits)
-  // The sub-line carries only what the row itself cannot say: where the account
-  // stands when it is not simply healthy.
+  const usage = account.usageTotals
+  // The row states itself with the dot and the name's colour, so no state word
+  // is printed. The sub-line carries only what those two cannot: the deadline of
+  // the batch about to lapse.
   const sub = isCooling && account.cooldownUntil !== undefined
     ? `${t?.('row.cooling') ?? 'Cooling'} ${t?.('row.cooldownUntil', { time: formatTime(Date.parse(account.cooldownUntil)) }) ?? ''}`.trim()
-    : isCurrent
-      ? (t?.('row.currentAccount') ?? 'In use')
-      : firstBatch === undefined
-        ? undefined
-        // The batch that lapses first, on its own line: a total tells the user
-        // what they hold, this tells them what they are about to lose.
-        : (t?.('row.creditsFirstExpiry', {
-            credit: formatNumber(firstBatch.remain),
-            days: firstBatch.days,
-          }) ?? `${formatNumber(firstBatch.remain)} expire in ${firstBatch.days}d`)
+    : firstBatch === undefined
+      ? undefined
+      // The batch that lapses first, on its own line: a total tells the user
+      // what they hold, this tells them what they are about to lose.
+      : (t?.('row.creditsFirstExpiry', {
+          credit: formatNumber(firstBatch.remain),
+          days: firstBatch.days,
+        }) ?? `${formatNumber(firstBatch.remain)} expire in ${firstBatch.days}d`)
+  // Today's spend. A free model moves no credits, so this line is the ONLY
+  // evidence it was used at all.
+  const usageText = usage === undefined
+    ? undefined
+    : [
+        t?.('row.usageRequests', { count: usage.requests }) ?? `${usage.requests} req`,
+        usage.tokensReported
+          ? (t?.('row.usageTokens', { tokens: formatNumber(usage.tokens) }) ?? `${formatNumber(usage.tokens)} tok`)
+          : null,
+      ].filter(part => part !== null).join(' · ')
+  // Rank order is the pick order, but only under `priority`, where the head of
+  // the list answers every request. The other two distributions rotate, so a
+  // number there would claim an order that does not exist.
+  // `off` outranks `warn`: a switched-off account's cooldown is moot, and the
+  // user's own decision is the more useful thing to read back.
+  const state = isDisabled ? 'off' : isCooling ? 'warn' : isCurrent ? 'current' : 'ok'
   return (
     <div
-      className={`dsm-workbuddy-xdpool-row${isDisabled ? ' dsm-workbuddy-xdpool-row-off' : ''}`}
+      className={`dsm-workbuddy-xdpool-row dsm-workbuddy-xdpool-row-${state}`}
       role="button"
       tabIndex={0}
       onClick={onOpen}
@@ -1468,9 +1532,22 @@ function AccountRow({
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() }
       }}
     >
-      <span className="dsm-workbuddy-xdpool-row-dot" data-state={isCooling ? 'warn' : 'ok'} />
-      <span className="dsm-workbuddy-xdpool-row-main">
-        <span className="dsm-workbuddy-xdpool-row-name">{account.label}</span>
+      <span className="dsm-workbuddy-xdpool-row-rank">{rank}</span>
+      <span className="dsm-workbuddy-xdpool-row-body">
+        <span className="dsm-workbuddy-xdpool-row-top">
+          <span className="dsm-workbuddy-xdpool-row-dot" data-state={state} />
+          <span className="dsm-workbuddy-xdpool-row-name" title={account.label}>
+            {splitLabel(account.label).name}
+          </span>
+          {usageText === undefined
+            ? null
+            : <span
+                className="dsm-workbuddy-xdpool-row-usage"
+                title={t?.('row.usageTodayHint') ?? 'Requests and tokens served today'}
+              >
+                {usageText}
+              </span>}
+        </span>
         {sub === undefined ? null : <span className="dsm-workbuddy-xdpool-row-sub">{sub}</span>}
       </span>
       <span className="dsm-workbuddy-xdpool-row-value">{formatNumber(credits)}</span>
@@ -1485,13 +1562,14 @@ function AccountRow({
         type="button"
         role="switch"
         aria-checked={!isDisabled}
+        aria-label={isDisabled
+          ? (t?.('row.enableAccount') ?? 'Enable')
+          : (t?.('row.disableAccount') ?? 'Disable')}
         className={`dsm-workbuddy-xdpool-switch${isDisabled ? '' : ' dsm-workbuddy-xdpool-switch-on'}`}
         title={t?.('row.accountToggleHint') ?? 'Include this account in the pool'}
         disabled={busy}
         onClick={(event) => { event.stopPropagation(); onToggle(!isDisabled) }}
-      >
-        {isDisabled ? (t?.('row.accountOff') ?? 'Off') : (t?.('row.accountOn') ?? 'On')}
-      </button>
+      />
     </div>
   )
 }
@@ -1660,11 +1738,12 @@ function AccountDialog({
   const packages = (credits?.packages ?? []).filter(p => (p.size ?? 0) > 0)
   /** The batch that lapses first: the balance says how much, this says how long. */
   const oldestBatch = oldestExpiringBatch(credits)
+  const { name, discriminator } = splitLabel(account.label)
 
   return (
     <Dialog
       t={t}
-      title={account.label}
+      title={name}
       {...account.domain === '' || account.domain === undefined ? {} : { sub: account.domain }}
       onClose={onClose}
       footer={<>
@@ -1732,6 +1811,16 @@ function AccountDialog({
               <span className="dsm-workbuddy-xdpool-fact-label">{t?.('row.checkinTitle') ?? 'Check-in'}</span>
               <span className="dsm-workbuddy-xdpool-fact-value">
                 {t?.('row.checkinStreak', { days: checkin.streakDays }) ?? `${checkin.streakDays}d`}
+              </span>
+            </div>}
+        {discriminator === undefined
+          ? null
+          : <div className="dsm-workbuddy-xdpool-fact">
+              <span className="dsm-workbuddy-xdpool-fact-label">
+                {t?.('row.accountId') ?? 'UID'}
+              </span>
+              <span className="dsm-workbuddy-xdpool-fact-value" style={{ fontSize: 12 }}>
+                {discriminator}
               </span>
             </div>}
         {account.expiresAt === undefined
