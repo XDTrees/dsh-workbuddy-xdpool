@@ -19,7 +19,7 @@
 
 ## 先看几张图
 
-**插件配置卡片（设置 → 插件 → DSH WorkBuddy XD Pool）**
+**插件配置卡片（设置 → 「XD Pool」一节）**
 
 ![WorkBuddy 池设置卡片：国内版 / 国际版切换栏、池健康状态、账号面板、积分包与合计、每账号每日签到、积分自动化面板、模型管理](assets/settings-card.png)
 
@@ -83,9 +83,13 @@
 
 ## 安装
 
-前置条件：装好 WorkBuddy 桌面 App 并登录（插件复用它存在本机的登录状态）。多账号 = 在桌面 App 里换着登几次，每次登录都会被自动吸进池里。已针对 DSH Desktop host `0.1.2` 适配。
+前置条件：装好 WorkBuddy 桌面 App 并登录（插件复用它存在本机的登录状态）。多账号 = 在桌面 App 里换着登几次，每次登录都会被自动吸进池里。
 
-> 兼容 host `0.1.1-rc.2` / `0.1.2` 系列：安装设置节时会按 host 能力自动选择 `settings.installSection`（0.1.2-rc.1+）或更早的自由函数写法。
+> 兼容 host `0.1.1-rc.2` 起的整个 0.1.x 系列，以及 `0.2.0-rc.2`。安装设置节时会按 host 能力自动选择 `settings.installSection`（0.1.2-rc.1+）或更早的自由函数写法；卡片在 0.2.0 上作为设置面板里一个**平级标签页**渲染。
+
+> **卡片在哪儿打开**：DSH 设置面板本身。开法是**侧边栏左下角的齿轮**，或者快捷键 `Ctrl+Alt+,`。
+> 面板顶部是平级标签：`通用设置 / 模型 / 内置插件 / Agent 预设 / XD Pool` —— 本插件就是最后那个 **XD Pool**。
+> （0.1.x 时代它叫「设置 → 插件 → DSH WorkBuddy XD Pool」，0.2.0 起改成了平级标签，按老路径找不到。）
 
 **方式一：从 npm 安装（推荐）**
 
@@ -129,7 +133,7 @@ pnpm typecheck:client   # 客户端类型检查
 
 > 注意：`pnpm install` 要用 pnpm 11（`npx pnpm@11`），必要时加 `--config.confirmModulesPurge=false --config.minimumReleaseAge=0`——pnpm 11 默认的 `minimumReleaseAge` 供应链年龄策略会拦下刚发布的 rc 包。
 
-装完以后：模型选择器里会出现 **WorkBuddy XD Pool** 分组；设置 → 插件 → **DSH WorkBuddy XD Pool** 能看池健康、各账号的令牌 / 积分 / 签到 / 冷却状态，还有「重新检测账号」「清除所有冷却」按钮和每个账号的签到按钮。
+装完以后：模型选择器里会出现 **WorkBuddy XD Pool** 分组；打开设置面板（左下角齿轮或 `Ctrl+Alt+,`）切到 **XD Pool** 一栏，能看池健康、各账号的令牌 / 积分 / 签到 / 冷却状态，还有「重新检测账号」「清除所有冷却」按钮和每个账号的签到按钮。
 
 Web / TUI profile 也能用（`--profile web` / `--profile dsh-tui`）。
 

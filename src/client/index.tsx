@@ -164,6 +164,16 @@ const NAV_ICON_MARKER = 'data-dsh-xdpool-nav-icon'
 const NAV_ROW_SELECTOR = '[role="dialog"] nav button'
 
 /**
+ * How many consecutive in-dialog passes may miss the nav row before the
+ * diagnostic fires.
+ *
+ * Above 1 because a single miss is routine — the shell can re-render between
+ * our mutation callback and the query. Small enough that a genuinely broken
+ * selector is reported within a frame or two of opening the settings panel.
+ */
+const NAV_ICON_MISS_THRESHOLD = 3
+
+/**
  * Draw this page's own glyph in its Settings nav row.
  *
  * The `settings.section` contract carries no icon: the shell decides the glyph
@@ -205,15 +215,63 @@ function installNavIcon(ctx: WorkBuddyClientContext, resolveLabel: () => string)
 
     let disposed = false
     let scheduled = false
+    /**
+     * Consecutive passes that found no matching row.
+     *
+     * A miss is NORMAL most of the time: the settings dialog is closed, so its
+     * nav is not in the DOM at all, and the icon stays unapplied by design.
+     * Warning on the first miss would fire constantly and train everyone to
+     * ignore it.
+     *
+     * What is worth reporting is a PERSISTENT miss while the dialog IS open —
+     * that means the shell's nav markup changed and the selector no longer
+     * matches, which is exactly the failure that looks like "nothing happened"
+     * and cost hours to find. So the threshold is a burst of misses, and the
+     * warning is emitted once per burst rather than once per mutation.
+     */
+    let missStreak = 0
+    let warned = false
     const sync = (): void => {
       scheduled = false
       if (disposed) return
       const wanted = String(resolveLabel() ?? '').trim()
       if (wanted === '') return
+      let matched = 0
       for (const row of document.querySelectorAll(NAV_ROW_SELECTOR)) {
-        if (String(row.textContent ?? '').trim() === wanted) row.setAttribute(NAV_ICON_MARKER, '')
-        else row.removeAttribute(NAV_ICON_MARKER)
+        if (String(row.textContent ?? '').trim() === wanted) {
+          row.setAttribute(NAV_ICON_MARKER, '')
+          matched += 1
+        } else {
+          row.removeAttribute(NAV_ICON_MARKER)
+        }
       }
+      if (matched > 0) {
+        missStreak = 0
+        warned = false
+        return
+      }
+      // The dialog being absent explains a miss on its own; only count while
+      // there is a nav to have matched against.
+      if (document.querySelector(NAV_ROW_SELECTOR) === null) {
+        missStreak = 0
+        return
+      }
+      missStreak += 1
+      if (missStreak < NAV_ICON_MISS_THRESHOLD || warned) return
+      warned = true
+      // The shell may have renamed or restructured its nav rows. Say so, with
+      // enough context to fix it: the selector, the label we looked for, and
+      // what the nav actually contains.
+      const present = [...document.querySelectorAll(NAV_ROW_SELECTOR)]
+        .map(row => String(row.textContent ?? '').trim())
+        .filter(text => text !== '')
+      console.warn(
+        '[dsh-workbuddy-xdpool] the settings nav row could not be found, so the icon was not applied. '
+          + `selector=${JSON.stringify(NAV_ROW_SELECTOR)} expectedLabel=${JSON.stringify(wanted)} `
+          + `rowsPresent=${JSON.stringify(present)}. `
+          + 'This is cosmetic only — the card itself still works. '
+          + 'Please report this line so the selector can be updated.',
+      )
     }
     const schedule = (): void => {
       if (scheduled || disposed) return
