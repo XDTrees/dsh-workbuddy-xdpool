@@ -1170,6 +1170,29 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                           ?? `${accountCount} account(s) · ${cooling} cooling`}
                       </p>
                     </div>
+                    {/* Files on disk that did not become accounts. Shown because
+                        a pool of 2 next to 4 credential files otherwise reads as
+                        "2 accounts were deleted" — this says which files could
+                        not be opened and why, so the number is trustworthy. */}
+                    {status?.skippedFiles === undefined || status.skippedFiles.length === 0 ? null
+                      : <div className="dsm-workbuddy-xdpool-skipped">
+                          <p className="dsm-workbuddy-xdpool-skipped-summary">
+                            {t?.('row.skippedFiles', { count: status.skippedFiles.length })
+                              ?? `${status.skippedFiles.length} credential file(s) could not be read`}
+                          </p>
+                          {status.skippedFiles.slice(0, 4).map(entry => (
+                            <p key={entry.file} className="dsm-workbuddy-xdpool-skipped-row">
+                              <span className="dsm-workbuddy-xdpool-skipped-file">{entry.file}</span>
+                              <span className="dsm-workbuddy-xdpool-skipped-reason">
+                                {entry.reason === 'encrypted'
+                                  ? (t?.('row.skippedEncrypted') ?? 'encrypted — start WorkBuddy once')
+                                  : entry.reason === 'unreadable'
+                                    ? (t?.('row.skippedUnreadable') ?? 'file could not be read')
+                                    : (t?.('row.skippedMalformed') ?? 'not a credential file')}
+                              </span>
+                            </p>
+                          ))}
+                        </div>}
                     {(() => {
                       // "In use now": the account that actually served the last request.
                       // It is recorded on success only, so it answers "which account am I

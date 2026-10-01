@@ -37,6 +37,31 @@ import {
   unignoreAccount,
 } from './ignored.ts'
 
+import { fileURLToPath } from 'node:url'
+
+/**
+ * This plugin's install root, the tree its own provider is assembled from.
+ *
+ * Two directories up from `lib/` — the built bundle sits in `lib/`, so the
+ * package root is its parent. Used as one side of the pi-ai generation check.
+ */
+const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url))
+/**
+ * The host's own module directory, the tree its `PiAiAdapter` resolves from.
+ *
+ * Reached from the host package this plugin is loaded by: walking up from a
+ * `@deepseek-ai/dsh-llm-pi-ai` import lands in the host's `node_modules`, which
+ * is where the HOST generation actually lives. The plugin's own tree is the
+ * other side; comparing one tree with itself would always agree.
+ */
+const HOST_MODULE_ROOT = ((): string => {
+  try {
+    return fileURLToPath(new URL('../../node_modules/@deepseek-ai/dsh-llm-pi-ai/', import.meta.url))
+  } catch {
+    return ''
+  }
+})()
+
 export { WORKBUDDY_POOL_PROVIDER, createWorkBuddyAdapter, type WorkBuddyAdapter } from './adapter.ts'
 export { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 export {
@@ -51,6 +76,7 @@ export {
   type WorkBuddyCredential,
 } from './accounts.ts'
 export { WorkBuddyCatalog, FALLBACK_WORKBUDDY_MODELS, type WorkBuddyModelInfo } from './catalog.ts'
+import { checkPiAiGeneration, piAiMismatchMessage } from '../pi-ai-generation.ts'
 export { WorkBuddyUpstreamClient, buddyAppEvents, classifyUpstreamError, desktopAutomationCreatedEvent, desktopCanvasEvents, desktopChatEvents, parseRateLimitReset, type UpstreamErrorKind } from './upstream.ts'
 export {
   APPEARANCE_THEME_KEY, BUDDY_APP_ID, BUDDY_APP_NAME, LIBRARY_DOC_URL, LIGHTHOUSE_EXPERT_ID,
@@ -429,12 +455,46 @@ export function createCore(logger?: { warn(...args: unknown[]): void; info?(...a
 }
 
 /**
+ * Log a warning when the plugin and the host resolve different pi-ai
+ * generations.
+ *
+ * Never throws and never blocks startup: the check is a filesystem lookup, and
+ * a plugin that refused to load because of a version guess would be worse than
+ * one that merely warns. The two directories are THIS plugin's install root and
+ * the host's own module directory, so the two resolutions walk different trees —
+ * resolving from one place only would compare a copy with itself and always
+ * agree.
+ */
+function warnOnPiAiGenerationMismatch(ctx: Context): void {
+  try {
+    const check = checkPiAiGeneration(PLUGIN_ROOT, HOST_MODULE_ROOT)
+    const message = piAiMismatchMessage(check)
+    if (message !== undefined) ctx.logger.warn(message)
+  } catch {
+    // A generation check that breaks startup would be a worse bug than the
+    // mismatch it looks for.
+  }
+}
+
+/**
  * Start the loopback endpoint, register the `workbuddy-xdpool` provider, and
  * discover accounts. The provider registers only after `shim.ready` resolves,
  * because its models read the shim origin at construction time.
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const core = createCore(ctx.logger)
+
+  // Cross-generation guard, checked ONCE at load.
+  //
+  // Two copies of @earendil-works/pi-ai on one call chain — the plugin's and the
+  // host adapter's — throw a TypeError at the adapter seam, which the host
+  // reports as a non-retryable PI_AI_ERROR: every turn fails with no content and
+  // no useful error. A package.json range cannot prevent it (the old peer range
+  // excluded the host generation entirely, making the mix a valid install), so
+  // the resolved reality is compared here instead. Warn only: the plugin still
+  // runs, because a mismatch may be benign and a hard failure on a guess would
+  // be worse.
+  warnOnPiAiGenerationMismatch(ctx)
 
   // The permanent ignore list, read ONCE here (synchronously) and kept live.
   //

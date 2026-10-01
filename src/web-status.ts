@@ -17,6 +17,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { basename } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
@@ -522,6 +523,17 @@ export async function poolWebStatus(
     ...deps.catalogs[region].lastFetchError() === undefined
       ? {}
       : { catalogError: safeMessage(deps.catalogs[region].lastFetchError()) },
+    // Files that were on disk but did not become accounts. Reported on every
+    // region's document for the same reason the ignore list is: it is a property
+    // of the machine, and a short account list must be explainable from any tab.
+    ...deps.pool.skippedFilesInOrder().length === 0
+      ? {}
+      : {
+          skippedFiles: deps.pool.skippedFilesInOrder().map(entry => ({
+            file: basename(entry.path),
+            reason: entry.reason,
+          })),
+        },
   }
 }
 

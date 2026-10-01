@@ -752,6 +752,18 @@ export declare const WORKBUDDY_LIVE_FILENAME = "workbuddy-desktop.info";
 /** Env override for the auth file or its directory. */
 export declare const WORKBUDDY_AUTH_FILE_ENV = "WORKBUDDY_AUTH_FILE";
 /** One parsed WorkBuddy credential. */
+/**
+ * A credential file the pool could not turn into an account.
+ *
+ * Reported (not swallowed) because the count is otherwise a lie: a directory
+ * holding four files that yields two accounts looks like two accounts were
+ * deleted, when in fact two files were unreadable. Naming the file and the
+ * reason is what makes the difference visible.
+ */
+interface WorkBuddySkippedFile {
+  path: string;
+  reason: 'encrypted' | 'unreadable' | 'malformed';
+}
 interface WorkBuddyCredential {
   accessToken: string;
   refreshToken: string;
@@ -862,6 +874,13 @@ export declare class WorkBuddyAccountPool {
   private readonly client;
   private readonly refreshMarginMs;
   private accounts;
+  /**
+   * Files the last scan could not read, with the reason.
+   *
+   * Surfaced so "2 accounts" can be told apart from "4 files, 2 unreadable" —
+   * the difference between accounts being gone and files being unopenable.
+   */
+  private skippedFiles;
   private distribution;
   /** Cursor for round-robin mode; unused under priority distribution. */
   private cursor;
@@ -948,6 +967,14 @@ export declare class WorkBuddyAccountPool {
   isIgnored(accountId: string): boolean;
   /** Every ignored id currently in force, in insertion order. */
   ignoredIdsInOrder(): string[];
+  /**
+   * Credential files the last scan could not read, with the reason.
+   *
+   * Exposed because a short account list is otherwise indistinguishable from a
+   * broken one: with this, the card can say "2 accounts, 2 files unreadable"
+   * instead of silently showing half a pool.
+   */
+  skippedFilesInOrder(): readonly WorkBuddySkippedFile[];
   /** Rescan the auth directories and merge newly discovered accounts. */
   scan(): Promise<WorkBuddyAccount[]>;
   /** All accounts, cooldown state included. */
@@ -1345,6 +1372,21 @@ interface PoolWebStatus {
   catalogUpdatedAt?: string;
   /** Why the last fetch failed, when it did. Redacted and length-capped. */
   catalogError?: string;
+  /**
+   * Credential files on disk that did NOT become accounts.
+   *
+   * Reported so the account count can be trusted: without this, a directory
+   * holding four files that yields two accounts looks like two accounts were
+   * deleted, when really two files could not be opened (most often an encrypted
+   * credential the desktop app was not running to unlock).
+   */
+  skippedFiles?: readonly PoolWebSkippedFile[];
+}
+/** A credential file the pool could not read. */
+interface PoolWebSkippedFile {
+  /** Basename only; the full path lives in the desktop app's auth directory. */
+  file: string;
+  reason: 'encrypted' | 'unreadable' | 'malformed';
 }
 /** How a region's model list was obtained. */
 type PoolWebCatalogSource = 'live' | 'fallback';

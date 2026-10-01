@@ -316,6 +316,22 @@ export interface PoolWebStatus {
   catalogUpdatedAt?: string
   /** Why the last fetch failed, when it did. Redacted and length-capped. */
   catalogError?: string
+  /**
+   * Credential files on disk that did NOT become accounts.
+   *
+   * Reported so the account count can be trusted: without this, a directory
+   * holding four files that yields two accounts looks like two accounts were
+   * deleted, when really two files could not be opened (most often an encrypted
+   * credential the desktop app was not running to unlock).
+   */
+  skippedFiles?: readonly PoolWebSkippedFile[]
+}
+
+/** A credential file the pool could not read. */
+export interface PoolWebSkippedFile {
+  /** Basename only; the full path lives in the desktop app's auth directory. */
+  file: string
+  reason: 'encrypted' | 'unreadable' | 'malformed'
 }
 
 /** How a region's model list was obtained. */

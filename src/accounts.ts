@@ -42,6 +42,19 @@ export const WORKBUDDY_LIVE_FILENAME = 'workbuddy-desktop.info'
 export const WORKBUDDY_AUTH_FILE_ENV = 'WORKBUDDY_AUTH_FILE'
 
 /** One parsed WorkBuddy credential. */
+/**
+ * A credential file the pool could not turn into an account.
+ *
+ * Reported (not swallowed) because the count is otherwise a lie: a directory
+ * holding four files that yields two accounts looks like two accounts were
+ * deleted, when in fact two files were unreadable. Naming the file and the
+ * reason is what makes the difference visible.
+ */
+export interface WorkBuddySkippedFile {
+  path: string
+  reason: 'encrypted' | 'unreadable' | 'malformed'
+}
+
 export interface WorkBuddyCredential {
   accessToken: string
   refreshToken: string
@@ -358,6 +371,18 @@ async function authFilesIn(dir: string): Promise<string[]> {
   return files.map(name => join(dir, name))
 }
 
+/**
+ * One credential file, or undefined when it cannot be used.
+ *
+ * Returns undefined — rather than throwing — for every failure mode, so ONE bad
+ * file cannot empty the pool. That is the whole point: an auth directory blends
+ * plain files, encrypted files, half-written files and files from an app version
+ * this plugin cannot read, and a scan that aborts on the first unusable one
+ * reports "you have 2 accounts" when it means "I could not open the other two".
+ *
+ * The caller surfaces the ones it skipped, so the count never silently
+ * disagrees with what is on disk.
+ */
 async function readCredential(path: string): Promise<WorkBuddyCredential | undefined> {
   let text: string
   try {
@@ -373,8 +398,11 @@ async function readCredential(path: string): Promise<WorkBuddyCredential | undef
   const decrypt = text.includes('"$wbEncrypted"') ? await encryptedFieldOpener() : undefined
   try {
     return parseWorkBuddyAuth(text, path, decrypt)
-  } catch (error: unknown) {
-    if (isEncryptedCredentialError(error)) throw error
+  } catch {
+    // Encrypted-but-unopenable, malformed, or an unknown shape: skip THIS file.
+    // Previously this rethrew `WorkBuddyEncryptedCredentialError`, which
+    // propagated out of `scan()` and discarded every account that had parsed
+    // fine — the reported "4 accounts become 2 after switching sign-in".
     return undefined
   }
 }
@@ -415,6 +443,30 @@ async function cheapIdentityIdFromFile(path: string): Promise<string | undefined
     return cheapIdentityId(await readFile(path, 'utf8'))
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Why a file could not become an account.
+ *
+ * Distinguishing "encrypted" matters most: it is actionable (start the desktop
+ * app, or set the executable override), whereas "malformed" means the file is
+ * simply not a credential. Reporting them alike would send the user looking for
+ * a fix that cannot work.
+ */
+async function skipReasonFor(path: string): Promise<WorkBuddySkippedFile['reason']> {
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return 'unreadable'
+  }
+  if (text.includes('"$wbEncrypted"')) return 'encrypted'
+  try {
+    JSON.parse(text)
+    return 'malformed'
+  } catch {
+    return 'malformed'
   }
 }
 
@@ -535,6 +587,13 @@ export class WorkBuddyAccountPool {
   private readonly client: TokenRefresher | undefined
   private readonly refreshMarginMs: number
   private accounts: WorkBuddyAccount[] = []
+  /**
+   * Files the last scan could not read, with the reason.
+   *
+   * Surfaced so "2 accounts" can be told apart from "4 files, 2 unreadable" —
+   * the difference between accounts being gone and files being unopenable.
+   */
+  private skippedFiles: WorkBuddySkippedFile[] = []
   private distribution: AccountDistribution
   /** Cursor for round-robin mode; unused under priority distribution. */
   private cursor = 0
@@ -663,9 +722,21 @@ export class WorkBuddyAccountPool {
     return [...this.ignoredIds]
   }
 
+  /**
+   * Credential files the last scan could not read, with the reason.
+   *
+   * Exposed because a short account list is otherwise indistinguishable from a
+   * broken one: with this, the card can say "2 accounts, 2 files unreadable"
+   * instead of silently showing half a pool.
+   */
+  skippedFilesInOrder(): readonly WorkBuddySkippedFile[] {
+    return this.skippedFiles
+  }
+
   /** Rescan the auth directories and merge newly discovered accounts. */
   async scan(): Promise<WorkBuddyAccount[]> {
     const found: WorkBuddyCredential[] = []
+    const skipped: WorkBuddySkippedFile[] = []
     for (const dir of this.authDirs) {
       for (const file of await authFilesIn(dir)) {
         // Honour the ignore list BEFORE reading the document's key material.
@@ -679,12 +750,26 @@ export class WorkBuddyAccountPool {
           if (cheapId !== undefined && this.ignoredIds.has(cheapId)) continue
         }
         const credential = await readCredential(file)
-        if (credential === undefined) continue
+        if (credential === undefined) {
+          // Record WHY, so a pool of "2" next to a disk holding 4 files can say
+          // which two were unreadable and what prevented them. Silently dropping
+          // them is what made the number look like accounts had vanished.
+          skipped.push({ path: file, reason: await skipReasonFor(file) })
+          continue
+        }
         // Second gate: the cheap probe could not identify this file, so the
         // ignored check happens now that the credential is fully parsed.
         if (this.ignoredIds.size > 0 && this.ignoredIds.has(workbuddyAccountId(credential))) continue
         found.push(credential)
       }
+    }
+    this.skippedFiles = skipped
+    if (skipped.length > 0) {
+      this.logger?.warn?.(
+        `dsh-workbuddy-xdpool: ${skipped.length} credential file(s) could not be read; `
+        + `${found.length} account(s) still loaded. Reasons: `
+        + [...new Set(skipped.map(s => s.reason))].join('; '),
+      )
     }
 
     const byId = new Map<string, WorkBuddyAccount>()

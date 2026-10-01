@@ -184,6 +184,13 @@ export const POOL_CARD_CSS = `
 /* "活动至 10-31": the campaign's end date. Muted — it is context for planning,
    not a claim about the current price. */
 .dsm-workbuddy-xdpool-model-meta-promo{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px;opacity:.85}
+/* Unreadable credential files: a warning tint, since it explains a smaller pool
+   and "encrypted" is actionable (start the app once). */
+.dsm-workbuddy-xdpool-skipped{margin:6px 0 0;padding:7px 10px;border-radius:8px;background:var(--dsw-alias-state-warning-subtle,rgba(217,119,6,.12));display:flex;flex-direction:column;gap:3px}
+.dsm-workbuddy-xdpool-skipped-summary{margin:0;font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-state-warning-primary,#d97706)}
+.dsm-workbuddy-xdpool-skipped-row{margin:0;display:flex;gap:8px;align-items:baseline;font-size:11px;line-height:16px;flex-wrap:wrap}
+.dsm-workbuddy-xdpool-skipped-file{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dsw-alias-label-secondary,#c6c9d0);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-workbuddy-xdpool-skipped-reason{color:var(--dsw-alias-label-tertiary,#9aa0a8)}
 .dsm-workbuddy-xdpool-model-cap{color:var(--dsw-alias-label-tertiary,#999);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 /* Model row: checkbox + image toggle + context-budget radios. */
 .dsm-workbuddy-xdpool-model-off{opacity:.55}
