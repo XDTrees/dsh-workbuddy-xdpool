@@ -122,6 +122,42 @@ describe('free-first sorting', () => {
   })
 })
 
+describe('the promotion is DOMESTIC only', () => {
+  it('does not apply to the international roster', () => {
+    // The Hy3 / Hy4-preview extension is a CN campaign; the international
+    // gateway runs its own pricing. Applying the CN window there would invent a
+    // discount that gateway does not offer.
+    for (const hour of [23, 3, 7]) {
+      expect(promoStatusFor(HY4, at(hour), 'global'), `global at ${hour}:00`).toBeUndefined()
+      expect(isFreeNow(HY4, at(hour), 'global')).toBe(false)
+    }
+    // ...while the domestic roster does get it, at the same instants.
+    expect(promoStatusFor(HY4, at(23), 'cn')?.kind).toBe('night')
+  })
+
+  it('still reports a genuinely zero-priced model as free on BOTH gateways', () => {
+    // That one is upstream truth, not a campaign, so it is region-neutral.
+    expect(promoStatusFor(HY3, at(12), 'global')?.kind).toBe('free')
+    expect(promoStatusFor(HY3, at(12), 'cn')?.kind).toBe('free')
+  })
+})
+
+describe('the campaign end date is exposed for display', () => {
+  it('carries the announced end date', () => {
+    // The card prints this, so a user planning around the promotion can see how
+    // long it runs — and an extension becomes visible without a changelog.
+    const night = promoStatusFor(HY4, at(23), 'cn')
+    expect(night?.kind === 'night' ? night.promoUntil : undefined).toBe('2026-10-31')
+    const later = promoStatusFor(HY4, at(12), 'cn')
+    expect(later?.kind === 'night-later' ? later.promoUntil : undefined).toBe('2026-10-31')
+  })
+
+  it('is absent once the promotion has lapsed', () => {
+    const after = new Date(2026, 10, 1, 23, 30)
+    expect(promoStatusFor(HY4, after, 'cn')).toBeUndefined()
+  })
+})
+
 describe('the rule table stays honest', () => {
   it('uses prefix matching only where the family is intended', () => {
     // A prefix that is too short would capture unrelated ids. Guard the one
@@ -136,9 +172,18 @@ describe('the rule table stays honest', () => {
     }
   })
 
+  it('declares a region on every rule', () => {
+    // Without one a rule would apply to both gateways, which is exactly the
+    // mistake this field exists to prevent.
+    for (const rule of PROMO_RULES) {
+      expect(['cn', 'global'], `${rule.idPrefix} region`).toContain(rule.region)
+    }
+  })
+
   it('carries an expiry, so a forgotten promotion cannot live forever', () => {
-    // Every rule must be time-boxed. A rule without `until` would silently
-    // claim a model is free long after the announcement lapsed.
+    // A rule without `until` would silently claim a model is free long after
+    // the announcement lapsed. The type makes it required; this asserts the
+    // data actually has one.
     for (const rule of PROMO_RULES) {
       expect(rule.until, `${rule.idPrefix} must declare an end date`).toMatch(/^\d{4}-\d{2}-\d{2}$/u)
     }

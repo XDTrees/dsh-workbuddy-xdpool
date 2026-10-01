@@ -34,13 +34,28 @@ export interface PromoRule {
    * `hy4-preview-f`); a promotion covers the family, not one spelling.
    */
   idPrefix: string
+  /**
+   * Which gateway this promotion belongs to.
+   *
+   * Load-bearing, not decoration: the WorkBuddy announcements are REGIONAL.
+   * The Hy3 / Hy4-preview extensions are a DOMESTIC (CN) campaign, and the
+   * international gateway runs its own pricing — its `hy3` is priced at
+   * `x0.00` upstream while `hy4-preview-f` costs real credits with no
+   * announced window. Applying a CN rule to the global roster would invent a
+   * discount that does not exist there.
+   */
+  region: 'cn' | 'global'
   /** Local hours (0-23) the promotion is active in, inclusive start/exclusive end. */
   hours: readonly number[]
   /**
    * Last day the promotion applies, as `YYYY-MM-DD` in local time, inclusive.
-   * Absent means "no announced end" — but see {@link PromoStatus.source}.
+   *
+   * Required rather than optional: an announcement is always time-boxed, and a
+   * rule that silently lives forever is how a plugin ends up promising a
+   * discount months after it lapsed. The card also shows this date, so the
+   * user can see how long the offer runs.
    */
-  until?: string
+  until: string
   /** Short label key for the badge. */
   label: 'night'
 }
@@ -50,18 +65,19 @@ export interface PromoRule {
  *
  * Source: the WorkBuddy announcement extending Hy3's free tier and
  * Hy4-preview's night window to **2026-10-31**. Hy3 needs no entry here (its
- * price is already zero upstream); only Hy4-preview's time window does, because
- * the gateway charges for it around the clock.
+ * CN price is already zero upstream); only Hy4-preview's time window does,
+ * because the gateway charges for it around the clock.
  *
  * When a promotion is extended or a new one starts, edit this table. When one
  * ends, either delete the row or let `until` lapse — both stop the badge.
  */
 export const PROMO_RULES: readonly PromoRule[] = [
   {
-    // Hy4-preview: free 23:00 - 08:00, "其余时间正常消耗积分".
+    // Hy4-preview (DOMESTIC ONLY): free 23:00 - 08:00, "其余时间正常消耗积分".
     // The window CROSSES MIDNIGHT, which is why `hours` is a plain set of clock
     // hours rather than a start/end pair: 23 and 0-7 are all "inside".
     idPrefix: 'hy4-preview',
+    region: 'cn',
     hours: [23, 0, 1, 2, 3, 4, 5, 6, 7],
     until: '2026-10-31',
     label: 'night',
@@ -79,14 +95,14 @@ export type PromoStatus =
    * "free until 08:00" rather than just "free" — the difference matters,
    * because the same model costs credits an hour later.
    */
-  | { kind: 'night'; label: 'night'; untilHour: number }
+  | { kind: 'night'; label: 'night'; untilHour: number; promoUntil: string }
   /**
    * A promotion covers this model but we are OUTSIDE its window.
    *
    * Distinct from "not on promotion" on purpose: the row should hint that
    * waiting is cheaper, without claiming it is free right now.
    */
-  | { kind: 'night-later'; label: 'night'; nextHour: number }
+  | { kind: 'night-later'; label: 'night'; nextHour: number; promoUntil: string }
   | undefined
 
 /** `YYYY-MM-DD` for a Date in LOCAL time (the promotions are announced locally). */
@@ -97,7 +113,6 @@ export function localDayKey(date: Date): string {
 
 /** Whether a rule is still in force on `date`. */
 function ruleActive(rule: PromoRule, date: Date): boolean {
-  if (rule.until === undefined) return true
   // String comparison is safe for `YYYY-MM-DD` and avoids timezone parsing.
   return localDayKey(date) <= rule.until
 }
@@ -121,30 +136,35 @@ function windowEndHour(rule: PromoRule, hour: number): number | undefined {
 }
 
 /**
- * The promotion status of one model at `now`.
+ * The promotion status of one model at `now`, for one region.
  *
  * `now` is injected so the behaviour is testable without freezing the clock —
  * a time-dependent badge that can only be tested by waiting is a badge nobody
- * tests.
+ * tests. `region` is required for the same reason the rules carry one: these
+ * campaigns are regional, and applying a domestic rule to the international
+ * roster would invent a discount that gateway does not offer.
  */
 export function promoStatusFor(
   model: { id: string; multiplier?: number },
   now: Date = new Date(),
+  region: 'cn' | 'global' = 'cn',
 ): PromoStatus {
   // A genuinely zero-price model is free at every hour; no window applies.
+  // This is upstream truth, so it holds on BOTH gateways and is region-neutral.
   if (model.multiplier === 0) return { kind: 'free' }
 
   for (const rule of PROMO_RULES) {
+    if (rule.region !== region) continue
     if (!model.id.startsWith(rule.idPrefix)) continue
     if (!ruleActive(rule, now)) continue
     const hour = now.getHours()
     if (rule.hours.includes(hour)) {
       const untilHour = windowEndHour(rule, hour)
-      return { kind: 'night', label: rule.label, untilHour: untilHour ?? hour }
+      return { kind: 'night', label: rule.label, untilHour: untilHour ?? hour, promoUntil: rule.until }
     }
     const nextHour = nextWindowHour(rule, hour)
     if (nextHour !== undefined) {
-      return { kind: 'night-later', label: rule.label, nextHour }
+      return { kind: 'night-later', label: rule.label, nextHour, promoUntil: rule.until }
     }
   }
   return undefined
@@ -157,7 +177,11 @@ export function promoStatusFor(
  * NOT sort to the top: it costs credits at this moment, and floating a
  * credit-priced model above cheaper ones would misrepresent the list.
  */
-export function isFreeNow(model: { id: string; multiplier?: number }, now: Date = new Date()): boolean {
-  const status = promoStatusFor(model, now)
+export function isFreeNow(
+  model: { id: string; multiplier?: number },
+  now: Date = new Date(),
+  region: 'cn' | 'global' = 'cn',
+): boolean {
+  const status = promoStatusFor(model, now, region)
   return status?.kind === 'free' || status?.kind === 'night'
 }

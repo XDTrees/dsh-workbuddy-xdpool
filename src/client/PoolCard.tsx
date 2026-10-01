@@ -271,10 +271,18 @@ function isExpiringSoon(pack: PoolWebCreditPackage): boolean {
  *    charges `x0.29` for `hy4-preview` around the clock and has no field for a
  *    time-of-day rule. See that module for why the 14-day newcomer allowance is
  *    deliberately not modelled.
+ *
+ * `region` is threaded through because the campaigns are REGIONAL: the
+ * Hy3 / Hy4-preview extension is a domestic promotion, so a global roster must
+ * not pick up a discount that gateway does not offer.
  */
-function tagFor(model: PoolWebModel, now: Date): 'free' | 'limited' | 'night' | undefined {
+function tagFor(
+  model: PoolWebModel,
+  now: Date,
+  region: 'cn' | 'global',
+): 'free' | 'limited' | 'night' | undefined {
   const tags = model.tags ?? []
-  const promo = promoStatusFor(model, now)
+  const promo = promoStatusFor(model, now, region)
   // A currently-active window outranks a bare multiplier: "free until 08:00" is
   // the more useful fact, and it is the one that expires.
   if (promo?.kind === 'night') return 'night'
@@ -1302,11 +1310,12 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                           night window is closed still costs credits, and
                           promoting it would misrepresent the list. */}
                       {[...(status?.models ?? [])]
-                        .sort((a, b) => Number(isFreeNow(b, now)) - Number(isFreeNow(a, now)))
+                        .sort((a, b) => Number(isFreeNow(b, now, activeRegion)) - Number(isFreeNow(a, now, activeRegion)))
                         .map(model => (
                         <ModelRow
                           key={model.id}
                           model={model}
+                          region={activeRegion}
                           t={t}
                           draft={modelDraft[model.id] ?? { enabled: model.enabled, images: model.supportsImages }}
                           editable={modelsEditable}
@@ -1751,6 +1760,7 @@ function AccountStats({
  */
 function ModelRow({
   model,
+  region,
   t,
   draft,
   editable,
@@ -1759,6 +1769,8 @@ function ModelRow({
   onBudget,
 }: {
   model: PoolWebModel
+  /** Which gateway this row belongs to; the promo campaigns are regional. */
+  region: 'cn' | 'global'
   t?: PoolCardProps['t']
   draft: ModelDraftEntry
   editable: boolean
@@ -1767,8 +1779,8 @@ function ModelRow({
   onBudget: (id: string, budget: number) => void
 }) {
   const now = new Date()
-  const tag = tagFor(model, now)
-  const promo = promoStatusFor(model, now)
+  const tag = tagFor(model, now, region)
+  const promo = promoStatusFor(model, now, region)
   const tagText = tag === 'free'
     ? (t?.('row.free') ?? 'free')
     : tag === 'limited'
@@ -1786,6 +1798,18 @@ function ModelRow({
     ? (t?.('row.nightFreeLater', { time: `${String(promo.nextHour).padStart(2, '0')}:00` })
         ?? `free from ${String(promo.nextHour).padStart(2, '0')}:00`)
     : null
+  /**
+   * How long the campaign itself runs, e.g. "活动至 10-31".
+   *
+   * Shown on both the free and the not-yet-free row, because the useful question
+   * is not only "is it free now" but "until when is this offer good at all" —
+   * an extension changes that date, and a user planning around the promotion
+   * needs it visible rather than buried in a changelog.
+   */
+  const promoUntil = promo === undefined || promo.kind === 'free'
+    ? null
+    : (t?.('row.promoUntil', { date: promo.promoUntil.slice(5).replace('-', '-') })
+        ?? `promo until ${promo.promoUntil}`)
 
   const native = model.nativeContextWindow
   const capped = native > DEFAULT_CONTEXT_BUDGET
@@ -1857,6 +1881,8 @@ function ModelRow({
           : <span className="dsm-workbuddy-xdpool-model-meta-tag">{tagText}</span>}
         {laterHint === null ? null
           : <span className="dsm-workbuddy-xdpool-model-meta-later">{laterHint}</span>}
+        {promoUntil === null ? null
+          : <span className="dsm-workbuddy-xdpool-model-meta-promo">{promoUntil}</span>}
         <span className="dsm-workbuddy-xdpool-model-cap">
           {t?.('row.modelOutput', { size: formatCapacity(model.maxOutputTokens) })
             ?? `out ${formatCapacity(model.maxOutputTokens)}`}
