@@ -178,6 +178,9 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-model-id{color:var(--dsw-alias-label-tertiary,#999);font-size:11px;line-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-xdpool-model-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--dsw-alias-label-tertiary,#999);font-size:11px;line-height:16px}
 .dsm-workbuddy-xdpool-model-meta-tag{padding:1px 8px;border-radius:999px;font-size:11px;line-height:16px;background:rgba(174,179,187,.11);color:var(--dsw-alias-label-secondary,#c6c9d0)}
+/* "free from HH:00": quieter than the badge on purpose — the model costs
+   credits right now, so it must not read as a promo the user can spend against. */
+.dsm-workbuddy-xdpool-model-meta-later{padding:1px 8px;border-radius:999px;font-size:11px;line-height:16px;border:1px dashed color-mix(in oklab, var(--dsw-alias-label-dimmed,#9aa0a8) 55%, transparent);color:var(--dsw-alias-label-tertiary,#9aa0a8)}
 .dsm-workbuddy-xdpool-model-cap{color:var(--dsw-alias-label-tertiary,#999);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 /* Model row: checkbox + image toggle + context-budget radios. */
 .dsm-workbuddy-xdpool-model-off{opacity:.55}
