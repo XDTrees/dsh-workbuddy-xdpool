@@ -846,6 +846,48 @@ export class WorkBuddyAccountPool {
     })
   }
 
+  /**
+   * Why no account is available right now, for an accurate error.
+   *
+   * The pool can be empty for reasons that need OPPOSITE remedies: nobody is
+   * signed in (the user must sign in), every account is rate-limited (the user
+   * must wait, and retrying later works), or every account was switched off /
+   * ignored (the user must re-enable one). Reporting all of them as "no
+   * credential, sign in" sent users to re-authenticate over a temporary 429 —
+   * observed as an "API key invalid" panel for a model that was merely cooling.
+   *
+   * Counts are over the region's accounts, since a provider only ever sees its
+   * own gateway.
+   */
+  unavailableReason(modelId?: string, region?: WorkBuddyRegion): {
+    total: number
+    cooling: number
+    disabled: number
+    reason: 'empty' | 'cooling' | 'disabled' | 'reserve' | 'none'
+  } {
+    const now = Date.now()
+    const inRegion = this.accounts.filter(
+      account => region === undefined || regionOf(account.credential.domain) === region,
+    )
+    if (inRegion.length === 0) return { total: 0, cooling: 0, disabled: 0, reason: 'empty' }
+
+    let cooling = 0
+    let disabled = 0
+    for (const account of inRegion) {
+      if (this.disabledIds.has(account.id)) { disabled += 1; continue }
+      const modelCooling = modelId !== undefined && (account.modelCooldowns[modelId] ?? 0) > now
+      if (account.cooldownUntilMs > now || modelCooling) { cooling += 1; continue }
+      const reserve = this.creditReserves.get(account.id)
+      if (reserve !== undefined && reserve > 0) {
+        const balance = this.creditBalances.get(account.id)
+        if (balance !== undefined && balance <= reserve) return { total: inRegion.length, cooling, disabled, reason: 'reserve' }
+      }
+    }
+    if (cooling > 0) return { total: inRegion.length, cooling, disabled, reason: 'cooling' }
+    if (disabled > 0) return { total: inRegion.length, cooling, disabled, reason: 'disabled' }
+    return { total: inRegion.length, cooling, disabled, reason: 'none' }
+  }
+
   /** Round-robin: the legacy cursor walk, kept for the distribution that asks for it. */
   private pickRoundRobin(pool: readonly WorkBuddyAccount[]): WorkBuddyAccount | undefined {
     const index = this.cursor % pool.length

@@ -119,6 +119,43 @@ function isContextTooLong(body: string): boolean {
   return false
 }
 
+/**
+ * A content-free description of a request, for the log when the upstream
+ * rejects it.
+ *
+ * `model_param_invalid` arrives with an EMPTY `param` field, so the error alone
+ * says nothing about which parameter was rejected — the user is left with "the
+ * request parameters do not meet the current model requirements" and no way to
+ * act. Recording the shape (top-level keys, message count by role, tool count,
+ * approximate prompt size) makes such a rejection diagnosable from the log.
+ *
+ * Deliberately SHAPE ONLY: no message content, no tool schemas, no tokens. It
+ * ends up in a log file, and the conversation it describes is the user's.
+ */
+function requestShape(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const keys = Object.keys(parsed).sort()
+    const messages = Array.isArray(parsed['messages']) ? parsed['messages'] as unknown[] : []
+    const byRole = new Map<string, number>()
+    let chars = 0
+    for (const entry of messages) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const message = entry as Record<string, unknown>
+      const role = typeof message['role'] === 'string' ? message['role'] : '?'
+      byRole.set(role, (byRole.get(role) ?? 0) + 1)
+      // Approximate only; the point is the ORDER of magnitude.
+      chars += JSON.stringify(message['content'] ?? '').length
+    }
+    const roles = [...byRole.entries()].map(([role, n]) => `${role}:${n}`).join(' ')
+    const tools = Array.isArray(parsed['tools']) ? parsed['tools'].length : 0
+    return `keys=[${keys.join(' ')}] messages=${messages.length}${roles === '' ? '' : ` (${roles})`} `
+      + `tools=${tools} contentChars=${chars}`
+  } catch {
+    return 'body was not parseable JSON'
+  }
+}
+
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -278,33 +315,67 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
     const tried: string[] = []
     let last: { kind: UpstreamErrorKind; status: number; message: string } | undefined
-    let exhaustedByRateLimit = false
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (controller.signal.aborted) return
 
       const account = await pool.acquire(modelId, region)
       if (account === undefined) {
-        // Distinguish "never signed in" from "every account is rate-limited":
-        // they need opposite remedies, so they must not share a status code.
-        if (exhaustedByRateLimit && last !== undefined) {
+        // Ask the POOL why, instead of inferring it from this request alone.
+        //
+        // The old check used a flag set earlier IN THIS LOOP, which cannot see a
+        // cooldown that was established by an earlier request. After a 429, the
+        // next request found no account on its first attempt, the flag was still
+        // false, and the shim answered 401 "no credential found; sign in" — so
+        // DSH showed an "API key invalid" panel for a model that was merely
+        // cooling, sending the user to re-authenticate over a temporary limit.
+        const why = pool.unavailableReason(modelId, region)
+
+        if (why.reason === 'cooling') {
+          // A rate limit is TEMPORARY: the caller should wait, not re-authenticate.
           const subject = modelId === undefined
             ? 'every WorkBuddy account is rate-limited'
             : `every account is rate-limited for model ${modelId}`
+          const upstream = last === undefined ? '' : ` — ${last.message.slice(0, 200)}`
           writeOpenAIError(
             res,
-            KIND_STATUS[last.kind],
-            last.kind,
-            `${subject} (tried ${tried.length}: ${tried.join(', ')}); ` +
-              `resets at the upstream window — ${last.message.slice(0, 200)}`,
+            429,
+            'soft_rate',
+            `${subject} (${why.cooling}/${why.total} cooling, tried ${tried.length})`
+              + `${tried.length === 0 ? '' : `: ${tried.join(' → ')}`}${upstream}`,
           )
           return
         }
+
+        if (why.reason === 'disabled') {
+          writeOpenAIError(
+            res,
+            403,
+            'no_enabled_account',
+            `all ${why.total} WorkBuddy account(s) for this gateway are switched off or ignored; `
+              + 're-enable one on the pool card',
+          )
+          return
+        }
+
+        if (why.reason === 'reserve') {
+          writeOpenAIError(
+            res,
+            402,
+            'reserve_floor',
+            `every WorkBuddy account is at or below its credit reserve (${why.total} account(s)); `
+              + 'lower the reserve on the pool card or top up credits',
+          )
+          return
+        }
+
         writeOpenAIError(
           res,
           401,
           'not_signed_in',
-          'no WorkBuddy credential found; sign in on the desktop app (or set WORKBUDDY_AUTH_FILE)',
+          why.total === 0
+            ? 'no WorkBuddy credential found for this gateway; sign in on the desktop app (or set WORKBUDDY_AUTH_FILE)'
+            : `no usable WorkBuddy credential among ${why.total} account(s) for this gateway; sign in again on the desktop app`,
         )
         return
       }
@@ -338,10 +409,22 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         continue
       }
 
+      // A `client` failure (HTTP 400) names no parameter when the upstream
+      // leaves `extError.param` empty, which is the usual case — the user then
+      // gets "the request parameters do not meet the current model requirements"
+      // and nothing else. Log the SHAPE of what we sent (keys and counts only,
+      // never message content) so the next occurrence is diagnosable from the
+      // log instead of requiring a reproduction.
+      if (result.kind === 'client') {
+        logger?.warn(
+          `dsh-workbuddy-xdpool: ${account.label} rejected the request as invalid `
+          + `(model ${modelId ?? '(none)'}) — ${requestShape(raw)}; upstream: ${result.message.slice(0, 300)}`,
+        )
+      }
+
       // Other failures are terminal for this request.
       if (result.kind !== 'soft_rate') break
 
-      exhaustedByRateLimit = true
       // Cool only this model on this account; the account's other models stay
       // usable (the upstream explicitly allows switching to another model).
       pool.penalize(account.id, parseRateLimitReset(result.message), modelId)
@@ -520,22 +603,33 @@ async function recoverFromContextOverrun(options: RecoverOptions): Promise<Recov
   )
   if (messages.length === 0) return { ok: false, detail: 'request carried no usable messages' }
 
-  // The upstream reports the overrun but not the window size, so derive a
-  // budget from the failing prompt: aim for roughly half of it, which leaves
-  // headroom for the model's own answer.
+  // The upstream reports the overrun but not the window size, so the budget has
+  // to be derived from evidence rather than from the catalog alone.
   const overrunTokens = estimateMessagesTokens(messages)
   // Use the model's REAL context window when known (from the catalog); only
-  // fall back to half the prompt when it is unknown. A wrong (too-large) window
-  // was the bug: hy3 mis-declared at 200K made us compact to ~100K, still far
-  // above the real limit, so the retry overran again.
+  // fall back to half the prompt when it is unknown.
+  //
+  // …but NEVER trust it as an upper bound, which is the bug this fixes: the
+  // catalog advertises `deepseek-v4.1-flash` at 1M, so the budget computed to
+  // 0.8 * 1M - 2048 = 797952 while the rejected prompt was already 791793
+  // tokens. Compacting "to" a target LARGER than the prompt changed nothing, the
+  // retry overran again, and the log line looked like the recovery had run.
+  //
+  // The prompt in hand just overran, so it is a hard, EVIDENCE-BASED ceiling:
+  // whatever the catalog claims, the budget must sit meaningfully below it.
   const realWindow = options.contextWindow
-  const budget = realWindow !== undefined && realWindow > 0
+  const fromWindow = realWindow !== undefined && realWindow > 0
     ? Math.max(512, Math.floor(realWindow * 0.8) - 2048)
-    : Math.max(512, Math.floor(overrunTokens / 2))
+    : Number.POSITIVE_INFINITY
+  // Half the failing prompt: its size is known to be too big, so halving it both
+  // guarantees real shrinkage and leaves headroom for the answer.
+  const fromOverrun = Math.max(512, Math.floor(overrunTokens / 2))
+  const budget = Math.min(fromWindow, fromOverrun)
 
   logger?.warn(
     `dsh-workbuddy-xdpool: context overrun on ${modelId ?? '(no model)'} `
-      + `(~${overrunTokens} tokens); compacting to ~${budget} and retrying once`,
+      + `(~${overrunTokens} tokens, catalog window ${realWindow ?? 'unknown'}); `
+      + `compacting to ~${budget} and retrying once`,
   )
 
   let summary: string | undefined

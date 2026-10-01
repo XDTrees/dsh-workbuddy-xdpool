@@ -989,6 +989,25 @@ export declare class WorkBuddyAccountPool {
    * model, e.g. CLI diagnostics).
    */
   private available;
+  /**
+   * Why no account is available right now, for an accurate error.
+   *
+   * The pool can be empty for reasons that need OPPOSITE remedies: nobody is
+   * signed in (the user must sign in), every account is rate-limited (the user
+   * must wait, and retrying later works), or every account was switched off /
+   * ignored (the user must re-enable one). Reporting all of them as "no
+   * credential, sign in" sent users to re-authenticate over a temporary 429 —
+   * observed as an "API key invalid" panel for a model that was merely cooling.
+   *
+   * Counts are over the region's accounts, since a provider only ever sees its
+   * own gateway.
+   */
+  unavailableReason(modelId?: string, region?: WorkBuddyRegion): {
+    total: number;
+    cooling: number;
+    disabled: number;
+    reason: 'empty' | 'cooling' | 'disabled' | 'reserve' | 'none';
+  };
   /** Round-robin: the legacy cursor walk, kept for the distribution that asks for it. */
   private pickRoundRobin;
   /**
