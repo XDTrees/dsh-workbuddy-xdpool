@@ -515,7 +515,15 @@ export function candidateAuthDirs(env: NodeJS.ProcessEnv = process.env): string[
 }
 
 /** How the pool chooses which account serves the next request. */
-export type AccountDistribution = 'priority' | 'round-robin' | 'balanced'
+export type AccountDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky'
+
+/**
+ * How many conversation→account bindings `sticky` mode remembers.
+ *
+ * Only a memory bound: evicting the oldest binding costs one re-pick on that
+ * conversation's next turn, it never loses an account or a request.
+ */
+const STICKY_AFFINITY_LIMIT = 200
 
 export interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
@@ -539,6 +547,9 @@ export interface AccountPoolOptions {
    *   queue the moment its window resets.
    * - `round-robin`: consecutive requests rotate through the pool so the
    *   spend spreads evenly.
+   * - `sticky`: one account per conversation, and a new conversation moves to
+   *   the next account in order. Keeps the upstream prompt cache warm inside a
+   *   conversation while still spreading spend across conversations.
    */
   distribution?: AccountDistribution
 }
@@ -597,6 +608,15 @@ export class WorkBuddyAccountPool {
   private distribution: AccountDistribution
   /** Cursor for round-robin mode; unused under priority distribution. */
   private cursor = 0
+  /**
+   * `sticky` mode: conversation key → account id.
+   *
+   * A conversation that keeps the same account also keeps that account's
+   * upstream prompt cache warm — the cache is per tenant, so rotating accounts
+   * mid-conversation pays full prompt cost on every turn. Insertion order is
+   * the LRU order: re-binding deletes then re-inserts.
+   */
+  private readonly affinity = new Map<string, string>()
   private lastScanAtMs = 0
   private preferredId: string | undefined
   /**
@@ -897,6 +917,52 @@ export class WorkBuddyAccountPool {
     return account
   }
 
+  /** Remember which account a conversation is bound to, keeping LRU order. */
+  private bindAffinity(conversationKey: string, accountId: string): void {
+    this.affinity.delete(conversationKey)
+    this.affinity.set(conversationKey, accountId)
+    while (this.affinity.size > STICKY_AFFINITY_LIMIT) {
+      const oldest = this.affinity.keys().next().value
+      if (oldest === undefined) break
+      this.affinity.delete(oldest)
+    }
+  }
+
+  /**
+   * `sticky`: the account this conversation already used, when it can still
+   * serve the model being asked for.
+   *
+   * Returns `undefined` both when there is no binding and when the binding is
+   * no longer eligible (cooling for this model, disabled, out of credits) — the
+   * caller then rebinds, which is what makes a rate-limited conversation hop to
+   * a fresh account instead of failing.
+   */
+  private affinityAccount(pool: readonly WorkBuddyAccount[], conversationKey: string | undefined): WorkBuddyAccount | undefined {
+    if (conversationKey === undefined || conversationKey === '') return undefined
+    const boundId = this.affinity.get(conversationKey)
+    if (boundId === undefined) return undefined
+    const bound = pool.find(account => account.id === boundId)
+    if (bound === undefined) {
+      // The binding is stale: the account is gone, disabled, or cooling for
+      // this model. Drop it so the next turn does not re-check it.
+      this.affinity.delete(conversationKey)
+      return undefined
+    }
+    // Re-insert to mark this binding as most recently used.
+    this.bindAffinity(conversationKey, boundId)
+    return bound
+  }
+
+  /** Bindings currently remembered; exposed for tests and diagnostics. */
+  affinitySize(): number {
+    return this.affinity.size
+  }
+
+  /** Forget every conversation binding (tests, and a settings change). */
+  clearAffinity(): void {
+    this.affinity.clear()
+  }
+
   /**
    * Priority mode: weighted random over the eligible accounts.
    *
@@ -936,15 +1002,20 @@ export class WorkBuddyAccountPool {
    *   it resumes straight away.
    * - **round-robin**: consecutive requests rotate through the pool so spend
    *   spreads evenly across every account.
+   * - **sticky**: one account per conversation, and a new conversation moves to
+   *   the next account in order. Keeps the upstream prompt cache warm within a
+   *   conversation while still spreading spend across conversations.
    *
-   * In both modes an explicit user selection (`prefer`) heads the list, a
+   * In every mode an explicit user selection (`prefer`) heads the list, a
    * cooling account is skipped for that model only, and an unrecognised setting
    * falls back to priority.
    *
    * Scans on first use, and rescans when every known account is cooling down: a
    * fresh desktop login is the usual way out of an exhausted pool.
+   *
+   * `conversationKey` is only consulted under `sticky`; other modes ignore it.
    */
-  async acquire(modelId?: string, region?: WorkBuddyRegion): Promise<WorkBuddyAccount | undefined> {
+  async acquire(modelId?: string, region?: WorkBuddyRegion, conversationKey?: string): Promise<WorkBuddyAccount | undefined> {
     if (this.accounts.length === 0) await this.scan()
     let pool = this.available(Date.now(), modelId, region)
     if (pool.length === 0) {
@@ -964,11 +1035,21 @@ export class WorkBuddyAccountPool {
       }
     }
 
+    if (this.distribution === 'sticky') {
+      const bound = this.affinityAccount(pool, conversationKey)
+      if (bound !== undefined) {
+        await this.ensureFresh(bound)
+        return bound
+      }
+    }
+
     // `priority` keeps the original behaviour: the head of the ordered list
     // answers until it is limited, which is what a pool of your own accounts is
-    // for. `round-robin` walks the cursor. `balanced` draws by weight so a quiet
-    // pool spreads across accounts instead of draining the first one.
-    const account = this.distribution === 'round-robin'
+    // for. `round-robin` walks the cursor, and so does a NEW `sticky`
+    // conversation, which is what makes consecutive new chats land on
+    // consecutive accounts. `balanced` draws by weight so a quiet pool spreads
+    // across accounts instead of draining the first one.
+    const account = this.distribution === 'round-robin' || this.distribution === 'sticky'
       ? this.pickRoundRobin(pool)
       : this.distribution === 'balanced'
         ? this.pickByWeight(pool)
@@ -977,6 +1058,9 @@ export class WorkBuddyAccountPool {
     // here: picking only says which account is being tried, and the shim may
     // still rotate before the request succeeds.
     if (account === undefined) return undefined
+    if (this.distribution === 'sticky' && conversationKey !== undefined && conversationKey !== '') {
+      this.bindAffinity(conversationKey, account.id)
+    }
     await this.ensureFresh(account)
     return account
   }

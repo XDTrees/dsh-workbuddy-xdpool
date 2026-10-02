@@ -42,6 +42,7 @@
 - **零配置**：装上、打开，就完事了。WorkBuddy 桌面 App 里每个登过的账号都会被自动发现并入池，不需要在插件里录任何东西。
 
 - **自动容错换号**：池子记着每个账号的限流状态。某个号触发 429 就冷却它，后面的请求自动落到下一个健康的号上；冷却结束自动恢复。所有号都在冷却时，请求才排队等待。
+- **四种账号分配方式**：`priority` 先用完一个号；`round-robin` 按顺序轮换；`balanced` 随机抽、偏向闲置久的；`sticky` 让**一个对话只用一个账号，新对话才换下一个**——上游缓存按账号隔离，中途换号等于把整段对话的缓存作废，`sticky` 就是为这件事准备的。卡片上点一下即可切换，默认仍是 `priority`。
 
 - **池健康一眼看清**：卡片显示「几个账号 / 几个在冷却」「下一个会轮到谁」，以及每个账号的令牌有效期和冷却倒计时。
 
@@ -176,12 +177,16 @@ dsh plugin --profile desktop exec dsh-workbuddy-xdpool remove myKey
 | --- | --- | --- |
 | `authFile` | 覆盖 WorkBuddy 桌面 auth 文件路径（跨平台自动探测出问题时用，等同于 `WORKBUDDY_AUTH_FILE`） | 自动探测 |
 | `cooldownMs` | 单账号 429 冷却时长（毫秒） | `60000` |
+| `distribution` | 账号分配方式：`sticky`（每对话固定一个账号，新对话换下一个）/ `priority`（先用完一个）/ `round-robin`（按顺序轮换）/ `balanced`（随机，偏向闲置久的） | `priority` |
+
+> 上游 prompt 缓存按账号隔离，所以对话中途换号会把缓存整段作废。想让多账号同时分摊额度又不想掉命中率，用 `sticky`。
 
 也可以直接写进 `~/.dsh/settings.yaml`：
 
 ```yaml
 workbuddy-xdpool:
   cooldownMs: 120000
+  distribution: sticky
 ```
 
 ## 架构

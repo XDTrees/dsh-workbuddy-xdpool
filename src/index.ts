@@ -157,10 +157,15 @@ export interface Config {
    * - `balanced` draws at random, weighting whichever account has been idle
    *   longest. Spend still spreads, but without a fixed order, so one unhealthy
    *   account cannot pin the pool to itself.
+   * - `sticky` gives each conversation one account and moves the next new
+   *   conversation to the next account in order. Rotating accounts inside a
+   *   conversation throws away the upstream prompt cache (it is per tenant), so
+   *   this keeps the cache warm while still spreading spend across
+   *   conversations.
    *
    * Absent reads as `priority`.
    */
-  distribution?: 'priority' | 'round-robin' | 'balanced'
+  distribution?: 'priority' | 'round-robin' | 'balanced' | 'sticky'
   /**
    * Account ids switched off on the card. A disabled account is never picked
    * to serve a request, but it stays in the pool and on the card so it can be
@@ -390,7 +395,7 @@ export const modelSelectionKeyFor = (region: 'cn' | 'global'): string =>
 export const Config: z<Config> = z.object({
   authFile: asVolatile(z.string().description('WorkBuddy desktop auth file (defaults to the app own location)')),
   cooldownMs: asVolatile(z.number().step(1).min(1000).default(60000).description('Rate-limit cooldown per account, in milliseconds')),
-  distribution: asVolatile(z.union(['priority', 'round-robin', 'balanced']).default('priority').description('How requests are spread: priority (drain one), round-robin (in order), or balanced (idle-weighted random)')),
+  distribution: asVolatile(z.union(['priority', 'round-robin', 'balanced', 'sticky']).default('priority').description('How requests are spread: priority (drain one), round-robin (in order), balanced (idle-weighted random), or sticky (one account per conversation, new conversations rotate)')),
   disabledAccountIds: asVolatile(z.array(z.string()).default([]).description('Account ids excluded from the pool (empty = every discovered account participates)')),
   creditReserves: asVolatile(z.dict(z.number().step(1).min(0)).default({}).description('Per-account credit floor: stop using an account once its balance reaches this value')),
   enabledModelIds: asVolatile(z.array(z.string()).default([]).description('Legacy shared model-id list; used by a region that has no per-region selection yet')),

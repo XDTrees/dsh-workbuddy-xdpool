@@ -14,7 +14,7 @@
  * @module dsh-workbuddy-xdpool/shim
  */
 
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
@@ -153,6 +153,37 @@ function requestShape(raw: string): string {
       + `tools=${tools} contentChars=${chars}`
   } catch {
     return 'body was not parseable JSON'
+  }
+}
+
+/**
+ * Stable identity of the conversation a request belongs to, for `sticky`.
+ *
+ * The FIRST user message is the key: it is the one part of the body that does
+ * not change as the history grows, so every turn of a conversation hashes the
+ * same way while a new chat (with a different opening message) hashes
+ * differently. Hashing rather than storing the text keeps conversation content
+ * out of the pool's memory.
+ *
+ * Two conversations that open with the exact same message share an account —
+ * rare, and harmless: it only means they share one account's prompt cache.
+ */
+function conversationKeyOf(raw: string): string | undefined {
+  try {
+    const parsed = JSON.parse(raw) as { messages?: unknown }
+    if (!Array.isArray(parsed.messages)) return undefined
+    for (const entry of parsed.messages) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const message = entry as Record<string, unknown>
+      if (message['role'] !== 'user') continue
+      const content = typeof message['content'] === 'string'
+        ? message['content']
+        : JSON.stringify(message['content'] ?? '')
+      return createHash('sha256').update(content).digest('hex').slice(0, 32)
+    }
+    return undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -302,6 +333,10 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     const controller = new AbortController()
     req.on('close', () => controller.abort())
 
+    // `sticky` binds each conversation to one account; the pool ignores this
+    // under every other distribution.
+    const conversationKey = conversationKeyOf(raw)
+
     // The request's target model. The upstream rate limit is per-model ("可切换
     // 其他模型继续使用"), so cooldowns are keyed by (account, model): a 429 on
     // `hy4-preview` only cools that model on the account, never the whole one.
@@ -319,7 +354,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (controller.signal.aborted) return
 
-      const account = await pool.acquire(modelId, region)
+      const account = await pool.acquire(modelId, region, conversationKey)
       if (account === undefined) {
         // Ask the POOL why, instead of inferring it from this request alone.
         //

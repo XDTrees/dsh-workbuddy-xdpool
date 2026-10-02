@@ -945,18 +945,22 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                           {t?.('row.distTitle') ?? 'Account usage'}
                         </span>
                         <div className="dsm-workbuddy-xdpool-dist-options">
-                        {(['priority', 'balanced', 'round-robin'] as const).map(option => {
+                        {(['sticky', 'priority', 'balanced', 'round-robin'] as const).map(option => {
                           const active = (status.distribution ?? 'priority') === option
-                          const label = option === 'priority'
-                            ? (t?.('row.distPriority') ?? 'Priority')
-                            : option === 'balanced'
-                              ? (t?.('row.distBalanced') ?? 'Balanced')
-                              : (t?.('row.distRoundRobin') ?? 'Round-robin')
-                          const hint = option === 'priority'
-                            ? (t?.('row.distPriorityHint') ?? '')
-                            : option === 'balanced'
-                              ? (t?.('row.distBalancedHint') ?? '')
-                              : (t?.('row.distRoundRobinHint') ?? '')
+                          const label = option === 'sticky'
+                            ? (t?.('row.distSticky') ?? 'Per conversation')
+                            : option === 'priority'
+                              ? (t?.('row.distPriority') ?? 'Priority')
+                              : option === 'balanced'
+                                ? (t?.('row.distBalanced') ?? 'Balanced')
+                                : (t?.('row.distRoundRobin') ?? 'Round-robin')
+                          const hint = option === 'sticky'
+                            ? (t?.('row.distStickyHint') ?? '')
+                            : option === 'priority'
+                              ? (t?.('row.distPriorityHint') ?? '')
+                              : option === 'balanced'
+                                ? (t?.('row.distBalancedHint') ?? '')
+                                : (t?.('row.distRoundRobinHint') ?? '')
                           const cls = 'dsm-workbuddy-xdpool-dist-option'
                             + (active ? ' dsm-workbuddy-xdpool-dist-option-active' : '')
                           return (

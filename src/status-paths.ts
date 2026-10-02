@@ -446,7 +446,7 @@ export interface PoolWebAutomationEarnings {
 export type PoolRegion = 'cn' | 'global'
 
 /** How the pool spreads requests across its accounts. */
-export type PoolDistribution = 'priority' | 'round-robin' | 'balanced'
+export type PoolDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky'
 
 /**
  * The schedule every automation job falls back to.

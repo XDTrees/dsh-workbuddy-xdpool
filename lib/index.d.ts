@@ -831,7 +831,7 @@ export declare function workbuddyAccountId(credential: Pick<WorkBuddyCredential,
 /** Every directory the pool should scan, in probe order. */
 export declare function candidateAuthDirs(env?: NodeJS.ProcessEnv): string[];
 /** How the pool chooses which account serves the next request. */
-type AccountDistribution = 'priority' | 'round-robin' | 'balanced';
+type AccountDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky';
 interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
   logger?: {
@@ -858,6 +858,9 @@ interface AccountPoolOptions {
    *   queue the moment its window resets.
    * - `round-robin`: consecutive requests rotate through the pool so the
    *   spend spreads evenly.
+   * - `sticky`: one account per conversation, and a new conversation moves to
+   *   the next account in order. Keeps the upstream prompt cache warm inside a
+   *   conversation while still spreading spend across conversations.
    */
   distribution?: AccountDistribution;
 }
@@ -884,6 +887,15 @@ export declare class WorkBuddyAccountPool {
   private distribution;
   /** Cursor for round-robin mode; unused under priority distribution. */
   private cursor;
+  /**
+   * `sticky` mode: conversation key → account id.
+   *
+   * A conversation that keeps the same account also keeps that account's
+   * upstream prompt cache warm — the cache is per tenant, so rotating accounts
+   * mid-conversation pays full prompt cost on every turn. Insertion order is
+   * the LRU order: re-binding deletes then re-inserts.
+   */
+  private readonly affinity;
   private lastScanAtMs;
   private preferredId;
   /**
@@ -1010,6 +1022,22 @@ export declare class WorkBuddyAccountPool {
   };
   /** Round-robin: the legacy cursor walk, kept for the distribution that asks for it. */
   private pickRoundRobin;
+  /** Remember which account a conversation is bound to, keeping LRU order. */
+  private bindAffinity;
+  /**
+   * `sticky`: the account this conversation already used, when it can still
+   * serve the model being asked for.
+   *
+   * Returns `undefined` both when there is no binding and when the binding is
+   * no longer eligible (cooling for this model, disabled, out of credits) — the
+   * caller then rebinds, which is what makes a rate-limited conversation hop to
+   * a fresh account instead of failing.
+   */
+  private affinityAccount;
+  /** Bindings currently remembered; exposed for tests and diagnostics. */
+  affinitySize(): number;
+  /** Forget every conversation binding (tests, and a settings change). */
+  clearAffinity(): void;
   /**
    * Priority mode: weighted random over the eligible accounts.
    *
@@ -1036,15 +1064,20 @@ export declare class WorkBuddyAccountPool {
    *   it resumes straight away.
    * - **round-robin**: consecutive requests rotate through the pool so spend
    *   spreads evenly across every account.
+   * - **sticky**: one account per conversation, and a new conversation moves to
+   *   the next account in order. Keeps the upstream prompt cache warm within a
+   *   conversation while still spreading spend across conversations.
    *
-   * In both modes an explicit user selection (`prefer`) heads the list, a
+   * In every mode an explicit user selection (`prefer`) heads the list, a
    * cooling account is skipped for that model only, and an unrecognised setting
    * falls back to priority.
    *
    * Scans on first use, and rescans when every known account is cooling down: a
    * fresh desktop login is the usual way out of an exhausted pool.
+   *
+   * `conversationKey` is only consulted under `sticky`; other modes ignore it.
    */
-  acquire(modelId?: string, region?: WorkBuddyRegion): Promise<WorkBuddyAccount | undefined>;
+  acquire(modelId?: string, region?: WorkBuddyRegion, conversationKey?: string): Promise<WorkBuddyAccount | undefined>;
   /** Pin the account the plugin card should prefer; tokens stay out of settings. */
   /** How the pool currently spreads requests. Shown on the card. */
   currentDistribution(): AccountDistribution;
@@ -1513,7 +1546,7 @@ interface PoolWebAutomationEarnings {
  */
 type PoolRegion = 'cn' | 'global';
 /** How the pool spreads requests across its accounts. */
-type PoolDistribution = 'priority' | 'round-robin' | 'balanced';
+type PoolDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky';
 /**
  * The schedule every automation job falls back to.
  *
@@ -2480,10 +2513,15 @@ export interface Config {
    * - `balanced` draws at random, weighting whichever account has been idle
    *   longest. Spend still spreads, but without a fixed order, so one unhealthy
    *   account cannot pin the pool to itself.
+   * - `sticky` gives each conversation one account and moves the next new
+   *   conversation to the next account in order. Rotating accounts inside a
+   *   conversation throws away the upstream prompt cache (it is per tenant), so
+   *   this keeps the cache warm while still spreading spend across
+   *   conversations.
    *
    * Absent reads as `priority`.
    */
-  distribution?: 'priority' | 'round-robin' | 'balanced';
+  distribution?: 'priority' | 'round-robin' | 'balanced' | 'sticky';
   /**
    * Account ids switched off on the card. A disabled account is never picked
    * to serve a request, but it stays in the pool and on the card so it can be
