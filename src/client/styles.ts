@@ -70,17 +70,38 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-usage-status{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-usage-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .dsm-workbuddy-xdpool-usage-hint{margin:0;color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:12px;line-height:18px}
-/* Distribution switch: priority (drain one) vs round-robin (spread). */
-.dsm-workbuddy-xdpool-dist{display:flex;flex-direction:column;gap:7px}
+/*
+ * Distribution picker: four modes, so the old three-column grid left the
+ * fourth card wrapped onto a line of its own. Two columns give every card room
+ * for a full hint sentence and keep the reading order 2x2.
+ *
+ * The selection cue is this card's own: an inset accent bar plus a solid
+ * surface, the same "current one is a raised chip" language the account list
+ * uses for the serving account. It is deliberately NOT the brand blue (that is
+ * the host's, not ours) and not the health green (that already means "this
+ * account works" two cards down).
+ */
+.dsm-workbuddy-xdpool-dist{display:flex;flex-direction:column;gap:9px}
+.dsm-workbuddy-xdpool-dist-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .dsm-workbuddy-xdpool-dist-title{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px;letter-spacing:.03em;text-transform:uppercase;font-weight:600}
-.dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;text-align:left;display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:44px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:8px;padding:6px 10px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s}
-.dsm-workbuddy-xdpool-dist-option:hover:not(:disabled):not(.dsm-workbuddy-xdpool-dist-option-active){color:var(--dsw-alias-label-primary,#e6e6e6);border-color:var(--dsw-alias-label-dimmed,#777)}
+/* "now: X" — repeats the answer in the header so the user does not have to
+   scan four cards for the raised one. */
+.dsm-workbuddy-xdpool-dist-now{flex:none;padding:2px 10px;border-radius:999px;border:1px solid color-mix(in oklab, var(--dsw-alias-label-primary,#e6e6e6) 26%, transparent);background:color-mix(in oklab, var(--dsw-alias-label-primary,#e6e6e6) 10%, transparent);color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
+.dsm-workbuddy-xdpool-dist-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;text-align:left;display:flex;flex-direction:column;justify-content:center;gap:4px;min-height:62px;border:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 80%, transparent);border-radius:12px;padding:9px 13px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s,box-shadow .16s}
+.dsm-workbuddy-xdpool-dist-option:hover:not(:disabled):not(.dsm-workbuddy-xdpool-dist-option-active){color:var(--dsw-alias-label-secondary,#c6c9d0);border-color:var(--dsw-alias-label-dimmed,#777);background:rgba(255,255,255,.03)}
 .dsm-workbuddy-xdpool-dist-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
-.dsm-workbuddy-xdpool-dist-option-active{background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.14));border-color:var(--dsw-alias-state-success-primary,#22a06b);color:var(--dsw-alias-state-success-primary,#22a06b)}
+/* Selected: raised onto layer-3 (the same surface the region tabs use when
+   active) with an inset accent bar. The bar is what survives a glance — a
+   tinted wash alone is indistinguishable from hover. */
+.dsm-workbuddy-xdpool-dist-option-active{background:var(--dsw-alias-bg-layer-3,#2a2c33);border-color:color-mix(in oklab, var(--dsw-alias-label-primary,#e6e6e6) 34%, transparent);box-shadow:inset 3px 0 0 var(--dsw-alias-label-primary,#e6e6e6);color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-workbuddy-xdpool-dist-option-active .dsm-workbuddy-xdpool-dist-option-name{color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-dist-option:disabled{cursor:default;opacity:.6}
-.dsm-workbuddy-xdpool-dist-option-name{font-size:11px;line-height:16px;font-weight:600}
-.dsm-workbuddy-xdpool-dist-option-hint{font-size:10px;line-height:14px;opacity:.8}
-.dsm-workbuddy-xdpool-dist-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.dsm-workbuddy-xdpool-dist-option-top{display:flex;align-items:center;gap:7px;min-width:0}
+.dsm-workbuddy-xdpool-dist-option-name{font-size:12.5px;line-height:18px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* "recommended" chip: quiet, and only on the mode this release argues for. */
+.dsm-workbuddy-xdpool-dist-option-badge{flex:none;margin-left:auto;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.14));color:var(--dsw-alias-state-success-primary,#22a06b);font-size:10px;font-weight:600;line-height:15px;white-space:nowrap}
+.dsm-workbuddy-xdpool-dist-option-hint{font-size:11px;line-height:16px;opacity:.85}
 .dsm-workbuddy-xdpool-usage-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* Account list (each account = a labeled subpanel, same as dingminhua). */
@@ -239,6 +260,10 @@ export const POOL_CARD_CSS = `
   .dsm-workbuddy-xdpool-checkin{align-items:stretch}
   .dsm-workbuddy-xdpool-checkin-meta{align-items:flex-start}
   .dsm-workbuddy-xdpool-checkin-bonus{text-align:left}
+  /* One mode per row: at this width a two-up grid leaves ~150px per card, and
+     the hint sentence wraps to four lines. */
+  .dsm-workbuddy-xdpool-dist-options{grid-template-columns:minmax(0,1fr)}
+  .dsm-workbuddy-xdpool-dist-option{min-height:0}
 }
 
 /* Automation panel: schedule and last-run summary, collapsed behind a switch. */

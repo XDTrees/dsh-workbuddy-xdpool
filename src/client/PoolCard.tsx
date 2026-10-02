@@ -188,6 +188,32 @@ function formatCapacity(value: number | undefined): string {
   return String(value)
 }
 
+/**
+ * The four ways the pool can hand out accounts.
+ *
+ * Order is the reading order of the picker: the recommended mode first, then
+ * the two cache-friendly extremes, then the two spreading modes.
+ */
+const DIST_OPTIONS = ['sticky', 'priority', 'balanced', 'round-robin'] as const
+
+type DistTranslator = PoolCardInjected['t'] | undefined
+
+/** Localized name of one distribution mode. */
+function distLabel(option: PoolDistribution, t: DistTranslator): string {
+  if (option === 'sticky') return t?.('row.distSticky') ?? 'Per conversation'
+  if (option === 'priority') return t?.('row.distPriority') ?? 'Priority'
+  if (option === 'balanced') return t?.('row.distBalanced') ?? 'Balanced'
+  return t?.('row.distRoundRobin') ?? 'Round-robin'
+}
+
+/** One-line explanation of what a mode does to caching and spend. */
+function distHint(option: PoolDistribution, t: DistTranslator): string {
+  if (option === 'sticky') return t?.('row.distStickyHint') ?? ''
+  if (option === 'priority') return t?.('row.distPriorityHint') ?? ''
+  if (option === 'balanced') return t?.('row.distBalancedHint') ?? ''
+  return t?.('row.distRoundRobinHint') ?? ''
+}
+
 /** Pick the right promotion chip for a model. */
 /** One model's draft state while the card holds unsaved edits. */
 interface ModelDraftEntry {
@@ -941,26 +967,22 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                   {status === undefined ? null
                     : <div className="dsm-workbuddy-xdpool-dist" role="radiogroup"
                         aria-label={t?.('row.distTitle') ?? 'Account usage'}>
-                        <span className="dsm-workbuddy-xdpool-dist-title">
-                          {t?.('row.distTitle') ?? 'Account usage'}
-                        </span>
+                        <div className="dsm-workbuddy-xdpool-dist-head">
+                          <span className="dsm-workbuddy-xdpool-dist-title">
+                            {t?.('row.distTitle') ?? 'Account usage'}
+                          </span>
+                          {/* The active mode repeated as a badge in the header:
+                              the answer to "which one is on?" without reading
+                              four cards for the highlighted one. */}
+                          <span className="dsm-workbuddy-xdpool-dist-now">
+                            {distLabel(status.distribution ?? 'priority', t)}
+                          </span>
+                        </div>
                         <div className="dsm-workbuddy-xdpool-dist-options">
-                        {(['sticky', 'priority', 'balanced', 'round-robin'] as const).map(option => {
+                        {DIST_OPTIONS.map(option => {
                           const active = (status.distribution ?? 'priority') === option
-                          const label = option === 'sticky'
-                            ? (t?.('row.distSticky') ?? 'Per conversation')
-                            : option === 'priority'
-                              ? (t?.('row.distPriority') ?? 'Priority')
-                              : option === 'balanced'
-                                ? (t?.('row.distBalanced') ?? 'Balanced')
-                                : (t?.('row.distRoundRobin') ?? 'Round-robin')
-                          const hint = option === 'sticky'
-                            ? (t?.('row.distStickyHint') ?? '')
-                            : option === 'priority'
-                              ? (t?.('row.distPriorityHint') ?? '')
-                              : option === 'balanced'
-                                ? (t?.('row.distBalancedHint') ?? '')
-                                : (t?.('row.distRoundRobinHint') ?? '')
+                          const label = distLabel(option, t)
+                          const hint = distHint(option, t)
                           const cls = 'dsm-workbuddy-xdpool-dist-option'
                             + (active ? ' dsm-workbuddy-xdpool-dist-option-active' : '')
                           return (
@@ -974,9 +996,14 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                               className={cls}
                               onClick={() => { void setDistribution(option) }}
                             >
-                              <span className="dsm-workbuddy-xdpool-dist-option-name">{label}</span>
-                              {/* The hint belongs in the button, not a tooltip:
-                                  which mode does what IS the decision. */}
+                              <span className="dsm-workbuddy-xdpool-dist-option-top">
+                                <span className="dsm-workbuddy-xdpool-dist-option-name">{label}</span>
+                                {option === 'sticky'
+                                  ? <span className="dsm-workbuddy-xdpool-dist-option-badge">
+                                      {t?.('row.distRecommended') ?? 'Recommended'}
+                                    </span>
+                                  : null}
+                              </span>
                               <span className="dsm-workbuddy-xdpool-dist-option-hint">{hint}</span>
                             </button>
                           )
