@@ -149,3 +149,72 @@ describe('a rate-limited model reports 429, never 401', () => {
     await shim.close()
   }, 60_000)
 })
+
+describe('a 429 names the paid row that is NOT limited', () => {
+  /**
+   * The gateway prices one product line as several rows sharing a display name
+   * and rate-limits each row separately. Verified live:
+   *   global: deepseek-v4.1-flash x0.00 / deepseek-v4.1-flash-sg x0.03
+   *   CN:     hy3 x0.00 / hy3-x x0.05
+   * So "wait it out" is not the only option, and the 429 should say so.
+   */
+  async function coolingShim(roster: { id: string; name: string; multiplier: number }[]) {
+    const pool = poolWith(1)
+    await pool.scan()
+    pool.penalize(pool.list('cn')[0]!.id, Date.now() + 600_000, 'deepseek-v4.1-flash')
+    const catalog = new WorkBuddyCatalog()
+    catalog.update(roster.map(row => ({
+      id: row.id, name: row.name, multiplier: row.multiplier,
+      contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true,
+    })))
+    const client = new WorkBuddyUpstreamClient({
+      fetchImpl: (async () => { throw new Error('no account is available') }) as unknown as typeof fetch,
+    })
+    const shim = createWorkBuddyShim({ pool, client, catalog, region: 'cn' })
+    await shim.ready
+    const res = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${shim.token()}` },
+      body: JSON.stringify({
+        model: 'deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      }),
+    })
+    const body = await res.json() as { error?: { message?: string } }
+    await shim.close()
+    return { status: res.status, message: body.error?.message ?? '' }
+  }
+
+  it('points at the priced twin when one exists', async () => {
+    const { status, message } = await coolingShim([
+      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', multiplier: 0 },
+      { id: 'deepseek-v4.1-flash-sg', name: 'Deepseek-V4.1-Flash', multiplier: 0.03 },
+    ])
+    expect(status).toBe(429)
+    expect(message).toContain('deepseek-v4.1-flash-sg')
+    expect(message).toContain('0.03')
+    // Still a rate limit, still temporary: the hint must not turn it into a
+    // re-authentication problem.
+    expect(message).not.toContain('sign in')
+  }, 60_000)
+
+  it('says nothing extra when the family has no priced row', async () => {
+    const { status, message } = await coolingShim([
+      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', multiplier: 0 },
+    ])
+    expect(status).toBe(429)
+    // No invented alternative, and no dangling separator from the missing hint.
+    expect(message).toContain('rate-limited for model deepseek-v4.1-flash')
+    expect(message).not.toContain('paid row')
+  }, 60_000)
+
+  it('does not offer a twin for a model the catalog does not list', async () => {
+    // A cooling id absent from the roster must not produce a guess.
+    const { status, message } = await coolingShim([
+      { id: 'unrelated', name: 'Unrelated', multiplier: 0.5 },
+    ])
+    expect(status).toBe(429)
+    expect(message).not.toContain('paid row')
+  }, 60_000)
+})

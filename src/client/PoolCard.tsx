@@ -40,6 +40,8 @@ import { DEFAULT_AUTOMATION_HOURS } from '../status-paths.ts'
 import { POOL_PLUGIN_ICON } from './icon.ts'
 import { POOL_CARD_CSS } from './styles.ts'
 import { isFreeNow, promoStatusFor } from '../promo.ts'
+import { paidAlternativeFor } from '../siblings.ts'
+import type { PaidSibling } from '../siblings.ts'
 import type { WorkBuddyPoolSettingsKey } from './locales.ts'
 
 /** Localized copy injected by the browser-plugin registration. */
@@ -1251,6 +1253,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                       <AccountBlock
                         key={account.id}
                         account={account}
+                        models={status?.models ?? []}
                         {...checkinBusyId === undefined ? {} : { checkinBusyId }}
                         onClaimCheckin={(accountId) => { void claimCheckin(accountId) }}
                         onSaveCreditReserve={(accountId, reserve) => saveCreditReserve(accountId, reserve)}
@@ -1370,6 +1373,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                           key={model.id}
                           model={model}
                           region={activeRegion}
+                          paidTwin={paidAlternativeFor(model, status?.models ?? [])}
                           t={t}
                           draft={modelDraft[model.id] ?? { enabled: model.enabled, images: model.supportsImages }}
                           editable={modelsEditable}
@@ -1388,6 +1392,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
 /** One account block: label + status tag + meta + optional credit panels. */
 function AccountBlock({
   account,
+  models,
   t,
   checkinBusyId,
   onClaimCheckin,
@@ -1398,6 +1403,12 @@ function AccountBlock({
   reserveBusyId,
 }: {
   account: PoolWebAccount
+  /**
+   * The current catalog, so a per-model cooldown can name the paid row of the
+   * cooling model. Same roster the model list above is drawn from — a hint
+   * built from a different list could name an id this gateway does not serve.
+   */
+  models: readonly PoolWebModel[]
   t?: PoolCardProps['t']
   /** Account id whose claim is in flight, if any. */
   checkinBusyId?: string
@@ -1491,12 +1502,26 @@ function AccountBlock({
             : null}
           {modelCooldowns.length > 0
             ? <div className="dsm-workbuddy-xdpool-account-modelcool">
-                {modelCooldowns.map(mc => (
-                  <span key={mc.modelId} className="dsm-workbuddy-xdpool-account-modelcool-chip">
-                    {t?.('row.modelCooling', { model: mc.modelId, time: formatDateTime(mc.until) })
-                      ?? `${mc.modelId} cooling to ${formatDateTime(mc.until)}`}
-                  </span>
-                ))}
+                {modelCooldowns.map(mc => {
+                  // Each row of a product line is rate-limited on its own, so a
+                  // cooling free row usually has a paid twin that still serves.
+                  // Saying so here turns "wait until 10:14" into a choice.
+                  const coolingModel = models.find(model => model.id === mc.modelId)
+                  const twin = coolingModel === undefined
+                    ? undefined
+                    : paidAlternativeFor(coolingModel, models)
+                  return (
+                    <span key={mc.modelId} className="dsm-workbuddy-xdpool-account-modelcool-chip">
+                      {t?.('row.modelCooling', { model: mc.modelId, time: formatDateTime(mc.until) })
+                        ?? `${mc.modelId} cooling to ${formatDateTime(mc.until)}`}
+                      {twin === undefined ? null
+                        : <span className="dsm-workbuddy-xdpool-account-modelcool-twin" title={t?.('row.paidTwinHint') ?? 'Same model, paid row'}>
+                            {t?.('row.rateLimitedPaidTwin', { id: twin.id, rate: twin.multiplier.toFixed(2) })
+                              ?? `→ ${twin.id} (${twin.multiplier.toFixed(2)}x) still works`}
+                          </span>}
+                    </span>
+                  )
+                })}
               </div>
             : null}
         </div>
@@ -1837,6 +1862,7 @@ function AccountStats({
 function ModelRow({
   model,
   region,
+  paidTwin,
   t,
   draft,
   editable,
@@ -1847,6 +1873,12 @@ function ModelRow({
   model: PoolWebModel
   /** Which gateway this row belongs to; the promo campaigns are regional. */
   region: 'cn' | 'global'
+  /**
+   * The cheapest priced row sharing this model's display name, when this row
+   * itself is free. Undefined for paid rows and for lone models — see
+   * {@link paidAlternativeFor} for why the guard matters.
+   */
+  paidTwin: PaidSibling | undefined
   t?: PoolCardProps['t']
   draft: ModelDraftEntry
   editable: boolean
@@ -1959,6 +1991,11 @@ function ModelRow({
           : <span className="dsm-workbuddy-xdpool-model-meta-later">{laterHint}</span>}
         {promoUntil === null ? null
           : <span className="dsm-workbuddy-xdpool-model-meta-promo">{promoUntil}</span>}
+        {paidTwin === undefined ? null
+          : <span className="dsm-workbuddy-xdpool-model-meta-twin" title={t?.('row.paidTwinHint') ?? 'Same model, paid row'}>
+              {t?.('row.paidTwin', { id: paidTwin.id, rate: paidTwin.multiplier.toFixed(2) })
+                ?? `paid twin ${paidTwin.id} (${paidTwin.multiplier.toFixed(2)}x)`}
+            </span>}
         <span className="dsm-workbuddy-xdpool-model-cap">
           {t?.('row.modelOutput', { size: formatCapacity(model.maxOutputTokens) })
             ?? `out ${formatCapacity(model.maxOutputTokens)}`}

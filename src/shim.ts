@@ -21,6 +21,7 @@ import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { parseRateLimitReset, WorkBuddyUpstreamClient, type ChatStreamResult, type UpstreamErrorKind, type WorkBuddyRegion } from './upstream.ts'
 import { compactWithSummary, estimateMessagesTokens, hardTruncate, type ChatMessage } from './context-budget.ts'
+import { paidAlternativeFor } from './siblings.ts'
 
 export interface ShimLogger {
   info?(...args: unknown[]): void
@@ -230,6 +231,24 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     void handle(req, res)
   })
 
+  /**
+   * "The same model has a paid row" sentence for a 429 body, or undefined.
+   *
+   * Reads the catalog the shim was built with, so the hint names a row this
+   * gateway ACTUALLY serves — a CN-only id in a global 429 would be worse than
+   * no hint at all. Absent when the cooling model is itself paid, or when the
+   * family has no priced twin.
+   */
+  function paidTwinHint(modelId: string): string | undefined {
+    const models = catalog.current()
+    const model = models.find(candidate => candidate.id === modelId)
+    if (model === undefined) return undefined
+    const twin = paidAlternativeFor(model, models)
+    if (twin === undefined) return undefined
+    return `${twin.id} is the same model on a paid row (x${twin.multiplier.toFixed(2)} credits) `
+      + 'and is rate-limited separately; switch to it to keep going'
+  }
+
   const ready = new Promise<void>((resolve, reject) => {
     server.once('listening', () => resolve())
     server.once('error', reject)
@@ -372,12 +391,18 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
             ? 'every WorkBuddy account is rate-limited'
             : `every account is rate-limited for model ${modelId}`
           const upstream = last === undefined ? '' : ` — ${last.message.slice(0, 200)}`
+          // The gateway limits each ROW of a product line separately, so a
+          // cooling free row usually has a working paid twin. Without this the
+          // user's only move is to wait; naming the twin gives them a way out
+          // that costs a little rather than nothing.
+          const twin = modelId === undefined ? undefined : paidTwinHint(modelId)
           writeOpenAIError(
             res,
             429,
             'soft_rate',
             `${subject} (${why.cooling}/${why.total} cooling, tried ${tried.length})`
-              + `${tried.length === 0 ? '' : `: ${tried.join(' → ')}`}${upstream}`,
+              + `${tried.length === 0 ? '' : `: ${tried.join(' → ')}`}${upstream}`
+              + (twin === undefined ? '' : ` — ${twin}`),
           )
           return
         }

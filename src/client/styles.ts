@@ -161,6 +161,10 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-account-meta-dead{color:var(--dsw-alias-state-error-primary,#ef4444)}
 .dsm-workbuddy-xdpool-account-modelcool{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
 .dsm-workbuddy-xdpool-account-modelcool-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:999px;font-size:11px;line-height:18px;background:var(--dsw-alias-state-warning-subtle,rgba(217,119,6,.12));color:var(--dsw-alias-state-warning-primary,#d97706)}
+/* "→ deepseek-v4.1-flash-sg (0.03x) still works" inside a cooling chip. Keeps
+   the warning tint of its parent but drops the weight: it is the way out, not
+   a second problem. */
+.dsm-workbuddy-xdpool-account-modelcool-twin{color:var(--dsw-alias-label-secondary,#c6c9d0);cursor:help}
 .dsm-workbuddy-xdpool-account-error{margin:0;color:var(--dsw-alias-state-error-primary,#ef4444);font-size:13px;line-height:20px}
 
 /* Two-column stats: packages on the left, total + check-in on the right. */
@@ -212,6 +216,10 @@ export const POOL_CARD_CSS = `
 /* "活动至 10-31": the campaign's end date. Muted — it is context for planning,
    not a claim about the current price. */
 .dsm-workbuddy-xdpool-model-meta-promo{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px;opacity:.85}
+/* "付费同款 deepseek-v4.1-flash-sg (0.03x)": the way out when the free row is
+   rate-limited. Muted like the other meta chips — it is an alternative, not a
+   warning, and the row it sits on is still the free one. */
+.dsm-workbuddy-xdpool-model-meta-twin{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px;opacity:.85;cursor:help}
 /* Unreadable credential files: a warning tint, since it explains a smaller pool
    and "encrypted" is actionable (start the app once). */
 .dsm-workbuddy-xdpool-skipped{margin:6px 0 0;padding:7px 10px;border-radius:8px;background:var(--dsw-alias-state-warning-subtle,rgba(217,119,6,.12));display:flex;flex-direction:column;gap:3px}
