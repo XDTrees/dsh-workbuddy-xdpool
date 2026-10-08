@@ -87,8 +87,17 @@ export const POOL_CARD_CSS = `
 /* "now: X" — repeats the answer in the header so the user does not have to
    scan four cards for the raised one. */
 .dsm-workbuddy-xdpool-dist-now{flex:none;padding:2px 10px;border-radius:999px;border:1px solid color-mix(in oklab, var(--dsw-alias-label-primary,#e6e6e6) 26%, transparent);background:color-mix(in oklab, var(--dsw-alias-label-primary,#e6e6e6) 10%, transparent);color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
-.dsm-workbuddy-xdpool-dist-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-.dsm-workbuddy-xdpool-dist-option{appearance:none;font:inherit;cursor:pointer;text-align:left;display:flex;flex-direction:column;justify-content:center;gap:4px;min-height:62px;border:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 80%, transparent);border-radius:12px;padding:9px 13px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s,box-shadow .16s}
+/* One row of equal chips, and let the row itself decide when it has to break.
+   flex-wrap plus a 112px basis keeps the five modes side by side for as long as
+   the card can hold them (a chip is ~112px: the longest label plus padding), so
+   a 700px panel still reads as one row of choices instead of a hard 760px cliff
+   dropping it to two columns. A flex line stretches its items to fill the row,
+   so when the chips finally do wrap, the odd last one spans the width on its own
+   — no last-child span rule, and therefore no way to accidentally strand the
+   last chip on a second row while the first row was still wide enough for all
+   five. */
+.dsm-workbuddy-xdpool-dist-options{display:flex;flex-wrap:wrap;gap:8px}
+.dsm-workbuddy-xdpool-dist-option{flex:1 1 112px;min-width:0;appearance:none;font:inherit;cursor:pointer;text-align:left;display:flex;flex-direction:column;justify-content:center;gap:3px;min-height:46px;border:1px solid color-mix(in oklab, var(--dsw-alias-border-l2,#3a3d45) 80%, transparent);border-radius:12px;padding:9px 11px;background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a8);transition:color .16s,border-color .16s,background .16s,box-shadow .16s}
 .dsm-workbuddy-xdpool-dist-option:hover:not(:disabled):not(.dsm-workbuddy-xdpool-dist-option-active){color:var(--dsw-alias-label-secondary,#c6c9d0);border-color:var(--dsw-alias-label-dimmed,#777);background:rgba(255,255,255,.03)}
 .dsm-workbuddy-xdpool-dist-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
 /* Selected: raised onto layer-3 (the same surface the region tabs use when
@@ -97,11 +106,15 @@ export const POOL_CARD_CSS = `
 .dsm-workbuddy-xdpool-dist-option-active{background:var(--dsw-alias-bg-layer-3,#2a2c33);border-color:color-mix(in oklab, var(--dsw-alias-label-primary,#e6e6e6) 34%, transparent);box-shadow:inset 3px 0 0 var(--dsw-alias-label-primary,#e6e6e6);color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-dist-option-active .dsm-workbuddy-xdpool-dist-option-name{color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-xdpool-dist-option:disabled{cursor:default;opacity:.6}
-.dsm-workbuddy-xdpool-dist-option-top{display:flex;align-items:center;gap:7px;min-width:0}
-.dsm-workbuddy-xdpool-dist-option-name{font-size:12.5px;line-height:18px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-workbuddy-xdpool-dist-option-top{display:flex;align-items:center;gap:6px;min-width:0}
+/* The name is the only thing in a chip, so it may wrap rather than ellipsize:
+   a truncated mode name is unreadable, a two-line one is merely taller. */
+.dsm-workbuddy-xdpool-dist-option-name{font-size:12.5px;line-height:17px;font-weight:600;min-width:0;overflow-wrap:anywhere}
 /* "recommended" chip: quiet, and only on the mode this release argues for. */
-.dsm-workbuddy-xdpool-dist-option-badge{flex:none;margin-left:auto;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.14));color:var(--dsw-alias-state-success-primary,#22a06b);font-size:10px;font-weight:600;line-height:15px;white-space:nowrap}
-.dsm-workbuddy-xdpool-dist-option-hint{font-size:11px;line-height:16px;opacity:.85}
+.dsm-workbuddy-xdpool-dist-option-badge{flex:none;margin-left:auto;padding:1px 6px;border-radius:999px;background:var(--dsw-alias-state-success-subtle,rgba(34,160,107,.14));color:var(--dsw-alias-state-success-primary,#22a06b);font-size:10px;font-weight:600;line-height:15px;white-space:nowrap}
+/* One line of prose under the row explains the mode that is selected. Five
+   chips cannot each carry a sentence without becoming five paragraphs. */
+.dsm-workbuddy-xdpool-dist-hint{color:var(--dsw-alias-label-tertiary,#9aa0a8);font-size:11px;line-height:16px}
 .dsm-workbuddy-xdpool-usage-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* Account list (each account = a labeled subpanel, same as dingminhua). */
@@ -275,9 +288,8 @@ export const POOL_CARD_CSS = `
   .dsm-workbuddy-xdpool-checkin{align-items:stretch}
   .dsm-workbuddy-xdpool-checkin-meta{align-items:flex-start}
   .dsm-workbuddy-xdpool-checkin-bonus{text-align:left}
-  /* One mode per row: at this width a two-up grid leaves ~150px per card, and
-     the hint sentence wraps to four lines. */
-  .dsm-workbuddy-xdpool-dist-options{grid-template-columns:minmax(0,1fr)}
+  /* The chips wrap on their own (auto-fit), so the only thing left to do here
+     is stop reserving desktop height for rows that are now one chip tall. */
   .dsm-workbuddy-xdpool-dist-option{min-height:0}
 }
 

@@ -191,12 +191,13 @@ function formatCapacity(value: number | undefined): string {
 }
 
 /**
- * The four ways the pool can hand out accounts.
+ * The five ways the pool can hand out accounts.
  *
  * Order is the reading order of the picker: the recommended mode first, then
- * the two cache-friendly extremes, then the two spreading modes.
+ * the two cache-friendly extremes, then the two spreading modes. The row is
+ * laid out one chip per mode, so this list length is also the column count.
  */
-const DIST_OPTIONS = ['sticky', 'priority', 'balanced', 'round-robin'] as const
+const DIST_OPTIONS = ['sticky', 'priority', 'balanced', 'round-robin', 'expiry'] as const
 
 type DistTranslator = PoolCardInjected['t'] | undefined
 
@@ -205,6 +206,7 @@ function distLabel(option: PoolDistribution, t: DistTranslator): string {
   if (option === 'sticky') return t?.('row.distSticky') ?? 'Per conversation'
   if (option === 'priority') return t?.('row.distPriority') ?? 'Priority'
   if (option === 'balanced') return t?.('row.distBalanced') ?? 'Balanced'
+  if (option === 'expiry') return t?.('row.distExpiry') ?? 'Expiring first'
   return t?.('row.distRoundRobin') ?? 'Round-robin'
 }
 
@@ -213,6 +215,7 @@ function distHint(option: PoolDistribution, t: DistTranslator): string {
   if (option === 'sticky') return t?.('row.distStickyHint') ?? ''
   if (option === 'priority') return t?.('row.distPriorityHint') ?? ''
   if (option === 'balanced') return t?.('row.distBalancedHint') ?? ''
+  if (option === 'expiry') return t?.('row.distExpiryHint') ?? ''
   return t?.('row.distRoundRobinHint') ?? ''
 }
 
@@ -1006,11 +1009,16 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                                     </span>
                                   : null}
                               </span>
-                              <span className="dsm-workbuddy-xdpool-dist-option-hint">{hint}</span>
                             </button>
                           )
                         })}
                         </div>
+                        {/* One sentence for the mode that is actually on. Five
+                            chips carrying five sentences each is five paragraphs;
+                            this keeps the row a row and still explains the choice. */}
+                        <p className="dsm-workbuddy-xdpool-dist-hint">
+                          {distHint(status.distribution ?? 'priority', t)}
+                        </p>
                       </div>}
                 </div>
                 <div className="dsm-workbuddy-xdpool-usage-actions">
@@ -1804,8 +1812,11 @@ function AccountStats({
         {hasCheckin
           ? <div className="dsm-workbuddy-xdpool-checkin">
               {account.checkinError !== undefined
-                ? <span className="dsm-workbuddy-xdpool-checkin-error">
-                    {account.checkinError}
+                /* Folded to a marker with the full text in the tooltip, exactly
+                   like the credits error above. A gateway rejection is a whole
+                   paragraph; printed inline it buries the panel it belongs to. */
+                ? <span className="dsm-workbuddy-xdpool-checkin-error" title={account.checkinError}>
+                    {t?.('row.checkinUnavailable') ?? 'check-in unavailable'}
                   </span>
                 : checkin === undefined
                   ? null

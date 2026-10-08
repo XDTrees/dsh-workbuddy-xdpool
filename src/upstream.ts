@@ -417,11 +417,27 @@ function isGatewayHtmlRejection(status: number, text: string): boolean {
   return head.includes('<html') || head.includes('openresty') || head.includes('apisix')
 }
 
+/**
+ * The sentence thrown for a gateway HTML rejection.
+ *
+ * Exported (as a prefix test) because callers outside this module have to tell
+ * this specific failure apart from an ordinary network error: it is proof the
+ * *credential* is no longer honoured, so the pool may mark the account dead
+ * instead of re-probing it on every refresh.
+ */
+export const GATEWAY_REJECTION_MESSAGE = 'the WorkBuddy gateway rejected this credential (http 401).'
+
+/** Was this failure a gateway HTML rejection (a stale sign-in, not a hiccup)? */
+export function isGatewayRejectionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.startsWith(GATEWAY_REJECTION_MESSAGE)
+}
+
 async function readEnvelope(response: Response): Promise<Envelope> {
   const text = await response.text()
   if (isGatewayHtmlRejection(response.status, text)) {
     throw new Error(
-      'the WorkBuddy gateway rejected this credential (http 401). This usually means the ' +
+      `${GATEWAY_REJECTION_MESSAGE} This usually means the ` +
       'account is using a stale sign-in the upstream no longer accepts: sign in again in ' +
       'the WorkBuddy desktop app, then pick the account on the plugin card. ' +
       'Run `dsh-workbuddy-xdpool doctor` to list every credential found.',

@@ -529,7 +529,7 @@ export function candidateAuthDirs(env: NodeJS.ProcessEnv = process.env): string[
 }
 
 /** How the pool chooses which account serves the next request. */
-export type AccountDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky'
+export type AccountDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky' | 'expiry'
 
 /**
  * How many conversation→account bindings `sticky` mode remembers.
@@ -569,6 +569,10 @@ export interface AccountPoolOptions {
    * - `sticky`: one account per conversation, and a new conversation moves to
    *   the next account in order. Keeps the upstream prompt cache warm inside a
    *   conversation while still spreading spend across conversations.
+   * - `expiry`: the account whose one-off credit packs expire soonest serves
+   *   first, so use-it-or-lose-it credits are spent before they die. Accounts
+   *   with no known expiry sort last, so a pool that has never been probed
+   *   behaves like `priority`.
    */
   distribution?: AccountDistribution
 }
@@ -711,6 +715,19 @@ export class WorkBuddyAccountPool {
    * strand a healthy pool, and the first 402 still cools it as before.
    */
   private creditBalances = new Map<string, number>()
+  /**
+   * Nearest expiry among each account's one-off credit packs, epoch ms.
+   *
+   * Credit packs are use-it-or-lose-it, so "which account should serve next"
+   * has a second honest answer besides "which one is idle": the one whose
+   * credits die soonest. Only one-off packs count — monthly packs refresh on
+   * their own cycle and are therefore never urgent — which is why this is
+   * written from the same `fetchCredits` reading that fills `creditBalances`.
+   *
+   * An absent entry means "never probed, or nothing is about to expire". Both
+   * are the same thing to `expiry` mode: not urgent, so it sorts last.
+   */
+  private creditExpiry = new Map<string, number>()
   /**
    * Last time each account served a request, epoch ms. Drives the idle term
    * of the priority-mode weighting below: an account that just served loses to
@@ -1066,6 +1083,31 @@ export class WorkBuddyAccountPool {
   }
 
   /**
+   * `expiry` mode: the account whose one-off credit packs die soonest.
+   *
+   * Credit packs are use-it-or-lose-it, so spending the dying ones first is
+   * strictly better than spreading the spend: an account that expires with
+   * credits left is money burnt, while an account whose packs have no deadline
+   * loses nothing by waiting. Two accounts expiring at the same instant fall
+   * back to the pool order, and an account with no known expiry sorts last —
+   * "we have not looked" must never outrank a real deadline.
+   *
+   * A pool where nobody has a known expiry therefore behaves exactly like
+   * priority, which is the honest degradation: without a reading there is
+   * nothing to sort by.
+   */
+  private pickByExpiry(pool: readonly WorkBuddyAccount[]): WorkBuddyAccount | undefined {
+    let best: WorkBuddyAccount | undefined
+    let bestAt = Number.POSITIVE_INFINITY
+    for (const account of pool) {
+      const at = this.creditExpiry.get(account.id)
+      if (at === undefined) continue
+      if (at < bestAt) { best = account; bestAt = at }
+    }
+    return best ?? pool[0]
+  }
+
+  /**
    * Pick the account to serve a request.
    *
    * Two distributions, chosen by the `distribution` setting:
@@ -1080,6 +1122,8 @@ export class WorkBuddyAccountPool {
    * - **sticky**: one account per conversation, and a new conversation moves to
    *   the next account in order. Keeps the upstream prompt cache warm within a
    *   conversation while still spreading spend across conversations.
+   * - **expiry**: the account whose one-off credit packs expire soonest serves
+   *   first, so use-it-or-lose-it credits are spent before they vanish.
    *
    * In every mode an explicit user selection (`prefer`) heads the list, a
    * cooling account is skipped for that model only, and an unrecognised setting
@@ -1123,12 +1167,15 @@ export class WorkBuddyAccountPool {
       // for. `round-robin` walks the cursor, and so does a NEW `sticky`
       // conversation, which is what makes consecutive new chats land on
       // consecutive accounts. `balanced` draws by weight so a quiet pool spreads
-      // across accounts instead of draining the first one.
+      // across accounts instead of draining the first one. `expiry` spends the
+      // packs that are about to die before they do.
       const account = this.distribution === 'round-robin' || this.distribution === 'sticky'
         ? this.pickRoundRobin(pool)
         : this.distribution === 'balanced'
           ? this.pickByWeight(pool)
-          : pool[0]
+          : this.distribution === 'expiry'
+            ? this.pickByExpiry(pool)
+            : pool[0]
       // Serving is recorded by noteServed once the upstream answers 200, not
       // here: picking only says which account is being tried, and the shim may
       // still rotate before the request succeeds.
@@ -1183,11 +1230,27 @@ export class WorkBuddyAccountPool {
    * check has something to compare against. A reading for an unknown account is
    * dropped: `scan()` rebuilds the account list and a stale id would otherwise
    * accumulate forever.
+   *
+   * `nearestExpiryMs` is the same reading's nearest one-off pack deadline, or
+   * undefined when nothing is about to expire. It is written through, not
+   * merged: a pack that has been spent or has died disappears from the next
+   * reading, and keeping the stale deadline would pin the pool to an account
+   * whose credits are already gone — the opposite of what `expiry` mode wants.
    */
-  noteCredits(accountId: string, balance: number): void {
+  noteCredits(accountId: string, balance: number, nearestExpiryMs?: number): void {
     if (!Number.isFinite(balance)) return
     if (!this.accounts.some(account => account.id === accountId)) return
     this.creditBalances.set(accountId, balance)
+    if (nearestExpiryMs === undefined || !Number.isFinite(nearestExpiryMs)) {
+      this.creditExpiry.delete(accountId)
+      return
+    }
+    this.creditExpiry.set(accountId, nearestExpiryMs)
+  }
+
+  /** Nearest one-off pack expiry for one account, or undefined when none known. */
+  creditExpiryOf(accountId: string): number | undefined {
+    return this.creditExpiry.get(accountId)
   }
 
   /** Last known balance for one account, or undefined when never read. */

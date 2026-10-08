@@ -22,7 +22,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { WorkBuddyAccount, WorkBuddyAccountPool } from './accounts.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
-import { regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
+import { isGatewayRejectionError, regionOf, type WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
 import {
@@ -411,11 +411,19 @@ export async function poolWebStatus(
     // re-probing them on every card refresh only adds two guaranteed 401s per
     // account (and a wall of red text the user cannot act on beyond signing in).
     if (!row.cooling && row.credentialDead !== true) {
+      // Tracked locally as well as on the row: TypeScript keeps `row.credentialDead`
+      // narrowed to false here, and the check-in probe below must see the mark
+      // this iteration just made.
+      let deadNow = false
       try {
         const credits = await deps.client.fetchCredits(account.credential)
         // Feed the pool too: the reserve check reads the last known balance, and
-        // the card refresh is the most frequent place we learn it.
-        deps.pool.noteCredits(account.id, credits.total)
+        // the card refresh is the most frequent place we learn it. The expiry
+        // travels with it, because `expiry` mode sorts on it.
+        deps.pool.noteCredits(account.id, credits.total, credits.nearestExpiryMs)
+        // A live read is proof the sign-in works, so undo any earlier dead mark
+        // the same way a successful token refresh does.
+        deps.pool.clearCredentialDead(account.id)
         Object.assign(row, { credits: {
           total: credits.total,
           packages: credits.packages,
@@ -423,23 +431,38 @@ export async function poolWebStatus(
           ...credits.nearestExpiryMs === undefined ? {} : { nearestExpiryMs: credits.nearestExpiryMs },
         } })
       } catch (error: unknown) {
+        // The gateway answering HTML 401/403 is not a transient hiccup: it is
+        // the same proof of a stale sign-in that a revoked refresh token is. Mark
+        // the account dead here so the mark survives past the next refresh (which
+        // never sees this error when the token has not expired yet), the row goes
+        // red instead of printing a paragraph, and later refreshes skip the
+        // account entirely instead of earning the same 401 again.
+        if (isGatewayRejectionError(error)) {
+          deps.pool.penalizeCredentialDead(account.id)
+          deadNow = true
+          Object.assign(row, { credentialDead: true })
+        }
         Object.assign(row, { creditsError: safeMessage(error) })
       }
-      try {
-        const checkin = await deps.client.fetchCheckinStatus(account.credential)
-        const web: PoolWebCheckin = {
-          active: checkin.active,
-          todayCheckedIn: checkin.todayCheckedIn,
-          streakDays: checkin.streakDays,
-          dailyCredit: checkin.dailyCredit,
-          todayCredit: checkin.todayCredit,
-          isStreakDay: checkin.isStreakDay,
-          nextStreakDay: checkin.nextStreakDay,
-          streakBonusCredit: checkin.streakBonusCredit,
+      // A dead sign-in cannot check in either, and probing it is another
+      // guaranteed 401 — so the second probe is skipped, not just folded.
+      if (!deadNow) {
+        try {
+          const checkin = await deps.client.fetchCheckinStatus(account.credential)
+          const web: PoolWebCheckin = {
+            active: checkin.active,
+            todayCheckedIn: checkin.todayCheckedIn,
+            streakDays: checkin.streakDays,
+            dailyCredit: checkin.dailyCredit,
+            todayCredit: checkin.todayCredit,
+            isStreakDay: checkin.isStreakDay,
+            nextStreakDay: checkin.nextStreakDay,
+            streakBonusCredit: checkin.streakBonusCredit,
+          }
+          Object.assign(row, { checkin: web })
+        } catch (error: unknown) {
+          Object.assign(row, { checkinError: safeMessage(error) })
         }
-        Object.assign(row, { checkin: web })
-      } catch (error: unknown) {
-        Object.assign(row, { checkinError: safeMessage(error) })
       }
     }
     rows.push(row)

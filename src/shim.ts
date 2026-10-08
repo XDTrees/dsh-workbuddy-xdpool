@@ -286,7 +286,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     lastBalanceAt.set(account.id, now)
     try {
       const credits = await client.fetchCredits(account.credential)
-      pool.noteCredits(account.id, credits.total)
+      // The expiry travels with the balance: `expiry` mode sorts on it, and a
+      // balance read is the only place we ever learn it.
+      pool.noteCredits(account.id, credits.total, credits.nearestExpiryMs)
     } catch {
       // Keep the previous reading; the next request tries again.
     }

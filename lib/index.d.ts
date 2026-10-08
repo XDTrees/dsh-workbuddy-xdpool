@@ -845,7 +845,7 @@ export declare function workbuddyAccountId(credential: Pick<WorkBuddyCredential,
 /** Every directory the pool should scan, in probe order. */
 export declare function candidateAuthDirs(env?: NodeJS.ProcessEnv): string[];
 /** How the pool chooses which account serves the next request. */
-type AccountDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky';
+type AccountDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky' | 'expiry';
 interface AccountPoolOptions {
   /** Logger for discovery and rotation events. */
   logger?: {
@@ -880,6 +880,10 @@ interface AccountPoolOptions {
    * - `sticky`: one account per conversation, and a new conversation moves to
    *   the next account in order. Keeps the upstream prompt cache warm inside a
    *   conversation while still spreading spend across conversations.
+   * - `expiry`: the account whose one-off credit packs expire soonest serves
+   *   first, so use-it-or-lose-it credits are spent before they die. Accounts
+   *   with no known expiry sort last, so a pool that has never been probed
+   *   behaves like `priority`.
    */
   distribution?: AccountDistribution;
 }
@@ -964,6 +968,19 @@ export declare class WorkBuddyAccountPool {
    * strand a healthy pool, and the first 402 still cools it as before.
    */
   private creditBalances;
+  /**
+   * Nearest expiry among each account's one-off credit packs, epoch ms.
+   *
+   * Credit packs are use-it-or-lose-it, so "which account should serve next"
+   * has a second honest answer besides "which one is idle": the one whose
+   * credits die soonest. Only one-off packs count — monthly packs refresh on
+   * their own cycle and are therefore never urgent — which is why this is
+   * written from the same `fetchCredits` reading that fills `creditBalances`.
+   *
+   * An absent entry means "never probed, or nothing is about to expire". Both
+   * are the same thing to `expiry` mode: not urgent, so it sorts last.
+   */
+  private creditExpiry;
   /**
    * Last time each account served a request, epoch ms. Drives the idle term
    * of the priority-mode weighting below: an account that just served loses to
@@ -1079,6 +1096,21 @@ export declare class WorkBuddyAccountPool {
    */
   private pickByWeight;
   /**
+   * `expiry` mode: the account whose one-off credit packs die soonest.
+   *
+   * Credit packs are use-it-or-lose-it, so spending the dying ones first is
+   * strictly better than spreading the spend: an account that expires with
+   * credits left is money burnt, while an account whose packs have no deadline
+   * loses nothing by waiting. Two accounts expiring at the same instant fall
+   * back to the pool order, and an account with no known expiry sorts last —
+   * "we have not looked" must never outrank a real deadline.
+   *
+   * A pool where nobody has a known expiry therefore behaves exactly like
+   * priority, which is the honest degradation: without a reading there is
+   * nothing to sort by.
+   */
+  private pickByExpiry;
+  /**
    * Pick the account to serve a request.
    *
    * Two distributions, chosen by the `distribution` setting:
@@ -1093,6 +1125,8 @@ export declare class WorkBuddyAccountPool {
    * - **sticky**: one account per conversation, and a new conversation moves to
    *   the next account in order. Keeps the upstream prompt cache warm within a
    *   conversation while still spreading spend across conversations.
+   * - **expiry**: the account whose one-off credit packs expire soonest serves
+   *   first, so use-it-or-lose-it credits are spent before they vanish.
    *
    * In every mode an explicit user selection (`prefer`) heads the list, a
    * cooling account is skipped for that model only, and an unrecognised setting
@@ -1128,8 +1162,16 @@ export declare class WorkBuddyAccountPool {
    * check has something to compare against. A reading for an unknown account is
    * dropped: `scan()` rebuilds the account list and a stale id would otherwise
    * accumulate forever.
+   *
+   * `nearestExpiryMs` is the same reading's nearest one-off pack deadline, or
+   * undefined when nothing is about to expire. It is written through, not
+   * merged: a pack that has been spent or has died disappears from the next
+   * reading, and keeping the stale deadline would pin the pool to an account
+   * whose credits are already gone — the opposite of what `expiry` mode wants.
    */
-  noteCredits(accountId: string, balance: number): void;
+  noteCredits(accountId: string, balance: number, nearestExpiryMs?: number): void;
+  /** Nearest one-off pack expiry for one account, or undefined when none known. */
+  creditExpiryOf(accountId: string): number | undefined;
   /** Last known balance for one account, or undefined when never read. */
   creditsOf(accountId: string): number | undefined;
   /** The credit floor the user set for one account; 0 when unset. */
@@ -1607,7 +1649,7 @@ interface PoolWebAutomationEarnings {
  */
 type PoolRegion = 'cn' | 'global';
 /** How the pool spreads requests across its accounts. */
-type PoolDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky';
+type PoolDistribution = 'priority' | 'round-robin' | 'balanced' | 'sticky' | 'expiry';
 /**
  * The schedule every automation job falls back to.
  *
@@ -2579,10 +2621,13 @@ export interface Config {
    *   conversation throws away the upstream prompt cache (it is per tenant), so
    *   this keeps the cache warm while still spreading spend across
    *   conversations.
+   * - `expiry` picks the account whose one-off credit packs expire soonest, so
+   *   use-it-or-lose-it credits are spent before they die. Accounts with no
+   *   known expiry sort last, so an unprobed pool degrades to `priority`.
    *
    * Absent reads as `priority`.
    */
-  distribution?: 'priority' | 'round-robin' | 'balanced' | 'sticky';
+  distribution?: 'priority' | 'round-robin' | 'balanced' | 'sticky' | 'expiry';
   /**
    * Account ids switched off on the card. A disabled account is never picked
    * to serve a request, but it stays in the pool and on the card so it can be
