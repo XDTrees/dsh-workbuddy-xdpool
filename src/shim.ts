@@ -404,6 +404,20 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
           return
         }
 
+        if (why.reason === 'session_dead') {
+          // Distinct from "never signed in": these accounts HAVE credentials, the
+          // upstream just refuses them now. Waiting does not help, and saying
+          // "no credential found" would send the user looking for a missing file.
+          writeOpenAIError(
+            res,
+            401,
+            'session_dead',
+            `${why.dead}/${why.total} WorkBuddy account(s) for this gateway were rejected by the upstream `
+              + '(their sign-in was revoked); sign in again in the WorkBuddy desktop app to restore them',
+          )
+          return
+        }
+
         writeOpenAIError(
           res,
           401,
@@ -425,10 +439,28 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
       last = { kind: result.kind, status: result.status, message: result.message }
 
-      // A dead session is recoverable: refresh the token and retry the request.
+      // A dead session is only recoverable when the refresh token still works.
+      // `refreshAccount` asks the upstream and reports back: `true` means the
+      // token was renewed (retry the request), `false` means the upstream
+      // confirmed the credential is revoked. In that case the account is cooled
+      // so the next attempt rotates instead of landing on it again — without
+      // this, every one of `maxAttempts` hit the same dead account while healthy
+      // accounts were never tried.
       if (result.kind === 'session_dead') {
         logger?.warn(`dsh-workbuddy-xdpool: ${account.label} session dead; refreshing token and retrying`)
-        await pool.refreshAccount(account.id)
+        const before = account.credential.accessToken
+        const recovered = await pool.refreshAccount(account.id, { force: true })
+        // A 401 on a token the upstream still hands out refresh credentials for
+        // is only "maybe stale". Once the refresh comes back with the SAME token
+        // (or fails outright) there is nothing left to try: treat it as dead so
+        // the retry budget goes to the other accounts instead of this one.
+        if (!recovered || account.credential.accessToken === before) {
+          pool.penalizeCredentialDead(account.id)
+          logger?.warn(
+            `dsh-workbuddy-xdpool: ${account.label} sign-in is no longer valid `
+              + `(attempt ${attempt + 1}/${maxAttempts}); rotating`,
+          )
+        }
         continue
       }
 
@@ -726,7 +758,11 @@ async function recoverFromContextOverrun(options: RecoverOptions): Promise<Recov
       return { ok: false, detail: 'prompt still exceeded the window after compaction' }
     }
     if (result.kind === 'session_dead') {
-      await pool.refreshAccount(account.id)
+      // Same rule as the main loop: try a refresh, and if the credential is
+      // proven dead cool it so this retry budget is not spent on it again.
+      const before = account.credential.accessToken
+      const recovered = await pool.refreshAccount(account.id, { force: true })
+      if (!recovered || account.credential.accessToken === before) pool.penalizeCredentialDead(account.id)
       continue
     }
     if (result.kind === 'hard_credit') {

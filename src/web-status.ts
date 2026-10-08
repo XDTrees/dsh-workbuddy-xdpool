@@ -314,6 +314,8 @@ function parseAutomationRun(body: Record<string, unknown>): PoolWebAutomationRun
 function toWebAccount(account: WorkBuddyAccount, disabled: boolean, reserve: number, reserved: boolean): PoolWebAccount {
   const now = Date.now()
   const cooling = account.cooldownUntilMs > now
+  const deadUntil = account.credentialDeadUntilMs ?? 0
+  const credentialDead = deadUntil > now
   const modelCooldowns = Object.entries(account.modelCooldowns)
     .filter(([, until]) => until > now)
     .sort((a, b) => a[1] - b[1])
@@ -328,6 +330,8 @@ function toWebAccount(account: WorkBuddyAccount, disabled: boolean, reserve: num
       : { expiresAt: new Date(account.credential.expiresAtMs).toISOString() },
     cooling,
     ...cooling ? { cooldownUntil: new Date(account.cooldownUntilMs).toISOString() } : {},
+    credentialDead,
+    ...credentialDead ? { credentialDeadUntil: new Date(deadUntil).toISOString() } : {},
     ...modelCooldowns.length === 0 ? {} : { modelCooldowns },
     disabled,
     creditReserve: reserve,
@@ -403,7 +407,10 @@ export async function poolWebStatus(
     // Absent means "earned nothing today", which the card renders as silence.
     const earned = deps.scheduler?.().earningsToday[account.id]
     if (earned !== undefined) Object.assign(row, { automationToday: earned })
-    if (!row.cooling) {
+    // Dead sign-ins are skipped outright: the upstream already said no, so
+    // re-probing them on every card refresh only adds two guaranteed 401s per
+    // account (and a wall of red text the user cannot act on beyond signing in).
+    if (!row.cooling && row.credentialDead !== true) {
       try {
         const credits = await deps.client.fetchCredits(account.credential)
         // Feed the pool too: the reserve check reads the last known balance, and

@@ -99,6 +99,15 @@ export interface PoolWebAccount {
   /** ISO timestamp when the account-wide 429 cooldown lifts; only while cooling. */
   cooldownUntil?: string
   /**
+   * The upstream REJECTED this account's sign-in (401/403) — the credential file
+   * still looks valid because the upstream never rewrites its expiry when it
+   * revokes a token. Distinct from `cooling`: waiting does not fix it, only
+   * signing in again in the desktop app does.
+   */
+  credentialDead?: boolean
+  /** ISO timestamp when the dead mark expires and the account is retried; only while `credentialDead`. */
+  credentialDeadUntil?: string
+  /**
    * Per-model cooldowns currently active. The account is NOT `cooling` while a
    * model is limited — its other models still serve — but each entry tells the
    * card which model is out until when (e.g. `hy4-preview` cooling to 10:14,

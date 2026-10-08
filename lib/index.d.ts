@@ -810,6 +810,20 @@ interface WorkBuddyAccount {
   modelCooldowns: Record<string, number>;
   /** Consecutive rate-limit hits, for diagnostics. */
   rateLimitHits: number;
+  /**
+   * Epoch ms until which this account is skipped because the upstream REJECTED
+   * its sign-in (401/403), not because of a rate limit.
+   *
+   * A revoked session is invisible from the credential file: the upstream does
+   * not rewrite `expiresAtMs` when it kills a refresh token, so a dead account
+   * looks perfectly fresh and, without this field, gets picked again on the very
+   * next attempt. With `maxAttempts` retries that meant one dead account could
+   * absorb an entire request while healthy accounts were never tried.
+   *
+   * Only a fresh sign-in in the desktop app clears it, so the cooldown is long;
+   * `0`/undefined means "not known to be dead".
+   */
+  credentialDeadUntilMs?: number;
 }
 /**
  * Platform-default directories holding the desktop app's auth files.
@@ -845,6 +859,11 @@ interface AccountPoolOptions {
   cooldownMs?: number;
   /** How long an account rests after its credits run out (default 30 minutes). */
   exhaustCooldownMs?: number;
+  /**
+   * How long an account rests after the upstream rejects its sign-in
+   * (default 30 minutes). Only a fresh sign-in in the desktop app clears it.
+   */
+  credentialDeadCooldownMs?: number;
   /** Upstream client used to refresh near-expiry tokens. */
   client?: TokenRefresher;
   /** Refresh this long before actual expiry; default five minutes. */
@@ -874,6 +893,11 @@ export declare class WorkBuddyAccountPool {
    * rate-limit window, so this is much longer than `cooldownMs`.
    */
   private exhaustCooldownMs;
+  /**
+   * How long an account stays out of rotation after the upstream rejected its
+   * sign-in. Cleared by a newer credential file or an explicit sign-in.
+   */
+  private credentialDeadCooldownMs;
   private readonly client;
   private readonly refreshMarginMs;
   private accounts;
@@ -1018,7 +1042,9 @@ export declare class WorkBuddyAccountPool {
     total: number;
     cooling: number;
     disabled: number;
-    reason: 'empty' | 'cooling' | 'disabled' | 'reserve' | 'none';
+    /** Accounts skipped because the upstream rejected their sign-in. */
+    dead: number;
+    reason: 'empty' | 'cooling' | 'disabled' | 'reserve' | 'session_dead' | 'none';
   };
   /** Round-robin: the legacy cursor walk, kept for the distribution that asks for it. */
   private pickRoundRobin;
@@ -1135,12 +1161,37 @@ export declare class WorkBuddyAccountPool {
    */
   lastServedId(): string | undefined;
   /** Best-effort refresh of one account after a session-dead upstream answer. */
-  refreshAccount(accountId: string): Promise<void>;
+  refreshAccount(accountId: string, options?: {
+    force?: boolean;
+  }): Promise<boolean>;
+  /**
+   * Cool a whole account because the upstream REJECTED its sign-in (401/403).
+   *
+   * Called with direct evidence (the request just came back `session_dead`), so
+   * it does not need to guess: without this, the next retry of the SAME request
+   * picks the same account again — its credential file still claims to be valid
+   * — and a request with 8 attempts spends all 8 on one dead account while
+   * healthy accounts are never tried.
+   */
+  penalizeCredentialDead(accountId: string): void;
+  /** Put an account back in rotation after its sign-in was proven good again. */
+  clearCredentialDead(accountId: string): void;
+  /** Accounts currently kept out of rotation because their sign-in was rejected. */
+  deadCredentials(): readonly WorkBuddyAccount[];
   /**
    * Refresh the account's access token when it is within the margin (or already
    * expired), in-flight de-duped per account. A failed refresh keeps the
    * existing token when it has not yet expired, so an unreachable refresh
    * endpoint never takes down a working session.
+   *
+   * `force` skips the "is it expiring?" gate. That gate is a cost optimisation,
+   * not a correctness rule: it exists so a healthy token is not re-fetched on
+   * every acquire. After the upstream has ALREADY rejected the token, the gate
+   * is actively wrong — a revoked token keeps its future `expiresAtMs` — and the
+   * caller needs the refresh attempted so the credential can be proven dead.
+   *
+   * Returns true when the token is known good afterwards (refreshed, or still
+   * valid), false when the credential was proven dead.
    */
   private ensureFresh;
   /**
@@ -1168,6 +1219,7 @@ export declare class WorkBuddyAccountPool {
   status(): {
     count: number;
     cooling: number;
+    dead: number;
     lastScanAtMs: number;
   };
 }
@@ -1218,6 +1270,15 @@ interface PoolWebAccount {
   cooling: boolean;
   /** ISO timestamp when the account-wide 429 cooldown lifts; only while cooling. */
   cooldownUntil?: string;
+  /**
+   * The upstream REJECTED this account's sign-in (401/403) — the credential file
+   * still looks valid because the upstream never rewrites its expiry when it
+   * revokes a token. Distinct from `cooling`: waiting does not fix it, only
+   * signing in again in the desktop app does.
+   */
+  credentialDead?: boolean;
+  /** ISO timestamp when the dead mark expires and the account is retried; only while `credentialDead`. */
+  credentialDeadUntil?: string;
   /**
    * Per-model cooldowns currently active. The account is NOT `cooling` while a
    * model is limited — its other models still serve — but each entry tells the

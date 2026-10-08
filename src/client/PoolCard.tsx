@@ -1413,6 +1413,7 @@ function AccountBlock({
 }) {
   const isDisabled = account.disabled === true
   const isCooling = account.cooling === true
+  const isDead = account.credentialDead === true
   const cooldownUntil = account.cooldownUntil !== undefined ? Date.parse(account.cooldownUntil) : undefined
   const modelCooldowns = account.modelCooldowns ?? []
 
@@ -1424,9 +1425,14 @@ function AccountBlock({
   // knowable from here. `balanced` draws at random, `round-robin` walks a
   // cursor, and the old flag only ever meant "highest-priority eligible" —
   // which is not the same thing, and did not account for disabled accounts.
-  const tag = isCooling
-    ? { text: t?.('row.cooling') ?? 'Cooling', cls: 'dsm-workbuddy-xdpool-account-tag dsm-workbuddy-xdpool-account-tag-cooling' }
-    : null
+  //
+  // A rejected sign-in outranks "cooling": a cooldown lifts on its own, this
+  // one needs the user to sign in again, so it is the more useful thing to say.
+  const tag = isDead
+    ? { text: t?.('row.credentialDeadTag') ?? 'Sign-in rejected', cls: 'dsm-workbuddy-xdpool-account-tag dsm-workbuddy-xdpool-account-tag-dead' }
+    : isCooling
+      ? { text: t?.('row.cooling') ?? 'Cooling', cls: 'dsm-workbuddy-xdpool-account-tag dsm-workbuddy-xdpool-account-tag-cooling' }
+      : null
 
   return (
     <div className={isDisabled ? 'dsm-workbuddy-xdpool-account dsm-workbuddy-xdpool-account-off' : 'dsm-workbuddy-xdpool-account'}>
@@ -1476,6 +1482,11 @@ function AccountBlock({
                 {' · '}
                 {t?.('row.cooldownHits', { hits: account.rateLimitHits ?? 0 })
                   ?? `${account.rateLimitHits ?? 0} hit(s)`}
+              </span>
+            : null}
+          {isDead
+            ? <span className="dsm-workbuddy-xdpool-account-meta dsm-workbuddy-xdpool-account-meta-dead">
+                {t?.('row.credentialDeadHint') ?? 'Sign in again in the WorkBuddy desktop app to restore it'}
               </span>
             : null}
           {modelCooldowns.length > 0
@@ -1707,7 +1718,18 @@ function AccountStats({
           {t?.('row.creditsPackages') ?? 'Credit packages'}
         </span>
         {account.creditsError !== undefined
-          ? <span className="dsm-workbuddy-xdpool-panel-error">{account.creditsError}</span>
+          // The upstream error is a full English paragraph (it explains HOW to
+          // recover). Printed inline it blew the panel up to several lines and
+          // pushed "Total" off screen, so the panel shows a short marker and the
+          // full text lives in the tooltip / title attribute.
+          ? <span
+              className={`dsm-workbuddy-xdpool-panel-error${account.credentialDead === true ? ' dsm-workbuddy-xdpool-panel-error-dead' : ''}`}
+              title={account.creditsError}
+            >
+              {account.credentialDead === true
+                ? t?.('row.credentialDead') ?? 'Sign-in rejected'
+                : t?.('row.creditsError') ?? 'credits unavailable'}
+            </span>
           : packages.length === 0
             ? <span className="dsm-workbuddy-xdpool-panel-empty">–</span>
             : <ul className="dsm-workbuddy-xdpool-packages">
