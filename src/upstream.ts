@@ -80,8 +80,22 @@ export interface WorkBuddyUpstreamModel {
  * An explicit free-ish tag still counts when one does appear, so a future
  * gateway that starts tagging them keeps working either way.
  */
+// The badge parser lives in its own module because `client/PoolCard.tsx` needs
+// it too and cannot import this file — that would pull the whole HTTP client
+// into the browser bundle. Re-exported here so every server-side caller keeps a
+// single import site, and there is exactly ONE parser to keep in sync.
+export { parseBadgeTags, hasFreeBadge, badgeLabels, BADGE_TAG_PREFIX } from './badges.ts'
+export type { WorkBuddyBadge } from './badges.ts'
+
+import { hasFreeBadge } from './badges.ts'
+
+
+
 export function isFreeModel(model: Pick<WorkBuddyUpstreamModel, 'creditMultiplier' | 'tags'>): boolean {
   if (model.tags?.some(tag => tag === 'free' || tag === 'limited-free')) return true
+  // The CN roster ALSO volunteers this, as `badge:限时免费:#FF0000`, so a
+  // gateway that badges a model free without pricing it at zero still counts.
+  if (hasFreeBadge(model.tags)) return true
   return model.creditMultiplier === 0
 }
 

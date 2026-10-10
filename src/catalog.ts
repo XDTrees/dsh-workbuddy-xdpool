@@ -8,6 +8,7 @@
  * @module dsh-workbuddy-xdpool/catalog
  */
 
+import { BADGE_TAG_PREFIX } from './badges.ts'
 import type { WorkBuddyUpstreamModel } from './upstream.ts'
 import type { PoolWebCatalogSource } from './status-paths.ts'
 
@@ -47,16 +48,17 @@ export interface WorkBuddyModelInfo {
  * which is what turns on the free badge.
  */
 export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
-  { id: 'auto', name: 'Auto', contextWindow: 256_000, maxOutputTokens: 32_000, supportsImages: true },
-  { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.29 },
-  { id: 'hy3', name: 'Hy3', contextWindow: 192_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0 },
+  { id: 'auto', name: 'Auto', contextWindow: 256_000, maxOutputTokens: 32_000, supportsImages: true, tags: ['craft'] },
+  { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 960_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.29, tags: ['craft', 'badge:夜间免费:#FF0000'] },
+  { id: 'hy3', name: 'Hy3', contextWindow: 192_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0, tags: ['craft', 'badge:限时免费:#FF0000'] },
   { id: 'hy3-x', name: 'Hy3', contextWindow: 192_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.05 },
+  { id: 'space-bunny', name: 'Space-Bunny', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.08 },
   { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.11 },
   { id: 'deepseek-v4-pro', name: 'Deepseek-V4-Pro', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, multiplier: 0.51 },
   { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true },
   { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.79 },
   { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, maxOutputTokens: 131_072, supportsImages: true, multiplier: 0.06 },
-  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.79 },
+  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.79, tags: ['craft', 'badge:夜间折扣:#1E90FF'] },
   { id: 'glm-5.1', name: 'GLM-5.1', contextWindow: 200_000, maxOutputTokens: 48_000, supportsImages: false, multiplier: 0.79 },
   { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.71 },
   { id: 'kimi-k3-1', name: 'Kimi-K3', contextWindow: 1_000_000, maxOutputTokens: 32_000, supportsImages: true, multiplier: 1.62 },
@@ -66,9 +68,61 @@ export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
   { id: 'minimax-m3', name: 'MiniMax-M3', contextWindow: 512_000, maxOutputTokens: 64_000, supportsImages: true, multiplier: 0.25 },
 ]
 
+/** Which gateway a catalog describes. Mirrors `WorkBuddyRegion` in `upstream.ts`. */
+export type CatalogRegion = 'cn' | 'global'
+
+/**
+ * The static table to fall back to when the international gateway is unreachable.
+ *
+ * Derived from {@link FALLBACK_WORKBUDDY_MODELS} by stripping the domestic
+ * `badge:*` tags rather than hand-written, and that is a CORRECTION rather than
+ * a new feature: both regions have always shared one table, but the CN-only
+ * campaign wording (`限时免费` / `夜间免费` / `夜间折扣`) rode along into the
+ * international picker, advertising a promotion that gateway does not run.
+ *
+ * Now that those badges are parsed and actually SHOWN, the leak would be
+ * visible on every global row instead of sitting inert in a tag array — which
+ * is exactly the "invented a discount nobody gets" failure this plugin must not
+ * have. The rest of each row is left untouched, preserving the pre-existing
+ * behaviour that a global user without a reachable gateway sees the shared
+ * roster rather than an empty picker.
+ *
+ * Deliberately NOT a separate global roster of its own: only the multiplier and
+ * context window were captured from `www.workbuddy.ai`, so inventing
+ * `maxOutputTokens` / `supportsImages` for 25 rows would put fabricated fields in
+ * front of the user — strictly worse than the shared list it replaces.
+ */
+const FALLBACK_WORKBUDDY_MODELS_GLOBAL: readonly WorkBuddyModelInfo[] = FALLBACK_WORKBUDDY_MODELS.map(
+  model => {
+    const tags = (model.tags ?? []).filter(tag => !tag.startsWith(BADGE_TAG_PREFIX))
+    if (tags.length === (model.tags?.length ?? 0)) return model
+    return { ...model, ...(tags.length === 0 ? {} : { tags }) }
+  },
+)
+
+/** The static fallback table for one region. Defaults to `cn`. */
+export function fallbackModelsFor(region: CatalogRegion = 'cn'): readonly WorkBuddyModelInfo[] {
+  return region === 'global' ? FALLBACK_WORKBUDDY_MODELS_GLOBAL : FALLBACK_WORKBUDDY_MODELS
+}
+
 /** Live catalog with a static fallback behind it. */
 export class WorkBuddyCatalog {
-  private models: readonly WorkBuddyModelInfo[] = FALLBACK_WORKBUDDY_MODELS
+  /**
+   * Which gateway this catalog serves, and therefore which static table it falls
+   * back to.
+   *
+   * Optional in the constructor so every existing `new WorkBuddyCatalog()`
+   * (tests, and the plugin's own default wiring) keeps compiling; it defaults to
+   * `cn` because that is the table this plugin has always shipped.
+   */
+  private readonly region: CatalogRegion
+
+  private models: readonly WorkBuddyModelInfo[]
+
+  constructor(region: CatalogRegion = 'cn') {
+    this.region = region
+    this.models = fallbackModelsFor(region)
+  }
   private listeners = new Set<() => void>()
   /** User's model selection. Empty object = follow the catalog unfiltered. */
   private selection: ModelSelection = {}
@@ -124,7 +178,7 @@ export class WorkBuddyCatalog {
 
   /** Restore the static fallback, e.g. when the upstream stops answering. */
   reset(): void {
-    this.models = FALLBACK_WORKBUDDY_MODELS
+    this.models = fallbackModelsFor(this.region)
     this.source = 'fallback'
     this.notify()
   }
@@ -179,7 +233,7 @@ export class WorkBuddyCatalog {
 
   /** Replace the catalog from the live upstream list; keeps the fallback if empty. */
   updateFromUpstream(models: readonly WorkBuddyUpstreamModel[]): void {
-    this.update(catalogFromUpstream(models))
+    this.update(catalogFromUpstream(models, this.region))
     this.source = 'live'
     this.lastUpdatedAt = new Date().toISOString()
     this.lastError = undefined
@@ -230,8 +284,17 @@ export function toModelInfo(model: WorkBuddyUpstreamModel): WorkBuddyModelInfo {
   }
 }
 
-/** Map the live upstream list, falling back to the static list when empty. */
-export function catalogFromUpstream(models: readonly WorkBuddyUpstreamModel[]): readonly WorkBuddyModelInfo[] {
-  if (models.length === 0) return FALLBACK_WORKBUDDY_MODELS
+/**
+ * Map the live upstream list, falling back to the static list when empty.
+ *
+ * `region` only chooses WHICH static table an empty list falls back to. A
+ * non-empty list is the gateway's own answer for whichever gateway was asked,
+ * so there is nothing region-specific left to apply to it.
+ */
+export function catalogFromUpstream(
+  models: readonly WorkBuddyUpstreamModel[],
+  region: CatalogRegion = 'cn',
+): readonly WorkBuddyModelInfo[] {
+  if (models.length === 0) return fallbackModelsFor(region)
   return models.map(toModelInfo)
 }

@@ -189,3 +189,43 @@ describe('the rule table stays honest', () => {
     }
   })
 })
+
+describe('a gateway free badge counts as free right now', () => {
+  // Measured on the CN roster: `hy4-preview` is priced `x0.29` around the clock
+  // while carrying `badge:限时免费:#FF0000`. The badge is the gateway
+  // volunteering the fact about its OWN model — the same authority as the
+  // multiplier — so it has to reach the sorter too.
+  const BADGED = { id: 'hy4-preview', multiplier: 0.29, tags: ['craft', 'badge:限时免费:#FF0000'] }
+  // `glm-5.2` is `x0.79` with `badge:夜间折扣`: a promotion, but still paid.
+  const DISCOUNTED = { id: 'glm-5.2', multiplier: 0.79, tags: ['craft', 'badge:夜间折扣:#1E90FF'] }
+
+  it('sorts to the top even though the price is not zero', () => {
+    // Without this the row carried a badge the user could read while sitting
+    // below cheaper paid models — the badge and the order contradicting each
+    // other.
+    expect(promoStatusFor(BADGED, at(12))?.kind).toBe('free')
+    expect(isFreeNow(BADGED, at(12))).toBe(true)
+  })
+
+  it('holds on both gateways, because the gateway describes its own model', () => {
+    // Region-neutral for the same reason the multiplier check is: the CN rules
+    // are regional because THEY are domestic campaigns. A badge is not a rule
+    // this plugin invented — applying a region filter to it could only ever
+    // hide something the gateway itself declared.
+    expect(promoStatusFor(BADGED, at(12), 'global')?.kind).toBe('free')
+    expect(isFreeNow(BADGED, at(12), 'global')).toBe(true)
+  })
+
+  it('never promotes a discount badge to free', () => {
+    // `夜间折扣` still costs credits at this hour. Reporting it as free would
+    // change what the user spends, which is the one error this plugin must not
+    // make — so the badge text is still SHOWN, just not counted as free.
+    expect(promoStatusFor(DISCOUNTED, at(12))?.kind).not.toBe('free')
+    expect(isFreeNow(DISCOUNTED, at(12))).toBe(false)
+  })
+
+  it('leaves an ordinary paid row alone', () => {
+    expect(isFreeNow({ id: 'glm-5.3', multiplier: 0.79 }, at(12))).toBe(false)
+    expect(isFreeNow({ id: 'glm-5.3', multiplier: 0.79, tags: [] }, at(12))).toBe(false)
+  })
+})

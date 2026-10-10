@@ -40,6 +40,7 @@ import { DEFAULT_AUTOMATION_HOURS } from '../status-paths.ts'
 import { POOL_PLUGIN_ICON } from './icon.ts'
 import { POOL_CARD_CSS } from './styles.ts'
 import { isFreeNow, promoStatusFor } from '../promo.ts'
+import { badgeLabels, freeBadgeKind } from '../badges.ts'
 import { paidAlternativeFor } from '../siblings.ts'
 import type { PaidSibling } from '../siblings.ts'
 import type { WorkBuddyPoolSettingsKey } from './locales.ts'
@@ -311,15 +312,28 @@ function tagFor(
   model: PoolWebModel,
   now: Date,
   region: 'cn' | 'global',
-): 'free' | 'limited' | 'night' | undefined {
+): 'free' | 'limited' | 'night' | 'badge' | undefined {
   const tags = model.tags ?? []
   const promo = promoStatusFor(model, now, region)
   // A currently-active window outranks a bare multiplier: "free until 08:00" is
   // the more useful fact, and it is the one that expires.
   if (promo?.kind === 'night') return 'night'
-  if (tags.includes('free') || model.multiplier === 0) return 'free'
+  // Free-ness is decided in ONE place (`freeBadgeKind`) because the adapter
+  // builds the same judgement for the model picker, and the two used to drift:
+  // the picker read `hasFreeBadge` and collapsed the gateway's
+  // `badge:限时免费` into a flat `row.free`, throwing away the half that expires.
+  // Sorting is unaffected — `promoStatusFor` reads the same badge and reports it
+  // as free-right-now.
+  const freeKind = freeBadgeKind(model)
+  if (freeKind === 'badge') return 'badge'
+  if (freeKind === 'generic') return 'free'
   if (tags.includes('limited-free')) return 'limited'
   if (tags.includes('night-discount')) return 'night'
+  // Any OTHER gateway badge: show ITS text, because it knows about promotions
+  // this plugin has no rule for (`badge:夜间折扣` on `glm-5.2`). Deliberately
+  // AFTER the free checks — a discount still costs credits, so it must not read
+  // as free, yet the upstream already wrote the label a user should see.
+  if (badgeLabels(tags).length > 0) return 'badge'
   return undefined
 }
 
@@ -1907,7 +1921,11 @@ function ModelRow({
       : tag === 'night'
         ? (t?.('row.nightFreeNow', { time: `${String(promo?.kind === 'night' ? promo.untilHour : 0).padStart(2, '0')}:00` })
             ?? 'free until 08:00')
-        : null
+        : tag === 'badge'
+          // Upstream text, not a translated label: the gateway authored it, and
+          // these badges are already written in the user's language.
+          ? (badgeLabels(model.tags).join(' · ') || null)
+          : null
   /**
    * The "cheaper later" hint: the model is on a promotion but the window is
    * closed. Deliberately NOT a "free" badge — it costs credits at this moment,

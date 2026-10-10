@@ -24,6 +24,8 @@
  * @module dsh-workbuddy-xdpool/promo
  */
 
+import { hasFreeBadge } from './badges.ts'
+
 /** A model id prefix a rule applies to, and the window it is free in. */
 export interface PromoRule {
   /**
@@ -145,13 +147,20 @@ function windowEndHour(rule: PromoRule, hour: number): number | undefined {
  * roster would invent a discount that gateway does not offer.
  */
 export function promoStatusFor(
-  model: { id: string; multiplier?: number },
+  model: { id: string; multiplier?: number; tags?: readonly string[] },
   now: Date = new Date(),
   region: 'cn' | 'global' = 'cn',
 ): PromoStatus {
   // A genuinely zero-price model is free at every hour; no window applies.
   // This is upstream truth, so it holds on BOTH gateways and is region-neutral.
   if (model.multiplier === 0) return { kind: 'free' }
+  // A second, equally upstream-authored free signal: the gateway badging a model
+  // `限时免费` while still pricing it at `x0.29` (observed on the CN roster).
+  // Without this the row sorted as an ordinary paid model — a badge the user
+  // could read, contradicted by where the row sat in the list. Region-neutral
+  // for the same reason as the multiplier: the gateway is volunteering the fact
+  // about its OWN model, so there is nothing to apply a domestic rule on top of.
+  if (hasFreeBadge(model.tags)) return { kind: 'free' }
 
   for (const rule of PROMO_RULES) {
     if (rule.region !== region) continue
@@ -178,7 +187,7 @@ export function promoStatusFor(
  * credit-priced model above cheaper ones would misrepresent the list.
  */
 export function isFreeNow(
-  model: { id: string; multiplier?: number },
+  model: { id: string; multiplier?: number; tags?: readonly string[] },
   now: Date = new Date(),
   region: 'cn' | 'global' = 'cn',
 ): boolean {

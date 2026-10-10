@@ -18,6 +18,7 @@ import { resolveImageAttachmentAccess, resolveRetryPolicy } from '@deepseek-ai/d
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { Context } from '@deepseek-ai/cordis'
+import { badgeLabels, shouldSpellOutFree } from './badges.ts'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
 import type { WorkBuddyShim } from './shim.ts'
 
@@ -127,14 +128,35 @@ function displaySuffix(info: WorkBuddyModelInfo): string | undefined {
   // `multiplier: 0` is the gateways' own spelling of "free" (`credits:
   // "x0.00"`), so it prints as the free badge instead of "x0.00" — which read
   // as a zero-cost rate and carried no promo label at all.
-  if (info.multiplier === 0) {
+  //
+  // `shouldSpellOutFree` suppresses that when the gateway ALSO badged the row:
+  // `hy3` arrives as `multiplier: 0` AND `badge:限时免费`, and emitting both
+  // rendered the one fact twice ("免费 · 限时免费"). The gateway's own wording is
+  // the more informative of the two, so it wins — and the badge loop below
+  // supplies it.
+  if (shouldSpellOutFree(info)) {
     parts.push('免费')
-  } else if (typeof info.multiplier === 'number' && Number.isFinite(info.multiplier)) {
+  } else if (
+    // The `!== 0` guard is load-bearing, not redundant: a zero-priced row that
+    // carries a badge falls through BOTH branches, and without the guard it
+    // would print the bare rate "x0.00" that the badge exists to replace.
+    info.multiplier !== 0
+    && typeof info.multiplier === 'number'
+    && Number.isFinite(info.multiplier)
+  ) {
     parts.push(`x${info.multiplier.toFixed(2)}`)
   }
   for (const tag of info.tags ?? []) {
     const label = TAG_LABEL[tag]
     if (label !== undefined && !parts.includes(label)) parts.push(label)
+  }
+  // The gateway ALSO writes promotions into `tags` as `badge:<label>:#RRGGBB`,
+  // which TAG_LABEL above never matched, so a model the gateway had explicitly
+  // marked as promoted used to render like any paid one. Shown verbatim: the
+  // label is already the string a user should read, and translating it here
+  // would need a table that goes stale the first time a badge is reworded.
+  for (const label of badgeLabels(info.tags)) {
+    if (!parts.includes(label)) parts.push(label)
   }
   return parts.length === 0 ? undefined : parts.join(DISPLAY_SEPARATOR)
 }

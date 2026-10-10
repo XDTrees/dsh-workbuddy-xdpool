@@ -1709,9 +1709,21 @@ interface WorkBuddyModelInfo {
  * which is what turns on the free badge.
  */
 export declare const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[];
+/** Which gateway a catalog describes. Mirrors `WorkBuddyRegion` in `upstream.ts`. */
+type CatalogRegion = 'cn' | 'global';
 /** Live catalog with a static fallback behind it. */
 export declare class WorkBuddyCatalog {
+  /**
+   * Which gateway this catalog serves, and therefore which static table it falls
+   * back to.
+   *
+   * Optional in the constructor so every existing `new WorkBuddyCatalog()`
+   * (tests, and the plugin's own default wiring) keeps compiling; it defaults to
+   * `cn` because that is the table this plugin has always shipped.
+   */
+  private readonly region;
   private models;
+  constructor(region?: CatalogRegion);
   private listeners;
   /** User's model selection. Empty object = follow the catalog unfiltered. */
   private selection;

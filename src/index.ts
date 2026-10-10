@@ -453,8 +453,8 @@ export function createCore(logger?: { warn(...args: unknown[]): void; info?(...a
   const client = new WorkBuddyUpstreamClient()
   const pool = new WorkBuddyAccountPool({ ...logger === undefined ? {} : { logger }, client })
   const catalogs = {
-    cn: new WorkBuddyCatalog(),
-    global: new WorkBuddyCatalog(),
+    cn: new WorkBuddyCatalog('cn'),
+    global: new WorkBuddyCatalog('global'),
   } as const
   // The scheduler is assembled here but stays inert until `start()`: the CLI and
   // the tests both build a core without wanting background traffic.
